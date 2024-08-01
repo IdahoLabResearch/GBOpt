@@ -29,6 +29,13 @@ class GBMaker:
 
         self.generate_left_grain()
         self.generate_right_grain()
+        self.box_dims = np.array(
+            [
+                [-self.vacuum_thickness, 2*self.grain_xdim + self.vacuum_thickness],
+                [0, self.grain_ydim],
+                [0, self.grain_zdim]
+            ]
+        )
         # self.generate_gb_grain()
 
     def get_interplanar_spacing(self):
@@ -109,13 +116,14 @@ class GBMaker:
             atoms,
             [self.grain_xdim, 0, 0, 2*self.grain_xdim, self.grain_ydim + 1, self.grain_zdim + 1])
 
-    def write_lammps(self, file_name, autogen_positions=True):
-        if autogen_positions:
-            # Generate concatenated positions
-            self.positions = np.vstack(
-                [self.left_grain, self.right_grain])
-            self.box_xmin = - self.vacuum_thickness
-            self.box_xmax = 2*self.grain_xdim + self.vacuum_thickness
+    def write_lammps(self, positions, box_sizes, file_name):
+        """
+        Writes the atom positions with the given box dimensions to a LAMMPS input file.
+        :param np.ndarray positions: The positions of the atoms.
+        :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
+            each of the x, y, and z dimensions
+        :param str filename: The filename to save the data
+        """
 
         # Write LAMMPS data file
         with open(file_name, 'w') as fdata:
@@ -124,27 +132,26 @@ class GBMaker:
 
             # --- Header ---#
             # Specify number of atoms and atom types
-            fdata.write('{} atoms\n'.format(len(self.positions)))
+            fdata.write('{} atoms\n'.format(len(positions)))
             fdata.write('{} atom types\n'.format(1))
             # Specify box dimensions
-            # fdata.write('{} {} xlo xhi\n'.format(0,  box_max[0]))
-            fdata.write('{} {} xlo xhi\n'.format(self.box_xmin, self.box_xmax))
-            fdata.write('{} {} ylo yhi\n'.format(0, self.grain_ydim))
-            fdata.write('{} {} zlo zhi\n'.format(0, self.grain_zdim))
+            fdata.write('{} {} xlo xhi\n'.format(
+                box_sizes[0][0], box_sizes[0][1]))
+            fdata.write('{} {} ylo yhi\n'.format(
+                box_sizes[1][0], box_sizes[1][1]))
+            fdata.write('{} {} zlo zhi\n'.format(
+                box_sizes[2][0], box_sizes[2][1]))
             fdata.write('\n')
 
             # Atoms section
             fdata.write('Atoms\n\n')
 
             # Write each position
-            for i, pos in enumerate(self.positions):
+            for i, pos in enumerate(positions):
                 fdata.write('{} 1 {} {} {}\n'.format(i+1, *pos))
 
     def run_optimization(self):
         print(self.ID)
-        # create_lammps_script()
-        # run_lammps_script()
-        # update_GB()
 
 
 if __name__ == '__main__':
@@ -152,11 +159,3 @@ if __name__ == '__main__':
     G = GBMaker(lattice_parameter=3.61, gb_thickness=0.0,
                 misorientation=[theta, 0, 0], repeat_factor=4)
     G.run_optimization()
-    # for (i, dy) in enumerate(np.arange(-G.spacing['y'], G.spacing['y'],
-    #                                    0.1*G.spacing['y'])):
-    #     # First we have to reset the right grain position to zero displacement
-    #     G.generate_right_grain()
-    #     # Apply displacement
-    #     G.translate_right_grain(dy=dy, dz=0.0)
-    #     # Save the grain structure
-    #     G.write_lammps('test_CSL_dy_'+str(i+1)+'.data')
