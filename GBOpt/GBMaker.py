@@ -1,127 +1,345 @@
+import copy
 import math
+import warnings
+from fractions import Fraction
+from numbers import Number
+from typing import Any, Tuple, Union
 
 import numpy as np
-from scipy.spatial import transform
+from scipy.spatial.transform import Rotation
 
 from GBOpt.UnitCell import UnitCell
 
 
+class GBMakerError(Exception):
+    """Base class for Exceptions in the GBMaker class."""
+    pass
+
+
+class GBMakerTypeError(GBMakerError):
+    """Exception raised when an invalid type is assigned to a GBMaker attribute."""
+    pass
+
+
+class GBMakerValueError(GBMakerError):
+    """Exception raised when an invalid value is assigned to a GBMaker attribute."""
+    pass
+
+
 class GBMaker:
+    """
+    Class to create a GB structure based on user defined parameters. The GB normal is
+    aligned along the x-axis.
 
-    def __init__(self, lattice_parameter, structure, gb_thickness,
-                 misorientation, repeat_factor=5, gb_id=0):
-        """
-        Class to create a GB structure based on user defined parameters.
-        The GB normal is aligned along the x-axis.
-        :param float lattice_parameter: Crystal lattice parameter (A)
-        :param str structure: Crystal structure string ['fcc', 'bcc', 'sc', 'diamond',
-            'fluorite', 'zincblende']
-        :param float gb_thickness: The width of the GB region (A)
-        :param np.ndarray misorientation: Misorientation angles (alpha, beta, gamma,
-            theta,phi)
-        """
-        self.grain_xdim = 60  # Default value, can be changed in the future
-        self.vacuum_thickness = 10   # Default value, can be changed in the future
-        self.ID = gb_id
-        self.a = lattice_parameter
-        self.misorientation = np.asarray(misorientation)
-        self.gb_thickness = gb_thickness
-        self.structure = structure
-        self.repeat_factor = repeat_factor
-        self.spacing = self.get_interplanar_spacing()
-        self.grain_ydim = self.repeat_factor*self.spacing['y']
-        self.grain_zdim = self.repeat_factor*self.spacing['z']
+    :param a0: Crystal lattice parameter (Angstroms).
+    :param structure: Crystal structure string ['fcc', 'bcc', 'sc', 'diamond',
+        'fluorite', 'rocksalt', 'zincblende'].
+    :param gb_thickness: The width of the GB region (Angstroms).
+    :param misorientation: Misorientation angles (alpha, beta, gamma, theta, phi) in
+        radians.
+    :param repeat_factor: The number of times to repeat the unit cell in the y and z
+        directions, optional, defaults to 5.
+    :param x_dim: Size of the grain in the x dimension (Angstroms), optional, defaults
+        to 60.
+    :param vacuum: Thickness of the vacuum region around the grains in the x dimension
+        (Angstroms), optional, defaults to 10.
+    :param gb_id: The identifier for the created GB system, optional, defaults to 0.
+    """
 
-        self.unit_cell = UnitCell()
-        self.unit_cell.init_by_structure(self.structure, self.a)
-        self.radius = lattice_parameter * self.unit_cell.radius
-        self.generate_left_grain()
-        self.generate_right_grain()
-        self.box_dims = np.array(
+    def __init__(self, a0: float, structure: str, gb_thickness: float,
+                 misorientation: np.ndarray, *, repeat_factor: int = 5,
+                 x_dim: float = 60, vacuum: float = 10, gb_id: int = 1):
+        self.__a0 = self.__validate(a0, Number, 'a0', positive=True)
+        self.__structure = self.__validate(structure, str, 'structure')
+        self.__gb_thickness = self.__validate(
+            gb_thickness, Number, 'gb_thickness', positive=True)
+        self.__assign_orientations(self.__validate(np.asarray(
+            misorientation), np.ndarray, 'misorientation', expected_length=5))
+        self.__repeat_factor = self.__validate(
+            repeat_factor, int, 'repeat_factor', positive=True)
+        self.__x_dim = self.__validate(x_dim, Number, 'x_dim', positive=True)
+        self.__vacuum_thickness = self.__validate(
+            vacuum, Number, 'vacuum_thickness', positive=True)
+        self.__id = self.__validate(gb_id, int, 'id', positive=True)
+
+        self.__unit_cell = self.__init_unit_cell()
+        self.__spacing = self.__calculate_periodic_spacing()  # Dict of periodic distances
+        self.__y_dim = self.__repeat_factor*self.__spacing['y']
+        self.__z_dim = self.__repeat_factor*self.__spacing['z']
+
+        self.__radius = a0 * self.__unit_cell.radius  # atom radius
+        self.__generate_gb()
+        self.__box_dims = self.__calculate_box_dimensions()
+
+    def __assign_orientations(self, misorientation: np.ndarray) -> None:
+        """
+        Private method to separate the misorientation and inclination from the passed in
+        misorientation array.
+
+        :param misorientation: Array containing the misorientation and inclination Euler
+            angles. Misorientation is the first three, and inclination is the last two.
+            Note that misorientation is in the ZXZ Euler angle format.
+        """
+        self.__misorientation = misorientation[:3]
+        self.__inclination = misorientation[3:]
+
+    def __init_unit_cell(self) -> UnitCell:
+        """
+        Initializes the unit cell.
+
+        :return: The unit cell initialized by structure.
+        """
+        unit_cell = UnitCell()
+        unit_cell.init_by_structure(self.__structure, self.__a0)
+        return unit_cell
+
+    def __calculate_box_dimensions(self) -> np.ndarray:
+        """
+        Private method to calculate the box dimensions
+
+        :return: The 3x2 array containing xlo, xhi, ylo, yhi, zlo, and zi.
+        """
+        return np.array(
             [
-                [-self.vacuum_thickness, 2*self.grain_xdim + self.vacuum_thickness],
-                [0, self.grain_ydim],
-                [0, self.grain_zdim]
+                [-self.__vacuum_thickness, 2 *
+                    self.__x_dim + self.__vacuum_thickness],
+                [0, self.__y_dim],
+                [0, self.__z_dim]
             ]
         )
 
-    def get_interplanar_spacing(self):
-        """Currently only works for CSL with just misorientation,
-        inclination dependence needs to be implemented"""
-        R = transform.Rotation.from_euler(
-            'ZXZ', self.misorientation, degrees=False).as_matrix()
-        print(R)
+    def __generate_gb(self) -> None:
+        """
+        Private method to calculate the left grain, right grain, and whole GB system
+        """
+        self.__left_grain = self.__generate_left_grain()
+        self.__right_grain = self.__generate_right_grain()
+        self.__gb = np.vstack((self.__left_grain, self.__right_grain))
 
-        # Reciprocal lattice vectors for FCC
-        # TODO: Make this an attribute related to the unit cell!
-        G_vectors = self.unit_cell.reciprocal
-        # 1 / self.a * \
-        #     np.array([[1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
-        #              [1.0, -1.0, 1.0], [1.0, 1.0, -1.0]])
+    def __approximate_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
+        """
+        Approximate the matrix in integer format given the original matrix and
+        the desired precision.
 
-        # Transform reciprocal lattice vectors
-        G_prime_vectors = np.dot(G_vectors, R).T
-        # Calculate lattice plane spacing along x, y, z
-        spacing = {}
-        for i, axis in enumerate(['x', 'y', 'z']):
-            projection = np.abs(G_prime_vectors[i])
-            spacing[axis] = 1 / projection.min()
+        :param m: The matrix to approximate
+        :param precision: Decimal precision to use during calculations, defaults to 5
+        :return: Integer approximation of the rotation matrix m
+        """
+
+        # First, convert each value to a fraction. Limit the denominator according to
+        # the desired precision.
+        m_fraction = np.array(
+            [[Fraction(i).limit_denominator(10**precision)
+              for i in row] for row in m]
+        )
+        # Extract the denominators of each value
+        denoms = np.array([[i.denominator for i in row] for row in m_fraction])
+
+        # Multiplying by the least common multiple for the denominators in a row-wise
+        # manner gives an integer representation of m
+        scale_factors = np.array([math.lcm(*row) for row in denoms])
+
+        # Scale each row by the LCM of the denominators
+        scaled_m = np.array(
+            [
+                [int(i) for i in row * scale]
+                for row, scale in zip(m_fraction, scale_factors)
+            ],
+            dtype=int,
+        )
+
+        # This might occassionally result in an integer matrix that can be reduced.
+        # This reduction occurs by determining the GCD of each row and dividing the row
+        # by that value.
+        gcds = [math.gcd(*row) for row in scaled_m]
+
+        approx_m = np.array(
+            [row / s for row, s in zip(scaled_m, gcds)], dtype=int)
+        min_val = np.min(abs(approx_m))
+        # TODO: Figure out how this value relates to the threshold parameter in
+        # get_periodic_spacing
+        if min_val > 100:
+            warnings.warn("Resulting boundary is non-periodic.")
+        return approx_m
+
+    def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
+        """
+        Calculate the periodic spacing based on the rotation matrix.
+        TODO: Implement inclination dependence. Currently only implements
+        misorientation. Part of this will require minimizing the strain between the two
+        GBs.
+
+        :param threshold: The maximum allowed value that any spacing can take
+        :return: Dict containing the periodic spacing along the 'x', 'y', and 'z'
+            directions for the given misorientation.
+        """
+        if threshold is None:
+            threshold = self.__a0 * 15
+        R = Rotation.from_euler(
+            'ZXZ', self.__misorientation, degrees=False).as_matrix()
+        # R_incl = Rotation.from_euler()
+
+        # approximate the rotation matrix as integers
+        # R_left = R_incl.as_matrix()
+        # R_right = R.as_matrix() - R_incl.as_matrix()
+        # # We store the approximate matrices as objects to allow for large numbers
+        # R_left_approx = self.__approximate_matrix_as_int(R_left).astype(object)
+        # R_right_approx = self.__approximate_matrix_as_int(R_right).astype(object)
+        R_approx = self.__approximate_matrix_as_int(R).astype(object)
+        # The rows of the approximated matrix gives the Miller indices of the directions
+        # that are now aligned along the x, y, and z axes. We calculate the interplanar
+        # spacings using the usual formula: d = a / sqrt(h**2+k**2+l**2)
+        # Note that math.sqrt is used  to take advantage of the lack of a limit on Python
+        # integers
+        interplanar_spacings = self.__a0 / \
+            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2]*row[2])
+                     for row in R_approx])
+
+        # The number of planes before periodicity is the square of the denominator in
+        # the interplanar_spacings calculation above. Thus, the total periodic distance
+        # is going to be (a / d) ** 2 * 2 = a**2 / d
+        # We limit the spacing
+        spacing = {axis: min(val, threshold) for axis, val in zip(
+            ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings)}
+
+        # TODO: compare the spacings from the left and right grain
+
         return spacing
 
-    def get_supercell(self, corners):
-        cells = corners[:, np.newaxis, :] + \
-            self.unit_cell.positions()[np.newaxis, :, :]
-        return cells.reshape(-1, 3)
-
-    def get_points_inside_box(self, points, box_dim):
+    def __generate_left_grain(self) -> np.ndarray:
         """
-        :param np.ndarray points: points to check
-        :param list box_dim: dimensions of box
-                             (x_min,y_min,z_min,x_max,y_max,z_max)
+        Generates the left grain of the GB system.
+
+        :return: 4xn array containing the atom data (type and position) for the left
+            grain.
+        """
+        body_diagonal = np.linalg.norm(
+            [self.__x_dim, self.__y_dim, self.__z_dim])
+        body_diagonal -= body_diagonal % self.__a0
+        X = np.arange(-body_diagonal, body_diagonal, self.__a0)
+
+        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
+        atoms = self.get_supercell(corners)
+
+        return self.__get_points_inside_box(
+            atoms,
+            [0, 0, 0, self.__x_dim, self.__y_dim, self.__z_dim])
+
+    def __generate_right_grain(self) -> np.ndarray:
+        """
+        Generates the right grain of the GB system.
+
+        :return: 4xn array containing the atom data (type and position) for the right
+            grain.
+        """
+        body_diagonal = np.linalg.norm(
+            [2*self.__x_dim, self.__y_dim, self.__z_dim])
+        body_diagonal -= body_diagonal % self.__a0
+        X = np.arange(-body_diagonal, body_diagonal, self.__a0)
+
+        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
+        atoms = self.get_supercell(corners)
+
+        R = Rotation.from_euler(
+            'ZXZ', self.__misorientation, degrees=False).as_matrix()
+        atoms[:, 1:] = np.dot(atoms[:, 1:], R.T)
+
+        atoms[:, 1] += np.amax(self.left_grain[:, 1])
+        return self.__get_points_inside_box(
+            atoms,
+            [self.__x_dim, 0, 0, 2*self.__x_dim, self.__y_dim, self.__z_dim])
+
+    def __get_points_inside_box(self, atoms: np.ndarray, box_dim: np.ndarray) -> np.ndarray:
+        """
+        Selects the lattice points that are inside the given box dimensions.
+
+        :param atoms: Atoms to check. 4xm array containing types and positions.
+        :param box_dim: Dimensions of box (x_min, y_min, z_min, x_max, y_max, z_max).
+        :return: 4xn array containing the Atom positions inside the given box.
         """
         x_min, y_min, z_min, x_max, y_max, z_max = box_dim
-        x_slice = points[np.where(np.logical_and(
-            points[:, 0] >= x_min, points[:, 0] <= x_max))]
+        x_slice = atoms[np.where(np.logical_and(
+            atoms[:, 1] >= x_min, atoms[:, 1] <= x_max))]
         y_slice = x_slice[np.where(np.logical_and(
-            x_slice[:, 1] >= y_min, x_slice[:, 1] < y_max))]
+            x_slice[:, 2] >= y_min, x_slice[:, 2] < y_max))]
         z_slice = y_slice[np.where(np.logical_and(
-            y_slice[:, 2] >= z_min, y_slice[:, 2] <= z_max))]
+            y_slice[:, 3] >= z_min, y_slice[:, 3] < z_max))]
         return z_slice
 
-    def generate_left_grain(self):
-        body_diagonal = np.linalg.norm(
-            [self.grain_xdim, self.grain_ydim, self.grain_zdim])
-        body_diagonal -= body_diagonal % self.a
-        X = np.arange(-body_diagonal, body_diagonal, self.a)
+    def __validate(self, value: Any, expected_types: Union[type, Tuple[type, ...]],
+                   parameter_name: str, *, positive: bool = False, expected_length: int = None):
+        """
+        Private method for validating the values passed in using the setters.
 
-        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.get_supercell(corners)
+        :param value: The value to validate.
+        :param expected_types: Single type or tuple containing the valid types for
+            value.
+        :param parameter_name: The name of the parameter.
+        :param positive: Whether or not the value should be positive (>= 0), optional,
+            defaults to False.
+        :param expected_length: Specific to sequences or arrays. The expected length of
+            the sequence or array, optional, defaults to None.
+        :raises GBMakerTypeError: Exception raised if the type of the value does not
+            match the expected type(s).
+        :raises GBMakerValueError: Exception raised when invalid values are given for
+            the specified parameter.
+        :return: The validated value.
+        """
+        if not isinstance(expected_types, tuple):
+            expected_types = (expected_types,)
+        if not any(isinstance(value, t) for t in expected_types) and not isinstance(value, np.generic):
+            expected_type_names = ', '.join(t.__name__ for t in expected_types)
+            raise GBMakerTypeError(
+                f"{parameter_name} must be of type {expected_type_names}."
+            )
 
-        self.left_grain = self.get_points_inside_box(
-            atoms,
-            [0, 0, 0, self.grain_xdim, self.grain_ydim, self.grain_zdim])
+        if positive and isinstance(value, Number) and value < 0:
+            raise GBMakerValueError(
+                f"{parameter_name} must be a positive value.")
 
-    def generate_right_grain(self):
-        body_diagonal = np.linalg.norm(
-            [2*self.grain_xdim, self.grain_ydim, self.grain_zdim])
-        body_diagonal -= body_diagonal % self.a
-        X = np.arange(-body_diagonal, body_diagonal, self.a)
+        if expected_length is not None and isinstance(value, (list, tuple, np.ndarray)) and len(value) != expected_length:
+            raise GBMakerValueError(
+                f"{parameter_name} must have {expected_length} elements."
+            )
 
-        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.get_supercell(corners)
+        if parameter_name == 'structure' and \
+                value not in \
+                ['fcc', 'bcc', 'sc', 'diamond', 'fluorite', 'rocksalt', 'zincblende']:
+            raise GBMakerValueError(
+                f"{parameter_name} ({value}) must be one of ['fcc', 'bcc', 'sc', " +
+                "'diamond', 'fluorite', 'rocksalt', 'zincblende'].")
+        return value
 
-        R = transform.Rotation.from_euler(
-            'ZXZ', self.misorientation, degrees=False).as_matrix()
-        atoms = np.dot(atoms, R)
+    def update_spacing(self, threshold: float = None) -> None:
+        """
+        Update the periodic spacing based on the rotation matrix and the optional
+        threshold parameter.
 
-        atoms += np.amax(self.left_grain[:, 0])
-        self.right_grain = self.get_points_inside_box(
-            atoms,
-            [self.grain_xdim, 0, 0, 2*self.grain_xdim, self.grain_ydim + 1, self.grain_zdim + 1])
+        :param threshold: The maximum allowed value that any spacing can take
+        """
+        self.__spacing = self.__calculate_periodic_spacing(threshold)
 
-    def write_lammps(self, positions, box_sizes, file_name):
+    def get_supercell(self, corners: np.ndarray) -> np.ndarray:
+        """
+        Generates a supercell of lattice sites.
+
+        :param corners: Array containing the position of the corners of the unit cells.
+        :return: Populated lattice sites based on the unit cell.
+        """
+        # TODO: Implement this using the Atom class
+        atom_data = np.array([[t, x, y, z] for t, (x, y, z) in zip(
+            self.__unit_cell.types(), self.__unit_cell.positions())])
+        translated_positions = (
+            atom_data[:, 1:] + corners[:, np.newaxis, :]).reshape(-1, 3)
+        atom_types_expanded = np.repeat(atom_data[:, 0], len(corners))
+        supercell = np.column_stack(
+            (atom_types_expanded, translated_positions))
+        return supercell
+
+    def write_lammps(self, atoms: np.ndarray, box_sizes: np.ndarray, file_name: str) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
+
         :param np.ndarray positions: The positions of the atoms.
         :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
             each of the x, y, and z dimensions
@@ -135,8 +353,8 @@ class GBMaker:
 
             # --- Header ---#
             # Specify number of atoms and atom types
-            fdata.write('{} atoms\n'.format(len(positions)))
-            fdata.write('{} atom types\n'.format(1))
+            fdata.write('{} atoms\n'.format(len(atoms)))
+            fdata.write('{} atom types\n'.format(len(set(atoms[:, 0]))))
             # Specify box dimensions
             fdata.write('{} {} xlo xhi\n'.format(
                 box_sizes[0][0], box_sizes[0][1]))
@@ -149,16 +367,139 @@ class GBMaker:
             # Atoms section
             fdata.write('Atoms\n\n')
 
-            # Write each position
-            for i, pos in enumerate(positions):
-                fdata.write('{} 1 {} {} {}\n'.format(i+1, *pos))
+            # Write each position. Write the type as an integer.
+            for i, pos in enumerate(atoms):
+                fdata.write('{} {:n} {} {} {}\n'.format(i+1, *pos))
 
-    def run_optimization(self):
-        print(self.ID)
+    # Standard getters and setters. In situations that require it, updates to additional
+    # parameters are automatically taken care of. In all cases, copies of the values
+    # are returned from the getter methods to prevent unintentional updates.
+    @property
+    def a0(self) -> float:
+        return self.__a0
+
+    @a0.setter
+    def a0(self, value: Number):
+        self.__a0 = self.__validate(value, float, "a0", positive=True)
+        self.__unit_cell = self.__init_unit_cell()
+        self.update_spacing()
+
+    @property
+    def structure(self) -> str:
+        return self.__structure
+
+    @structure.setter
+    def structure(self, value: str) -> None:
+        self.__structure = self.__validate(value, str, "structure")
+        self.__unit_cell = self.__init_unit_cell()
+
+    @property
+    def gb_thickness(self) -> float:
+        return self.__gb_thickness
+
+    @gb_thickness.setter
+    def gb_thickness(self, value: float):
+        self.__gb_thickness = self.__validate(
+            value, float, "gb_thickness", positive=True)
+        self.__box_dims = self.__calculate_box_dimensions()
+
+    @property
+    def misorientation(self) -> np.ndarray:
+        return np.hstack((self.__misorientation, self.__inclination))
+
+    @misorientation.setter
+    def misorientation(self, value: np.ndarray):
+        misorientation = self.__validate(
+            value, np.ndarray, "misorientation", expected_length=5)
+        self.__misorientation = misorientation[:3]
+        self.__inclination = misorientation[3:]
+        self.update_spacing()
+
+    @property
+    def repeat_factor(self) -> int:
+        return self.__repeat_factor
+
+    @repeat_factor.setter
+    def repeat_factor(self, value: int):
+        self.__repeat_factor = self.__validate(
+            value, int, "repeat_factor", positive=True)
+        self.__y_dim = self.__repeat_factor*self.__spacing['y']
+        self.__z_dim = self.__repeat_factor*self.__spacing['z']
+        self.__box_dims = self.__calculate_box_dimensions()
+
+    @property
+    def x_dim(self) -> int:
+        return self.__x_dim
+
+    @x_dim.setter
+    def x_dim(self, value: Number):
+        self.__x_dim = self.__validate(value, Number, "x_dim", positive=True)
+        self.__box_dims = self.__calculate_box_dimensions()
+
+    @property
+    def y_dim(self) -> int:
+        return self.__y_dim
+
+    @property
+    def z_dim(self) -> int:
+        return self.__z_dim
+
+    @property
+    def vacuum_thickness(self) -> int:
+        return self.__vacuum_thickness
+
+    @vacuum_thickness.setter
+    def vacuum_thickness(self, value: Number):
+        self.__vacuum_thickness = self.__validate(
+            value, Number, "vacuum_thickness", positive=True)
+        self.__box_dims = self.__calculate_box_dimensions()
+
+    @property
+    def id(self) -> int:
+        return self.__id
+
+    @id.setter
+    def id(self, value: int):
+        self.__id = self.__validate(value, int, "id", positive=True)
+
+    @property
+    def unit_cell(self) -> UnitCell:
+        return copy.deepcopy(self.__unit_cell)
+
+    @property
+    def spacing(self) -> dict:
+        return copy.deepcopy(self.__spacing)
+
+    @property
+    def radius(self) -> float:
+        return self.__radius
+
+    @property
+    def gb(self) -> np.ndarray:
+        return copy.deepcopy(self.__gb)
+
+    @property
+    def left_grain(self) -> np.ndarray:
+        return copy.deepcopy(self.__left_grain)
+
+    @property
+    def right_grain(self) -> np.ndarray:
+        return copy.deepcopy(self.__right_grain)
+
+    @property
+    def box_dims(self) -> np.ndarray:
+        return copy.deepcopy(self.__box_dims)
 
 
 if __name__ == '__main__':
-    theta = math.radians(5)
-    G = GBMaker(lattice_parameter=3.61, gb_thickness=0.0,
-                misorientation=[theta, 0, 0], repeat_factor=4)
-    G.run_optimization()
+    theta = math.radians(36.869898)
+    G = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0,
+                misorientation=[theta, 0, 0, 0, 0], repeat_factor=2)
+    # G = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0,
+    #             misorientation=[1, 0.25, -0.1], repeat_factor=2)
+    G.write_lammps(np.vstack((G.left_grain, G.right_grain)),
+                   G.box_dims, "test1.dat")
+    # G2 = GBMaker(a0=4.08, structure='bcc',
+    #              gb_thickness=0.0, misorientation=[theta, 0, 0], repeat_factor=4)
+    # G2.write_lammps(np.vstack((G2.left_grain, G2.right_grain)),
+    #                 G2.box_dims, "test2.dat")
