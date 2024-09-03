@@ -3,30 +3,38 @@ import math
 import numpy as np
 from scipy.spatial import transform
 
+from GBOpt.UnitCell import UnitCell
+
 
 class GBMaker:
-    def __init__(self, lattice_parameter, gb_thickness,
+
+    def __init__(self, lattice_parameter, structure, gb_thickness,
                  misorientation, repeat_factor=5, gb_id=0):
         """
         Class to create a GB structure based on user defined parameters.
         The GB normal is aligned along the x-axis.
         :param float lattice_parameter: Crystal lattice parameter (A)
+        :param str structure: Crystal structure string ['fcc', 'bcc', 'sc', 'diamond',
+            'fluorite', 'zincblende']
         :param float gb_thickness: The width of the GB region (A)
-        :param np.ndarray misorientation: Misorientation angles
-        (alpha,beta,gamma,theta,phi)
+        :param np.ndarray misorientation: Misorientation angles (alpha, beta, gamma,
+            theta,phi)
         """
         self.grain_xdim = 60  # Default value, can be changed in the future
         self.vacuum_thickness = 10   # Default value, can be changed in the future
         self.ID = gb_id
         self.a = lattice_parameter
-        self.radius = lattice_parameter/2/math.sqrt(2)
         self.misorientation = np.asarray(misorientation)
         self.gb_thickness = gb_thickness
+        self.structure = structure
         self.repeat_factor = repeat_factor
         self.spacing = self.get_interplanar_spacing()
         self.grain_ydim = self.repeat_factor*self.spacing['y']
         self.grain_zdim = self.repeat_factor*self.spacing['z']
 
+        self.unit_cell = UnitCell()
+        self.unit_cell.init_by_structure(self.structure, self.a)
+        self.radius = lattice_parameter * self.unit_cell.radius
         self.generate_left_grain()
         self.generate_right_grain()
         self.box_dims = np.array(
@@ -36,7 +44,6 @@ class GBMaker:
                 [0, self.grain_zdim]
             ]
         )
-        # self.generate_gb_grain()
 
     def get_interplanar_spacing(self):
         """Currently only works for CSL with just misorientation,
@@ -46,9 +53,11 @@ class GBMaker:
         print(R)
 
         # Reciprocal lattice vectors for FCC
-        G_vectors = 1 / self.a * \
-            np.array([[1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
-                     [1.0, -1.0, 1.0], [1.0, 1.0, -1.0]])
+        # TODO: Make this an attribute related to the unit cell!
+        G_vectors = self.unit_cell.reciprocal
+        # 1 / self.a * \
+        #     np.array([[1.0, 1.0, 1.0], [-1.0, 1.0, 1.0],
+        #              [1.0, -1.0, 1.0], [1.0, 1.0, -1.0]])
 
         # Transform reciprocal lattice vectors
         G_prime_vectors = np.dot(G_vectors, R).T
@@ -59,15 +68,9 @@ class GBMaker:
             spacing[axis] = 1 / projection.min()
         return spacing
 
-    def fcc_unit_cell(self, corners):
-        """
-        Returns FCC unit cell coordinates for a lattice
-        lattice constant 'a' - float
-        bottom-left corner coordinate 'left_corner' - numpy array (3,)
-        """
-        unit = np.array([[0.0, 0.0, 0.0],
-                        [0.0, 0.5, 0.5], [0.5, 0.0, 0.5], [0.5, 0.5, 0.0]])
-        cells = corners[:, np.newaxis, :] + self.a*unit[np.newaxis, :, :]
+    def get_supercell(self, corners):
+        cells = corners[:, np.newaxis, :] + \
+            self.unit_cell.positions()[np.newaxis, :, :]
         return cells.reshape(-1, 3)
 
     def get_points_inside_box(self, points, box_dim):
@@ -92,7 +95,7 @@ class GBMaker:
         X = np.arange(-body_diagonal, body_diagonal, self.a)
 
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.fcc_unit_cell(corners)
+        atoms = self.get_supercell(corners)
 
         self.left_grain = self.get_points_inside_box(
             atoms,
@@ -105,7 +108,7 @@ class GBMaker:
         X = np.arange(-body_diagonal, body_diagonal, self.a)
 
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.fcc_unit_cell(corners)
+        atoms = self.get_supercell(corners)
 
         R = transform.Rotation.from_euler(
             'ZXZ', self.misorientation, degrees=False).as_matrix()
