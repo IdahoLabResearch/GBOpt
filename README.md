@@ -3,13 +3,18 @@ GBOpt is a modular Python tool that uses Monte Carlo–based optimization and st
 
 To install, create a new conda environment
 ```
-conda create --name GBOpt
-conda activate GPOpt
+conda create --name GBOpt python
+conda activate GBOpt
 ```
+
+Make sure you are in the GBOpt directory:
+```
+cd ~/projects/GBOpt
+```
+
 
 Then install the dependencies
 ```
-python setup.py build
-python setup.py install
+pip install .
 ```
 
