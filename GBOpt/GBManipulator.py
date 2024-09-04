@@ -347,14 +347,14 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
     Calculates the fingerprint for **atom** as described in Lyakhov *et al.*,
     Computer Phys. Comm. 181 (2010) 1623-1632 (Eq. 4).
 
-    :param atom: The atom we are calculating the fingerprint for.
-    :param neighs: list of Atom containing the neighbors to _atom_.
-    :param NB: The number of atoms of type B neighbor to _atom_.
-    :param V: The volume of the unit cell in angstroms**3.
-    :param Btype: The type of neighbors we are interested in.
-    :param Delta: The discretization length for Rs in angstroms.
-    :param Rmax: The maximum distance from atom to calculate the fingerprint.
-    :return: The vector containing the fingerprint for _atom_.
+    :param np.ndarray atom: The atom we are calculating the fingerprint for.
+    :param np.ndarray neighs: list of Atom containing the neighbors to **atom**.
+    :param int NB: The number of atoms of type B neighbor to **atom**.
+    :param float V: The volume of the unit cell in angstroms**3.
+    :param int Btype: The type of neighbors we are interested in.
+    :param float Delta: The discretization length for Rs in angstroms.
+    :param float Rmax: The maximum distance from atom to calculate the fingerprint.
+    :return: The vector containing the fingerprint for **atom**.
     """
     Rs = np.arange(0, Rmax+Delta, Delta)
 
@@ -383,12 +383,15 @@ def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta
     Calculates the local order parameter following Lyakhov *et al.*, Computer Phys.
     Comm. 181 (2010) 1623-1632 (Eq. 5).
 
-    :param atom: Atom we are calculating the local order for.
-    :param neighs: Neighbors of **atom**.
-    :param Delta: Bin size to calculate the fingerprint vector, optional, defaults
+    :param np.ndarray atom: Atom we are calculating the local order for.
+    :param np.ndarray neighs: Neighbors of **atom**.
+    :param np.ndarray unit_cell_types: The types of the atoms in the unit cell.
+    :param float unit_cell_a0: The lattice parameter.
+    :param int N: The number of atoms in the unit cell.
+    :param float Delta: Bin size to calculate the fingerprint vector, optional, defaults
         to 0.05.
-    :param Rmax: Maximum distance from **atom** to consider as a
-        neighbor to **atom** in angstroms, optional, defaults to 10.
+    :param float Rmax: Maximum distance from **atom** to consider as a neighbor to
+        **atom** in angstroms, optional, defaults to 10.
     :return: The local order parameter for **atom** based on its neighbors.
     """
     local_sum = 0
