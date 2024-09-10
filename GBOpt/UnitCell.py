@@ -1,12 +1,9 @@
-import copy
 import math
-import numbers
-import warnings
-from typing import Sequence
+from typing import Sequence, Tuple, Union
 
 import numpy as np
 
-from GBOpt.Atom import Atom
+from GBOpt import Atom
 
 
 class UnitCellError(Exception):
@@ -25,6 +22,8 @@ class UnitCell:
     Atom positions are given as fractional coordinates. Types start at 1
     """
 
+    __slots__ = ['__unit_cell', '__primitive', '__a0', '__radius', '__reciprocal']
+
     # TODO: Basis might be needed for more complicated structures.
     def __init__(self):
         self.__unit_cell = []
@@ -33,7 +32,7 @@ class UnitCell:
         self.__radius = 0.0
         self.__reciprocal = np.zeros((3, 3))
 
-    def init_by_structure(self, structure: str, a0: float) -> None:
+    def init_by_structure(self, structure: str, a0: float, atoms: Union[str, Tuple[str, ...]]) -> None:
         """
         Initialize the UnitCell by crystal structure.
 
@@ -45,12 +44,14 @@ class UnitCell:
             been implemented.
         """
         self.__a0 = a0
+        if not isinstance(atoms, tuple) and not isinstance(atoms, list):
+            atoms = (atoms,)
         if structure == 'fcc':
             unit_cell = [
-                Atom(1, 1, 0.0, 0.0, 0.0),
-                Atom(2, 1, 0.0, 0.5, 0.5),
-                Atom(3, 1, 0.5, 0.0, 0.5),
-                Atom(4, 1, 0.5, 0.5, 0.0)
+                Atom(atoms[0], 0.0, 0.0, 0.0),
+                Atom(atoms[0], 0.0, 0.5, 0.5),
+                Atom(atoms[0], 0.5, 0.0, 0.5),
+                Atom(atoms[0], 0.5, 0.5, 0.0)
             ]
             self.__radius = math.sqrt(2) * 0.25
             self.__primitive = np.array(
@@ -62,8 +63,8 @@ class UnitCell:
             )
         elif structure == 'bcc':
             unit_cell = [
-                Atom(1, 1, 0.0, 0.0, 0.0),
-                Atom(2, 1, 0.5, 0.5, 0.5)
+                Atom(atoms[0], 0.0, 0.0, 0.0),
+                Atom(atoms[0], 0.5, 0.5, 0.5)
             ]
             self.__radius = math.sqrt(3) * 0.25
             self.__primitive = np.array(
@@ -74,7 +75,7 @@ class UnitCell:
                 ]
             )
         elif structure == 'sc':
-            unit_cell = [Atom(1, 1, 0.0, 0.0, 0.0)]
+            unit_cell = [Atom(atoms[0], 0.0, 0.0, 0.0)]
             self.__radius = 0.5
             # multiply by 2 here since we multiply by half the lattice parameter later
             self.__primitive = 2 * np.array(
@@ -86,14 +87,14 @@ class UnitCell:
             )
         elif structure == 'diamond':
             unit_cell = [
-                Atom(1, 1, 0, 0, 0),
-                Atom(2, 1, 0, 0.5, 0.5),
-                Atom(3, 1, 0.5, 0, 0.5),
-                Atom(4, 1, 0.5, 0.5, 0),
-                Atom(5, 1, 0.25, 0.25, 0.25),
-                Atom(6, 1, 0.75, 0.75, 0.25),
-                Atom(7, 1, 0.75, 0.25, 0.75),
-                Atom(8, 1, 0.25, 0.75, 0.75)
+                Atom(atoms[0], 0, 0, 0),
+                Atom(atoms[0], 0, 0.5, 0.5),
+                Atom(atoms[0], 0.5, 0, 0.5),
+                Atom(atoms[0], 0.5, 0.5, 0),
+                Atom(atoms[0], 0.25, 0.25, 0.25),
+                Atom(atoms[0], 0.75, 0.75, 0.25),
+                Atom(atoms[0], 0.75, 0.25, 0.75),
+                Atom(atoms[0], 0.25, 0.75, 0.75)
             ]
             self.__radius = math.sqrt(3) * 0.125
             self.__primitive = np.array(
@@ -104,19 +105,22 @@ class UnitCell:
                 ]
             )
         elif structure == 'fluorite':
+            if len(atoms) != 2:
+                raise UnitCellValueError(
+                    "The specified crystal structure requires 2 atom types.")
             unit_cell = [
-                Atom(1, 1, 0, 0, 0),
-                Atom(2, 1, 0, 0.5, 0.5),
-                Atom(3, 1, 0.5, 0, 0.5),
-                Atom(4, 1, 0.5, 0.5, 0),
-                Atom(5, 2, 0.25, 0.25, 0.25),
-                Atom(6, 2, 0.25, 0.25, 0.75),
-                Atom(7, 2, 0.25, 0.75, 0.25),
-                Atom(8, 2, 0.25, 0.75, 0.75),
-                Atom(9, 2, 0.75, 0.25, 0.25),
-                Atom(10, 2, 0.75, 0.25, 0.75),
-                Atom(11, 2, 0.75, 0.75, 0.25),
-                Atom(12, 2, 0.75, 0.75, 0.75)
+                Atom(atoms[0], 0, 0, 0),
+                Atom(atoms[0], 0, 0.5, 0.5),
+                Atom(atoms[0], 0.5, 0, 0.5),
+                Atom(atoms[0], 0.5, 0.5, 0),
+                Atom(atoms[1], 0.25, 0.25, 0.25),
+                Atom(atoms[1], 0.25, 0.25, 0.75),
+                Atom(atoms[1], 0.25, 0.75, 0.25),
+                Atom(atoms[1], 0.25, 0.75, 0.75),
+                Atom(atoms[1], 0.75, 0.25, 0.25),
+                Atom(atoms[1], 0.75, 0.25, 0.75),
+                Atom(atoms[1], 0.75, 0.75, 0.25),
+                Atom(atoms[1], 0.75, 0.75, 0.75)
             ]
             self.__radius = math.sqrt(3) * 0.125
             self.__primitive = np.array(
@@ -127,15 +131,19 @@ class UnitCell:
                 ]
             )
         elif structure == 'rocksalt':
+            if len(atoms) != 2:
+                raise UnitCellValueError(
+                    "The specified crystal structure requires 2 atom types.")
+
             unit_cell = [
-                Atom(1, 1, 0, 0, 0),
-                Atom(2, 1, 0, 0.5, 0.5),
-                Atom(3, 1, 0.5, 0, 0.5),
-                Atom(4, 1, 0.5, 0.5, 0),
-                Atom(5, 2, 0, 0, 0.5),
-                Atom(6, 2, 0, 0.5, 0),
-                Atom(7, 2, 0.5, 0, 0),
-                Atom(8, 2, 0.5, 0.5, 0.5)
+                Atom(atoms[0], 0, 0, 0),
+                Atom(atoms[0], 0, 0.5, 0.5),
+                Atom(atoms[0], 0.5, 0, 0.5),
+                Atom(atoms[0], 0.5, 0.5, 0),
+                Atom(atoms[1], 0, 0, 0.5),
+                Atom(atoms[1], 0, 0.5, 0),
+                Atom(atoms[1], 0.5, 0, 0),
+                Atom(atoms[1], 0.5, 0.5, 0.5)
             ]
             self.__radius = 0.25
             self.__primitive = np.array(
@@ -146,15 +154,18 @@ class UnitCell:
                 ]
             )
         elif structure == 'zincblende':
+            if len(atoms) != 2:
+                raise UnitCellValueError(
+                    "The specified crystal structure requires 2 atom types.")
             unit_cell = [
-                Atom(1, 1, 0, 0, 0),
-                Atom(2, 1, 0, 0.5, 0.5),
-                Atom(3, 1, 0.5, 0, 0.5),
-                Atom(4, 1, 0.5, 0.5, 0),
-                Atom(5, 2, 0.25, 0.25, 0.25),
-                Atom(6, 2, 0.75, 0.75, 0.25),
-                Atom(7, 2, 0.75, 0.25, 0.75),
-                Atom(8, 2, 0.25, 0.75, 0.75)
+                Atom(atoms[0], 0, 0, 0),
+                Atom(atoms[0], 0, 0.5, 0.5),
+                Atom(atoms[0], 0.5, 0, 0.5),
+                Atom(atoms[0], 0.5, 0.5, 0),
+                Atom(atoms[1], 0.25, 0.25, 0.25),
+                Atom(atoms[1], 0.75, 0.75, 0.25),
+                Atom(atoms[1], 0.75, 0.25, 0.75),
+                Atom(atoms[1], 0.25, 0.75, 0.75)
             ]
             self.__radius = math.sqrt(3) * 0.125
             self.__primitive = np.array(
@@ -183,7 +194,7 @@ class UnitCell:
         ) / vol
 
     def init_by_custom(self, unit_cell: np.ndarray,
-                       unit_cell_types: int | Sequence[numbers.Number], a0: float,
+                       unit_cell_types: str | Sequence[str], a0: float,
                        reciprocal: np.ndarray) -> None:
         """
         Initialize the UnitCell with a custom-built lattice.
@@ -201,21 +212,15 @@ class UnitCell:
             (3,3).
         """
         self.__a0 = a0
-        if isinstance(unit_cell_types, int):
-            if unit_cell_types != 1:
-                warnings.warn("All types set to 1.")
-            cell_types = np.ones(len(unit_cell), dtype=int)
+        if len(unit_cell_types) != len(unit_cell):
+            raise UnitCellValueError(
+                "Length mismatch between unit cell types and unit cell")
         else:
-            min_types = min(unit_cell_types)
-            if min_types != 1:
-                warnings.warn(f"Types shifted by {-(min_types-1)}")
-                cell_types = [uct - (min_types - 1) for uct in unit_cell_types]
-            else:
-                cell_types = unit_cell_types
+            cell_types = unit_cell_types
 
         self.__unit_cell = [
-            Atom(i+1, t, x, y, z)
-            for i, (t, (x, y, z)) in enumerate(zip(cell_types, unit_cell))
+            Atom(t, x, y, z)
+            for (t, (x, y, z)) in zip(cell_types, unit_cell)
         ]
         if not isinstance(reciprocal, np.ndarray):
             reciprocal = np.array(reciprocal)
@@ -226,16 +231,16 @@ class UnitCell:
 
     def positions(self) -> np.ndarray:
         """Returns the positions of the atoms in the UnitCell."""
-        return self.__a0 * np.vstack([[a.position.x, a.position.y, a.position.z] for a in self.__unit_cell])
+        return self.__a0 * np.vstack([a.position.asarray() for a in self.__unit_cell])
 
-    def types(self) -> np.ndarray:
+    def names(self) -> np.ndarray:
         """Returns an array containing the types of atoms in the UnitCell."""
-        return np.hstack([a.atom_type for a in self.__unit_cell])
+        return np.hstack([a.name for a in self.__unit_cell])
 
     @property
     def reciprocal(self) -> np.ndarray:
         """Returns the reciprocal lattice for the defined UnitCell."""
-        return copy.copy(self.__reciprocal)
+        return self.__reciprocal
 
     @property
     def a0(self) -> float:
@@ -275,13 +280,24 @@ class UnitCell:
     def primitive(self) -> np.ndarray:
         return self.__primitive
 
+    def asarray(self) -> np.ndarray:
+        """
+        Gives the unit cell as a structured numpy array with the atom type and position.
+
+        :return: Structured numpy array with atom type and position.
+        """
+        return np.array(
+            [tuple(atom['name', 'x', 'y', 'z']) for atom in self.__unit_cell],
+            dtype=Atom.atom_dtype
+        )
+
     def __repr__(self):
         structure_info = f"UnitCell with {len(self.__unit_cell)} " + \
             f"atom{'s' if len(self.__unit_cell) != 1 else ''}"
         lattice_info = f"Lattice parameter (a0): {self.__a0:.3f} Å"
         radius_info = f"Radius: {self.__radius:.3f} Å"
         atom_info = ", ".join(
-            [f"{atom.id} ({atom.atom_type}): {atom.position.x:.3f}, {atom.position.y:.3f}, {atom.position.z:.3f}"
+            [f"'{atom.atom_name}': {atom.position.x:.3f}, {atom.position.y:.3f}, {atom.position.z:.3f}"
              for atom in self.__unit_cell]
         )
         reciprocal_info = f"Reciprocal lattice:\n{self.__reciprocal}"
