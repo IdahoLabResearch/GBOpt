@@ -553,13 +553,15 @@ class GBManipulator:
 
         return new_positions
 
-    def remove_atoms(self, fraction: float) -> np.ndarray:
+    def remove_atoms(self, fraction: float, *, num_to_remove: int = None) -> np.ndarray:
         """
         Removes **fraction** of atoms in the GB slab. Uses the local order parameter
         method of Lyakhov *et al.*, Computer Phys. Comm. 181 (2010) 1623-1632.
 
         :param fraction: The fraction of atoms in the GB plane to remove. Must be
             less than 25% of the total number of atoms in the GB slab.
+        :param num_to_remove: The specific number of atoms to remove. This option
+            ignores the fraction parameter.
         :return: Atom positions after atom removal.
         """
         # TODO: Include logic to maintain stoichiometry/charge neutrality (as desired)
@@ -581,7 +583,8 @@ class GBManipulator:
         )[0]
 
         GB_slab = positions[GB_slab_indices]
-        num_to_remove = int(fraction * len(GB_slab))
+        if num_to_remove is None:
+            num_to_remove = int(fraction * len(GB_slab))
         if num_to_remove == 0:
             warnings.warn(
                 "Calculated fraction of atoms to remove is 0 "
@@ -629,7 +632,7 @@ class GBManipulator:
         pos = np.delete(atoms, indices_to_remove, axis=0)
         return pos
 
-    def insert_atoms(self, fraction: float, *, method: str) -> np.ndarray:
+    def insert_atoms(self, fraction: float, *, method: str, num_to_insert: int = None) -> np.ndarray:
         """
         Inserts **fraction** atoms in the GB at empty lattice sites. 'Empty' sites are
         determined through Delaunay triangulation (method='Delaunay') or through a grid
@@ -638,6 +641,8 @@ class GBManipulator:
         :param fraction: The fraction of empty lattice sites to fill. Must be less
             than or equal to 25% of the total number of atoms in the GB slab.
         :param method: The method to use. Must be either 'delaunay' or 'grid'
+        :param num_to_insert: The number of atoms to insert, optional, defaults to None.
+            If this parameter is set, the fraction parameter is ignored.
         :raises GBManipulatorValueError: Exception raised if an invalid method is
             specified.
         :return: Atom positions after atom insertion.
@@ -646,13 +651,15 @@ class GBManipulator:
         if fraction <= 0 or fraction > 0.25:
             raise GBManipulatorValueError("Invalid value for fraction ("
                                           f"{fraction=}). Must be 0 < fraction <= 0.25")
+        if num_to_insert is not None and num_to_insert < 1:
+            raise GBManipulatorValueError("Invalid max inserted value. Must be >= 1.")
 
         if not self.__one_parent:
             warnings.warn("Atom insertion only occuring based on parent 1.")
         parent = self.__parents[0]
         GB_slab = parent.gb_region
 
-        def Delaunay_approach(GB_slab: np.ndarray, atom_radius: float) -> np.ndarray:
+        def Delaunay_approach(GB_slab: np.ndarray, atom_radius: float, num_to_insert: int) -> np.ndarray:
             """
             Delaunay triangulation approach for inserting atoms. Potential insertion
             sites are the circumcenters of the tetrahedra.
@@ -660,6 +667,7 @@ class GBManipulator:
             :param GB_slab: Array of atom positions where we are considering inserting
                 new atoms.
             :param atom_radius: The radius of an atom.
+            :param num_to_insert: The number of atoms to insert.
             :return: The sites at which new atoms are inserted.
             """
             # Delaunay triangulation approach
@@ -687,12 +695,13 @@ class GBManipulator:
                        ) < 1e-8, "Probabilities are not normalized!"
             num_sites = len(circumcenters)
 
-            num_to_insert = int(fraction * num_sites)
+            if num_to_insert is None:
+                num_to_insert = int(fraction * num_sites)
+
             if num_to_insert == 0:
                 warnings.warn("Calculated fraction of atoms to insert is 0: "
                               f"int({fraction}*{len(GB_slab)}) = 0"
                               )
-                return GB_slab
             indices = self.__rng.choice(
                 list(range(len(valid_circumcenters))),
                 num_to_insert,
@@ -701,7 +710,7 @@ class GBManipulator:
             )
             return valid_circumcenters[indices]
 
-        def grid_approach(GB_slab: np.ndarray, atom_radius: float) -> np.ndarray:
+        def grid_approach(GB_slab: np.ndarray, atom_radius: float, num_to_insert: int) -> np.ndarray:
             """
             Grid approach for inserting atoms. Potential insertion sites are on a 1x1x1
             Angstrom grid where sites must be at least **atom_radius** away.
@@ -709,6 +718,7 @@ class GBManipulator:
             :param GB_slab: Array of atom positions where we are considering inserting
                 new atoms.
             :param atom_radius: The radius of an atom.
+            :param num_to_insert: The number of atoms to insert.
             :return: The sites at which new atoms are inserted.
             """
             # Grid approach
@@ -735,12 +745,14 @@ class GBManipulator:
                        ) < 1e-8, "Probabilities are not normalized!"
             num_sites = len(filtered_sites)
 
-            num_to_insert = int(fraction * num_sites)
+            if num_to_insert is None:
+                num_to_insert = int(fraction * num_sites)
+
             if num_to_insert == 0:
-                warnings.warn("Calculate fraction of atoms to insert is 0: "
+                warnings.warn("Calculated fraction of atoms to insert is 0: "
                               f"int({fraction}*{len(GB_slab)}) = 0"
                               )
-                return GB_slab
+
             indices = self.__rng.choice(num_sites,
                                         num_to_insert,
                                         replace=False,
@@ -757,9 +769,11 @@ class GBManipulator:
         total_ratio = sum(type_ratios.values())
 
         if method == 'delaunay':
-            new_pos = Delaunay_approach(GB_slab[:, 1:], parent.unit_cell.radius)
+            new_pos = Delaunay_approach(
+                GB_slab[:, 1:], parent.unit_cell.radius, num_to_insert)
         elif method == 'grid':
-            new_pos = grid_approach(GB_slab[:, 1:], parent.unit_cell.radius)
+            new_pos = grid_approach(
+                GB_slab[:, 1:], parent.unit_cell.radius, num_to_insert)
         else:
             raise GBManipulatorValueError(f"Unrecognized insert_atoms method: {method}")
 

@@ -121,6 +121,11 @@ class TestGBManipulator(unittest.TestCase):
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(0.0000001)
 
+    def test_remove_atoms_with_specific_number(self):
+        manipulator = GBManipulator(self.GB, seed=self.seed)
+        new_system = manipulator.remove_atoms(0.10, num_to_remove=1)
+        self.assertEqual(len(self.GB.gb)-1, len(new_system))
+
     def test_insert_atoms(self):
         manipulator = GBManipulator(self.GB, seed=self.seed)
         new_system1 = manipulator.insert_atoms(0.10, method='delaunay')
@@ -147,6 +152,13 @@ class TestGBManipulator(unittest.TestCase):
         manipulator = GBManipulator(self.GB, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.insert_atoms(0.10, method='invalid')
+
+    def test_insert_atoms_with_specific_number(self):
+        manipulator = GBManipulator(self.GB, seed=self.seed)
+        new_system1 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        self.assertEqual(len(self.GB.gb) + 1, len(new_system1))
+        new_system2 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        self.assertEqual(len(self.GB.gb) + 1, len(new_system2))
 
     def test_displace_along_soft_modes(self):
         manipulator = GBManipulator(self.GB, seed=self.seed)
