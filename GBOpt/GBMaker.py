@@ -52,9 +52,10 @@ class GBMaker:
     """
 
     def __init__(self, a0: float, structure: str, gb_thickness: float,
-                 misorientation: np.ndarray, *,
+                 misorientation: np.ndarray, atom_types: str | Tuple[str, ...], *,
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim: float = 50,
-                 vacuum: float = 10, interaction_distance: float = 15.0, gb_id: int = 1):
+                 vacuum: float = 10, interaction_distance: float = 15.0,
+                 gb_id: int = 1):
         self.__a0 = self.__validate(a0, Number, 'a0', positive=True)
         self.__structure = self.__validate(structure, str, 'structure')
         self.__gb_thickness = self.__validate(
@@ -157,6 +158,60 @@ class GBMaker:
                 [0, self.__z_dim]
             ]
         )
+
+    def __generate_gb(self) -> None:
+        """
+        Private method to calculate the left grain, right grain, and whole GB system
+        """
+        self.__left_grain = self.__generate_left_grain()
+        self.__right_grain = self.__generate_right_grain()
+        self.__gb = np.hstack((self.__left_grain, self.__right_grain))
+
+    def __approximate_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
+        """
+        Approximate the matrix in integer format given the original matrix and
+        the desired precision.
+
+        :param m: The matrix to approximate
+        :param precision: Decimal precision to use during calculations, defaults to 5
+        :return: Integer approximation of the rotation matrix m
+        """
+
+        # First, convert each value to a fraction. Limit the denominator according to
+        # the desired precision.
+        m_fraction = np.array(
+            [[Fraction(i).limit_denominator(10**precision)
+              for i in row] for row in m]
+        )
+        # Extract the denominators of each value
+        denoms = np.array([[i.denominator for i in row] for row in m_fraction])
+
+        # Multiplying by the least common multiple for the denominators in a row-wise
+        # manner gives an integer representation of m
+        scale_factors = np.array([math.lcm(*row) for row in denoms])
+
+        # Scale each row by the LCM of the denominators
+        scaled_m = np.array(
+            [
+                [int(i) for i in row * scale]
+                for row, scale in zip(m_fraction, scale_factors)
+            ],
+            dtype=int,
+        )
+
+        # This might occassionally result in an integer matrix that can be reduced.
+        # This reduction occurs by determining the GCD of each row and dividing the row
+        # by that value.
+        gcds = [math.gcd(*row) for row in scaled_m]
+
+        approx_m = np.array(
+            [row / s for row, s in zip(scaled_m, gcds)], dtype=int)
+        min_val = np.min(abs(approx_m))
+        # TODO: Figure out how this value relates to the threshold parameter in
+        # get_periodic_spacing
+        if min_val > 100:
+            warnings.warn("Resulting boundary is non-periodic.")
+        return approx_m
 
     def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
         """
@@ -263,9 +318,10 @@ class GBMaker:
         atoms = self.get_supercell(corners)
 
         R = np.dot(self.__Rincl, self.__Rmis)
-        atoms[:, 1:] = np.dot(atoms[:, 1:], R.T)
+        positions = np.vstack((atoms['x'], atoms['y'], atoms['z'])).T
+        rotated_positions = np.dot(positions, R.T)
+        atoms['x'], atoms['y'], atoms['z'] = rotated_positions.T
 
-        atoms[:, 1] += np.amax(self.left_grain[:, 1])
         return self.__get_points_inside_box(
             atoms,
             [self.__x_dim, 0, 0, 2*self.__x_dim, self.__y_dim, self.__z_dim])
@@ -279,13 +335,12 @@ class GBMaker:
         :return: 4xn array containing the Atom positions inside the given box.
         """
         x_min, y_min, z_min, x_max, y_max, z_max = box_dim
-        x_slice = atoms[np.where(np.logical_and(
-            atoms[:, 1] >= x_min, atoms[:, 1] <= x_max))]
-        y_slice = x_slice[np.where(np.logical_and(
-            x_slice[:, 2] >= y_min, x_slice[:, 2] < y_max))]
-        z_slice = y_slice[np.where(np.logical_and(
-            y_slice[:, 3] >= z_min, y_slice[:, 3] < z_max))]
-        return z_slice
+        inside_box = (
+            (atoms['x'] >= x_min) & (atoms['x'] <= x_max) &
+            (atoms['y'] >= y_min) & (atoms['y'] < y_max) &
+            (atoms['z'] >= z_min) & (atoms['z'] < z_max)
+        )
+        return atoms[inside_box]
 
     def __update_periodic_dims(self) -> None:
         """
@@ -384,16 +439,16 @@ class GBMaker:
         Generates a supercell of lattice sites.
 
         :param corners: Array containing the position of the corners of the unit cells.
-        :return: Populated lattice sites based on the unit cell.
+        :return: Structured numpy array containing the atom data (type and position) for
+            the supercell.
         """
-        # TODO: Implement this using the Atom class
-        atom_data = np.array([[t, x, y, z] for t, (x, y, z) in zip(
-            self.__unit_cell.types(), self.__unit_cell.positions())])
-        translated_positions = (
-            atom_data[:, 1:] + corners[:, np.newaxis, :]).reshape(-1, 3)
-        atom_types_expanded = np.repeat(atom_data[:, 0], len(corners))
-        supercell = np.column_stack(
-            (atom_types_expanded, translated_positions))
+        # Unit cell as structured array
+        unit_cell = self.__unit_cell.asarray()
+        supercell = np.tile(unit_cell, len(corners))
+        translations = np.repeat(corners, len(unit_cell), axis=0)
+        supercell['x'] += translations[:, 0]
+        supercell['y'] += translations[:, 1]
+        supercell['z'] += translations[:, 2]
         return supercell
 
     def update_spacing(self, threshold: float = None) -> None:
@@ -431,7 +486,7 @@ class GBMaker:
             # --- Header ---#
             # Specify number of atoms and atom types
             fdata.write('{} atoms\n'.format(len(atoms)))
-            fdata.write('{} atom types\n'.format(len(set(atoms[:, 0]))))
+            fdata.write('{} atom types\n'.format(len(set(atoms['name']))))
             # Specify box dimensions
             fdata.write('{} {} xlo xhi\n'.format(
                 box_sizes[0][0], box_sizes[0][1]))
@@ -439,14 +494,23 @@ class GBMaker:
                 box_sizes[1][0], box_sizes[1][1]))
             fdata.write('{} {} zlo zhi\n'.format(
                 box_sizes[2][0], box_sizes[2][1]))
-            fdata.write('\n')
+
+            if not type_as_int:
+                fdata.write('\nAtom Type Labels\n\n')
+                for name, value in name_to_int.items():
+                    fdata.write(f"{value} {name}\n")
 
             # Atoms section
-            fdata.write('Atoms\n\n')
+            fdata.write('\nAtoms\n\n')
 
-            # Write each position. Write the type as an integer.
-            for i, pos in enumerate(atoms):
-                fdata.write('{} {:n} {} {} {}\n'.format(i+1, *pos))
+            # Write each position.
+            if type_as_int:
+                for i, (name, *pos) in enumerate(atoms):
+                    fdata.write('{} {:n} {} {} {}\n'.format(
+                        i+1, name_to_int[name], *pos))
+            else:
+                for i, (name, *pos) in enumerate(atoms):
+                    fdata.write('{} {} {} {} {}\n'.format(i+1, name, *pos))
 
     # Properties with getters and setters. Automatic updates for related parameters are
     # automatically taken care of.
@@ -455,10 +519,29 @@ class GBMaker:
         return self.__a0
 
     @a0.setter
-    def a0(self, value: Number):
+    def a0(self, value: Number) -> None:
+        atom_types = tuple(self.__unit_cell.names())
         self.__a0 = self.__validate(value, float, "a0", positive=True)
-        self.__unit_cell = self.__init_unit_cell()
+        self.__unit_cell = self.__init_unit_cell(atom_types)
         self.update_spacing()
+
+    @property
+    def structure(self) -> str:
+        return self.__structure
+
+    @structure.setter
+    def structure(self, value: str) -> None:
+        self.__structure = self.__validate(value, str, "structure")
+        if set([self.__structure, value]).issubset(
+            set(["fluorite", "rocksalt", "zincblende"])
+        ):
+            raise GBMakerValueError(
+                "Cannot estimate conversion from " f"{self.__structure} to {value}"
+            )
+        else:
+            atom_types = tuple(set(self.__unit_cell.names()))
+
+        self.__unit_cell = self.__init_unit_cell(atom_types)
 
     @property
     def gb_thickness(self) -> float:
