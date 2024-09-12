@@ -101,39 +101,39 @@ class Parent:
         the nominal unit cell of the system.
     :param gb_thickness: Thickness of the GB region, optional, defaults to 10.
     """
+    __num_to_name = {val: key for key, val in Atom._numbers.items()}
 
     def __init__(
         self,
         system: Union[GBMaker, str],
         *,
         unit_cell: UnitCell = None,
-        gb_thickness: float = 10
+        gb_thickness: float = 10,
+        type_dict: dict = {}
     ) -> None:
         if isinstance(system, GBMaker):
             self.__init_by_gbmaker(system)
         else:
             if gb_thickness is None:  # defaults to 10 if passed in as None.
                 gb_thickness = 10
-            self.__init_by_snapshot(system, unit_cell, gb_thickness)
-        self.__whole_system = np.vstack((self.__left_grain, self.__right_grain))
-        left_x_max = max(self.__left_grain[:, 1])
-        right_x_min = min(self.__right_grain[:, 1])
+            self.__init_by_snapshot(system, unit_cell, gb_thickness, type_dict)
+        # self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
+        left_x_max = max(self.__left_grain['x'])
+        right_x_min = min(self.__right_grain['x'])
         left_cut = left_x_max - self.__gb_thickness / 2.0
         right_cut = right_x_min + self.__gb_thickness / 2.0
-        left_gb_indices = self.__left_grain[:, 1] > left_cut
-        right_gb_indices = self.__right_grain[:, 1] < right_cut
-        gb_indices = np.hstack((left_gb_indices, right_gb_indices))
-        self.__gb_indices = np.array(range(len(self.__whole_system)))[gb_indices]
+        left_gb_indices = self.__left_grain['x'] > left_cut
+        right_gb_indices = self.__right_grain['x'] < right_cut
         left_gb = self.__left_grain[left_gb_indices]
         right_gb = self.__right_grain[right_gb_indices]
-        self.__gb_atoms = np.vstack((left_gb, right_gb))
+        self.__gb_atoms = np.hstack((left_gb, right_gb))
         # TODO: make this a more robust calculation, rather than assuming the GB is in the middle of the system.
         self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
-                    self.__whole_system[:, 0] >= self.__box_dims[0, 1] /
+                    self.__whole_system['x'] >= self.__box_dims[0, 1] /
                     2 - self.__gb_thickness/2,
-                    self.__whole_system[:, 0] <= self.__box_dims[0, 1] /
+                    self.__whole_system['x'] <= self.__box_dims[0, 1] /
                     2 + self.__gb_thickness/2
                 )
             )
@@ -147,6 +147,7 @@ class Parent:
         """
         self.__right_grain = system.right_grain
         self.__left_grain = system.left_grain
+        self.__whole_system = system.whole_system
         self.__y_dim = system.y_dim
         self.__z_dim = system.z_dim
         self.__gb_thickness = system.gb_thickness
@@ -159,16 +160,20 @@ class Parent:
 
     def __init_by_snapshot(
         self,
-        system: str,
+        system_file: str,
         unit_cell: UnitCell,
-        gb_thickness: float
+        gb_thickness: float,
+        type_dict: dict
     ) -> None:
         """
         Method for initializing the Parent using a LAMMPS dump file.
 
-        :param system: Filename of the LAMMPS dump file.
+        :param system_file: Filename of the LAMMPS dump file.
         :param unit_cell: Nominal unit cell of the bulk structure.
         :param gb_thickness: Thickness of the GB region, given in angstroms.
+        :param type_dict: Conversion from type number to type name, optional. Note that
+            if this is not provided and the snapshot does not indicate the atom names,
+            atom names are assumed started from 'H'.
         :raises ParentValueError: Exception raised if unit_cell is not passed in.
         :raises ParentFileNotFoundError: Exception raised if the specified file is not
             found.
@@ -177,39 +182,66 @@ class Parent:
         :raises ParentSnapshotMissingDataError: Exception raised if the dump file is
             otherwise formatted correctly, but is missing required data.
         """
+
         if not unit_cell:
             raise ParentValueError("Unit cell must be specified for snapshots")
         self.__unit_cell = unit_cell
         self.__gb_thickness = gb_thickness
-        if not isfile(system):
-            raise ParentFileNotFoundError(f"{system} does not exist.")
-        with open(system) as f:
+        if not isfile(system_file):
+            raise ParentFileNotFoundError(f"{system_file} does not exist.")
+        skip_rows = 0
+        with open(system_file) as f:
             line = f.readline()
+            skip_rows += 1
             # skip to the box bounds
             while not line.startswith("ITEM: BOX BOUNDS"):
                 line = f.readline()
+                skip_rows += 1
                 if not line:
                     raise ParentCorruptedSnapshotError(
-                        f"Box bounds not found in {system}")
+                        f"Box bounds not found in {system_file}")
+            skip_rows += 3
             if len(line.split()) == 6:  # orthogonal box
                 x_dims = [float(i) for i in f.readline().split()]
                 y_dims = [float(i) for i in f.readline().split()]
                 z_dims = [float(i) for i in f.readline().split()]
-            elif len(line.split()) == 9:  # triclinic box
+            elif len(line.split()) == 9:  # triclinic box, restricted format
                 xline = f.readline().split()
                 yline = f.readline().split()
                 zline = f.readline().split()
-                x_dims, _ = ([float(i)
-                              for i in xline[0:2]], float(xline[2]))
-                y_dims, _ = ([float(i)
-                              for i in yline[0:2]], float(yline[2]))
-                z_dims, _ = ([float(i)
-                              for i in zline[0:2]], float(zline[2]))
+                x_dims, _ = ([float(i) for i in xline[0:2]], float(xline[2]))
+                y_dims, _ = ([float(i) for i in yline[0:2]], float(yline[2]))
+                z_dims, _ = ([float(i) for i in zline[0:2]], float(zline[2]))
+            elif len(line.split()) == 8:  # triclinic box, general format
+                xline = f.readline().split()
+                yline = f.readline().split()
+                zline = f.readline().split()
+                origin = np.empty((3,))
+                A, origin[0] = (np.array([float(i)
+                                for i in xline[0:3]]), float(xline[3]))
+                B, origin[1] = (np.array([float(i)
+                                for i in xline[0:3]]), float(xline[3]))
+                C, origin[2] = (np.array([float(i)
+                                for i in xline[0:3]]), float(xline[3]))
+
+                a = np.array([np.linalg.norm(A), 0, 0])
+                Ahat = A / a[0]
+                b = np.array([np.dot(B, Ahat), np.cross(Ahat, B), 0])
+                AxB = np.cross(A, B)
+                AxBhat = AxB/np.linalg.norm(AxB)
+                c = np.array([np.dot(C, Ahat), np.dot(
+                    C, np.cross(AxBhat, Ahat)), np.abs(np.dot(C, AxBhat))])
+
+                x_dims = [origin[0], origin[0] + a[0]]
+                y_dims = [origin[1], origin[1] + a[1] + b[1]]
+                z_dims = [origin[2], origin[2] + c[2]]
             else:
-                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {system}")
+                raise ParentCorruptedSnapshotError(
+                    f"Box bounds corrupted in {system_file}")
             if not (x_dims or y_dims or z_dims) or len(x_dims) != 2 or \
                     len(y_dims) != 2 or len(z_dims) != 2:
-                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {system}")
+                raise ParentCorruptedSnapshotError(
+                    f"Box bounds corrupted in {system_file}")
             self.__box_dims = np.array([x_dims, y_dims, z_dims])
             self.__x_dim = x_dims[1] - x_dims[0]
             self.__y_dim = y_dims[1] - y_dims[0]
@@ -217,12 +249,15 @@ class Parent:
             # TODO: Need a more robust calculation of where the GB is located. This calculation is duplicated.
             grain_cutoff = (x_dims[1] - x_dims[0]) / 2
             line = f.readline()
+            skip_rows += 1
             while not line.startswith("ITEM: ATOMS"):
                 line = f.readline()
+                skip_rows += 1
                 if not line:
-                    raise ParentCorruptedSnapshotError(f"Atoms not found in {system}")
+                    raise ParentCorruptedSnapshotError(
+                        f"Atoms not found in {system_file}")
             atom_attributes = line.split()[2:]
-            required_attributes = ['id', 'type', 'x', 'y', 'z']
+            required_attributes = ['type', 'x', 'y', 'z']
 
             if not all([i in atom_attributes for i in required_attributes]):
                 raise ParentSnapshotMissingDataError(
@@ -231,29 +266,32 @@ class Parent:
                     f"available: {atom_attributes}")
             required_attribute_indices = {attr: atom_attributes.index(
                 attr) for attr in required_attributes}
-            left_grain = []
-            right_grain = []
+
+            typelabel_in_attrs = 'typelabel' in atom_attributes
+            if typelabel_in_attrs:
+                required_attribute_indices['typelabel'] = atom_attributes.index(
+                    'typelabel')
+            col_indices = [required_attribute_indices['typelabel'] if typelabel_in_attrs else required_attribute_indices['type'],
+                           required_attribute_indices['x'], required_attribute_indices['y'], required_attribute_indices['z']]
+
+            def convert_type(value):
+                if typelabel_in_attrs:
+                    return value
+                else:
+                    return self.__num_to_name[int(value)]
+            max_rows = 0
             line = f.readline()  # read the next line to move the file pointer ahead.
-            while not line.startswith("ITEM:"):
-                line = line.split()
+            while not line.startswith("ITEM"):
+                line = f.readline()
+                max_rows += 1
                 if not line:
                     break
-                atom = Atom(int(line[required_attribute_indices['id']]),
-                            int(line[required_attribute_indices['type']]),
-                            float(line[required_attribute_indices['x']]),
-                            float(line[required_attribute_indices['y']]),
-                            float(line[required_attribute_indices['z']])
-                            )
-                # TODO: Swap to use Atom class.
-                if atom.position.x < grain_cutoff:
-                    left_grain.append(atom['type', 'x', 'y', 'z'])
-                    # left_grain.append(atom)
-                else:
-                    right_grain.append(atom['type', 'x', 'y', 'z'])
-                    # right_grain.append(atom)
-                line = f.readline()
-            self.__left_grain = np.array(left_grain)
-            self.__right_grain = np.array(right_grain)
+
+        self.__whole_system = np.loadtxt(system_file, skiprows=skip_rows, max_rows=max_rows, converters={
+            col_indices[0]: convert_type}, usecols=tuple(col_indices), dtype=Atom.atom_dtype)
+        self.__left_grain = self.__whole_system[self.__whole_system['x'] < grain_cutoff]
+        self.__right_grain = self.__whole_system[self.__whole_system['x']
+                                                 >= grain_cutoff]
 
     # Getters
     @property
@@ -267,10 +305,6 @@ class Parent:
     @property
     def whole_system(self) -> np.ndarray:
         return self.__whole_system
-
-    @property
-    def gb_indices(self) -> np.ndarray:
-        return self.__gb_indices
 
     @property
     def gb_atoms(self) -> np.ndarray:
@@ -393,9 +427,7 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
     for idx, R in enumerate(Rs):
         local_sum = 0
         for neigh in neighs:
-            # if neigh['type'] == Btype # TODO: Swap to use Atom class
             if neigh[0] == Btype:
-                # Rij = atom['position'].distance(neigh['position']) # TODO: Swap to use Atom class
                 diff = atom[1:] - neigh[1:]
                 # Rij = np.linalg.norm(atom[1:] - neigh[1:])
                 distance = np.sqrt(np.dot(diff, diff))
@@ -425,11 +457,8 @@ def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta
     :return: The local order parameter for *atom* based on its neighbors.
     """
     local_sum = 0
-    # atom_types = set([a['type'] for a in neighs]) # TODO: Swap to use Atom class
-
     atom_types = np.unique(neighs[:, 0])
     V = unit_cell_a0**3
-    unit_cell_types = unit_cell_types
     prefactor = Delta / (N * (V/N)**(1/3))
     for Btype in atom_types:
         NB = np.sum(unit_cell_types == Btype)
@@ -546,12 +575,14 @@ class GBManipulator:
         updated_right_grain = np.copy(parent.right_grain)
         # Displace all atoms in the right grain by [0, dy, dz]. We modulo by the
         # grain dimensions so atoms do not exceed the original boundary conditions
-        updated_right_grain[:, 2] = (
-            updated_right_grain[:, 2] + dy) % parent.y_dim
-        updated_right_grain[:, 3] = (
-            updated_right_grain[:, 3] + dz) % parent.z_dim
+        # updated_right_grain[:, 2] = (
+        # updated_right_grain[:, 2] + dy) % parent.y_dim
+        # updated_right_grain[:, 3] = (
+        #     updated_right_grain[:, 3] + dz) % parent.z_dim
+        updated_right_grain['y'] = (updated_right_grain['y'] + dy) % parent.y_dim
+        updated_right_grain['z'] = (updated_right_grain['z'] + dz) % parent.z_dim
 
-        return np.vstack((self.__parents[0].left_grain, updated_right_grain))
+        return np.hstack((self.__parents[0].left_grain, updated_right_grain))
 
     def slice_and_merge(self) -> np.ndarray:
         """
@@ -575,9 +606,9 @@ class GBManipulator:
         # Note that this is the third time this has been calculated.
         slice_pos = (parent1.box_dims[0, 1] - parent1.box_dims[0, 0]) / 2.0 + \
             parent1.gb_thickness * (-0.25 + 0.5*self.__rng.random())
-        pos1 = pos1[pos1[:, 1] < slice_pos]
-        pos2 = pos2[pos2[:, 1] >= slice_pos]
-        new_positions = np.vstack((pos1, pos2))
+        pos1 = pos1[pos1['x'] < slice_pos]
+        pos2 = pos2[pos2['x'] >= slice_pos]
+        new_positions = np.hstack((pos1, pos2))
 
         return new_positions
 
@@ -606,7 +637,8 @@ class GBManipulator:
         if not self.__one_parent:
             warnings.warn("Atom removal only occuring based on parent 1.")
         parent = self.__parents[0]
-        atoms = parent.whole_system
+        # We use the array format because numba/jit has issues with strings.
+        atoms = Atom.asarray(parent.whole_system)
         if gb_fraction <= 0 or gb_fraction > 0.25:
             raise GBManipulatorValueError("Invalid value for gb_fraction ("
                                           f"{gb_fraction=}). Must be 0 < gb_fraction "
@@ -646,13 +678,14 @@ class GBManipulator:
         #     order = pool.starmap(calc_order_partial[(atom, atoms[neigh_indices])] for atom_idx, atom in enumerate(
         #         gb_atoms) for neigh_indices in neighbor_list[atom_idx])
         order = np.zeros(len(gb_atom_indices))
+        atom_types = np.array([t for t in set(atoms[:, 0])])
         for idx, atom_idx in enumerate(gb_atom_indices):
             atom = atoms[atom_idx]
             neigh_indices = neighbor_list[atom_idx]
             order[idx] = _calculate_local_order(
                 atom,
                 atoms[neigh_indices],
-                parent.unit_cell.types(),
+                atom_types,
                 parent.unit_cell.a0,
                 len(parent.unit_cell.unit_cell),
                 Delta=0.05,
@@ -668,7 +701,7 @@ class GBManipulator:
 
         indices_to_remove = self.__rng.choice(
             gb_atom_indices, num_to_remove, replace=False, p=probabilities)
-        pos = np.delete(atoms, indices_to_remove, axis=0)
+        pos = np.delete(parent.whole_system, indices_to_remove, axis=0)
         return pos
 
     def insert_atoms(
@@ -707,7 +740,7 @@ class GBManipulator:
         if not self.__one_parent:
             warnings.warn("Atom insertion only occurring based on parent 1.")
         parent = self.__parents[0]
-        gb_atoms = parent.gb_atoms
+        gb_atoms = Atom.asarray(parent.gb_atoms)
 
         if fill_fraction is not None and (fill_fraction <= 0 or fill_fraction > 0.25):
             raise GBManipulatorValueError("Invalid value for fill_fraction ("
@@ -715,10 +748,10 @@ class GBManipulator:
                                           "fill_fraction <= 0.25")
 
         if (num_to_insert is not None and
-                (
-                    num_to_insert < 1 or
-                    num_to_insert > int(0.25 * len(gb_atoms))
-                )
+            (
+                        num_to_insert < 1 or
+                        num_to_insert > int(0.25 * len(gb_atoms))
+                    )
             ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
@@ -834,12 +867,10 @@ class GBManipulator:
                                         )
             return filtered_sites[indices]
 
-        available_types = set(parent.unit_cell.types())
-
-        # Calculate the ratio of atom types so we maintain the same atom ratios.
+        available_types = set(parent.unit_cell.names())
         type_counts = {}
         for i in available_types:
-            type_counts[i] = np.sum(parent.unit_cell.types() == i)
+            type_counts[i] = np.sum(parent.unit_cell.names() == i)
         type_ratios = {key: int(value / math.gcd(*type_counts.values()))
                        for key, value in type_counts.items()}
         total_ratio = sum(type_ratios.values())
@@ -863,8 +894,12 @@ class GBManipulator:
         new_types = np.array([val for val, num in zip(
             available_types, num_elements) for _ in range(num)])
         self.__rng.shuffle(new_types)
-
-        return np.vstack((parent.whole_system, np.insert(new_pos, 0, new_types, axis=1)))
+        new_atoms = np.empty((len(new_pos),), dtype=Atom.atom_dtype)
+        new_atoms['x'] = new_pos[:, 0]
+        new_atoms['y'] = new_pos[:, 1]
+        new_atoms['z'] = new_pos[:, 2]
+        new_atoms['name'] = new_types
+        return np.hstack((parent.whole_system, new_atoms))
 
     def displace_along_soft_modes(self) -> np.ndarray:
         """
@@ -911,37 +946,8 @@ class GBManipulator:
 if __name__ == "__main__":
     theta = math.radians(36.869898)
     GB = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0,
-                 misorientation=[theta, 0, 0, 0, 0], repeat_factor=4)
+                 misorientation=[theta, 0, 0, 0, -theta/2], repeat_factor=4)
     GBManip = GBManipulator(GB)
     GB.write_lammps(GB.gb, GB.box_dims, 'test1.dat')
     GB.write_lammps(GBManip.translate_right_grain(
         0.5, 1.0), GB.box_dims, 'test2.dat')
-    # GBManip.rng = np.random.default_rng(seed=100)
-    # i = 1
-    # num_shifts = 5
-    # positions = []
-    # for dy in np.arange(0, 3.61 + 3.61/num_shifts, 3.61/num_shifts):
-    #     for dz in np.arange(0, 3.61+3.61/num_shifts, 3.61/num_shifts):
-    #         positions.append(GBManip.translate_right_grain(dy, dz))
-    #         box_dims = np.array(
-    #             [
-    #                 [
-    #                     -GB.vacuum_thickness - min(positions[i-1][:, 0]),
-    #                     GB.vacuum_thickness + max(positions[i-1][:, 0])
-    #                 ],
-    #                 GB.box_dims[1],
-    #                 GB.box_dims[2]
-    #             ]
-    #         )
-    #         GB.write_lammps(positions[i-1], box_dims, f"CSL_GB_{i}.dat")
-    #         i += 1
-
-    # positions.append(GBManip.slice_and_merge(
-    #     positions[0], positions[num_shifts+1]))
-    # GB.write_lammps(positions[i-1], box_dims, f"CSL_GB_{i}.dat")
-    # i += 1
-
-    # positions.append(GBManip.remove_atoms(positions[0], 0.25))
-    # positions.append(GBManip.insert_atoms(
-    #     positions[0], 0.25, method='Delaunay'))
-    # positions.append(GBManip.insert_atoms(positions[0], 0.25, method='grid'))

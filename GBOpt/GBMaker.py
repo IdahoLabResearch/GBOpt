@@ -90,7 +90,7 @@ class GBMaker:
             interaction_distance, Number, 'interaction_distance', positive=True)
         self.__id = self.__validate(gb_id, int, 'id', positive=True)
 
-        self.__unit_cell = self.__init_unit_cell()
+        self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
         self.__update_periodic_dims()
 
@@ -165,53 +165,7 @@ class GBMaker:
         """
         self.__left_grain = self.__generate_left_grain()
         self.__right_grain = self.__generate_right_grain()
-        self.__gb = np.hstack((self.__left_grain, self.__right_grain))
-
-    def __approximate_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
-        """
-        Approximate the matrix in integer format given the original matrix and
-        the desired precision.
-
-        :param m: The matrix to approximate
-        :param precision: Decimal precision to use during calculations, defaults to 5
-        :return: Integer approximation of the rotation matrix m
-        """
-
-        # First, convert each value to a fraction. Limit the denominator according to
-        # the desired precision.
-        m_fraction = np.array(
-            [[Fraction(i).limit_denominator(10**precision)
-              for i in row] for row in m]
-        )
-        # Extract the denominators of each value
-        denoms = np.array([[i.denominator for i in row] for row in m_fraction])
-
-        # Multiplying by the least common multiple for the denominators in a row-wise
-        # manner gives an integer representation of m
-        scale_factors = np.array([math.lcm(*row) for row in denoms])
-
-        # Scale each row by the LCM of the denominators
-        scaled_m = np.array(
-            [
-                [int(i) for i in row * scale]
-                for row, scale in zip(m_fraction, scale_factors)
-            ],
-            dtype=int,
-        )
-
-        # This might occassionally result in an integer matrix that can be reduced.
-        # This reduction occurs by determining the GCD of each row and dividing the row
-        # by that value.
-        gcds = [math.gcd(*row) for row in scaled_m]
-
-        approx_m = np.array(
-            [row / s for row, s in zip(scaled_m, gcds)], dtype=int)
-        min_val = np.min(abs(approx_m))
-        # TODO: Figure out how this value relates to the threshold parameter in
-        # get_periodic_spacing
-        if min_val > 100:
-            warnings.warn("Resulting boundary is non-periodic.")
-        return approx_m
+        self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
 
     def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
         """
@@ -263,22 +217,14 @@ class GBMaker:
 
         return spacing
 
-    def __generate_gb(self) -> None:
-        """
-        Private method to calculate the left grain, right grain, and whole GB system
-        """
-        self.__left_grain = self.__generate_left_grain()
-        self.__right_grain = self.__generate_right_grain()
-        self.__gb = np.vstack((self.__left_grain, self.__right_grain))
-
-    def __init_unit_cell(self) -> UnitCell:
+    def __init_unit_cell(self, atom_types: str | Tuple[str, ...]) -> UnitCell:
         """
         Initializes the unit cell.
 
         :return: The unit cell initialized by structure.
         """
         unit_cell = UnitCell()
-        unit_cell.init_by_structure(self.__structure, self.__a0)
+        unit_cell.init_by_structure(self.__structure, self.__a0, atom_types)
         return unit_cell
 
     def __generate_left_grain(self) -> np.ndarray:
@@ -296,7 +242,9 @@ class GBMaker:
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
         atoms = self.get_supercell(corners)
 
-        atoms[:, 1:] = np.dot(atoms[:, 1:], self.__Rincl.T)
+        positions = np.vstack((atoms['x'], atoms['y'], atoms['z'])).T
+        rotated_positions = np.dot(positions, self.__Rincl.T)
+        atoms['x'], atoms['y'], atoms['z'] = rotated_positions.T
 
         return self.__get_points_inside_box(
             atoms,
@@ -321,7 +269,7 @@ class GBMaker:
         positions = np.vstack((atoms['x'], atoms['y'], atoms['z'])).T
         rotated_positions = np.dot(positions, R.T)
         atoms['x'], atoms['y'], atoms['z'] = rotated_positions.T
-
+        atoms['x'] += np.amax(self.__left_grain['x'])
         return self.__get_points_inside_box(
             atoms,
             [self.__x_dim, 0, 0, 2*self.__x_dim, self.__y_dim, self.__z_dim])
@@ -460,24 +408,38 @@ class GBMaker:
         """
         self.__spacing = self.__calculate_periodic_spacing(threshold)
 
-    def write_lammps(self, file_name: str, atoms: np.ndarray = None, box_sizes: np.ndarray = None) -> None:
+    def write_lammps(
+        self,
+        file_name: str,
+        atoms: np.ndarray = None,
+        box_sizes: np.ndarray = None,
+        *,
+        type_as_int: bool = False
+    ) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
 
         :param str filename: The filename to save the data
-        :param np.ndarray positions: The positions of the atoms.
+        :param np.ndarray positions: The positions of the atoms. Keyword argument,
+            defaults to None.
         :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
-            each of the x, y, and z dimensions
+            each of the x, y, and z dimensions. Keyword argument, defaults to None.
+        :param bool type_as_int: Whether to write the atom types as a chemical name or a
+            number. Keyword argument, optional, defaults to False (write as a chemical
+            name).
         """
 
         if atoms is None and box_sizes is None:
-            atoms = self.__gb
+            atoms = self.__whole_system
             box_sizes = self.__box_dims
         elif (atoms is None and box_sizes is not None) or (
             atoms is not None and box_sizes is None
         ):
             raise GBMakerValueError(
                 "'atoms' and 'box_sizes' must be specified together.")
+
+        name_to_int = {name: i+1 for i, name in enumerate(np.unique(atoms['name']))}
+
         # Write LAMMPS data file
         with open(file_name, 'w') as fdata:
             # First line is a comment line
@@ -524,24 +486,6 @@ class GBMaker:
         self.__a0 = self.__validate(value, float, "a0", positive=True)
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.update_spacing()
-
-    @property
-    def structure(self) -> str:
-        return self.__structure
-
-    @structure.setter
-    def structure(self, value: str) -> None:
-        self.__structure = self.__validate(value, str, "structure")
-        if set([self.__structure, value]).issubset(
-            set(["fluorite", "rocksalt", "zincblende"])
-        ):
-            raise GBMakerValueError(
-                "Cannot estimate conversion from " f"{self.__structure} to {value}"
-            )
-        else:
-            atom_types = tuple(set(self.__unit_cell.names()))
-
-        self.__unit_cell = self.__init_unit_cell(atom_types)
 
     @property
     def gb_thickness(self) -> float:
@@ -605,7 +549,16 @@ class GBMaker:
     @structure.setter
     def structure(self, value: str) -> None:
         self.__structure = self.__validate(value, str, "structure")
-        self.__unit_cell = self.__init_unit_cell()
+        if set([self.__structure, value]).issubset(
+            set(["fluorite", "rocksalt", "zincblende"])
+        ):
+            raise GBMakerValueError(
+                "Cannot estimate conversion from " f"{self.__structure} to {value}"
+            )
+        else:
+            atom_types = tuple(set(self.__unit_cell.names()))
+
+        self.__unit_cell = self.__init_unit_cell(atom_types)
 
     @property
     def vacuum_thickness(self) -> int:
@@ -632,8 +585,8 @@ class GBMaker:
         return self.__box_dims
 
     @property
-    def gb(self) -> np.ndarray:
-        return self.__gb
+    def whole_system(self) -> np.ndarray:
+        return self.__whole_system
 
     @property
     def left_grain(self) -> np.ndarray:
