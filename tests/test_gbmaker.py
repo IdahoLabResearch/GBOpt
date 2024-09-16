@@ -131,7 +131,7 @@ class TestGBMaker(unittest.TestCase):
 
     def test_misorientation_spacing(self):
         original_spacing = self.gbm.spacing.copy()
-        theta = math.radians(90-36.869898)
+        theta = math.radians(22.619865)
         self.gbm.misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
         self.assertNotEqual(original_spacing, self.gbm.spacing)
 
