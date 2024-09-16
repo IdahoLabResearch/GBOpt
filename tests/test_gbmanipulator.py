@@ -26,8 +26,15 @@ from GBOpt.UnitCell import UnitCell
 class TestGBManipulator(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.system = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0, misorientation=[
-            math.radians(36.869898), 0, 0, 0, 0], repeat_factor=1)
+        theta = math.radians(36.869898)
+        cls.system = GBMaker(
+            a0=1.0,
+            structure='fcc',
+            gb_thickness=10.0,
+            misorientation=[theta, 0, 0, 0, -theta/2],
+            interaction_distance=10,
+            repeat_factor=1
+        )
 
     def setUp(self):
         self.a0 = 1.0

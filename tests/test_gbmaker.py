@@ -66,6 +66,14 @@ class TestGBMaker(unittest.TestCase):
         with self.assertRaises(GBMakerValueError):
             self.gbm.a0 = -5.0
 
+    def test_invalid_misorientation_length(self):
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.misorientation = np.array([0.1, 0.2])
+
+    def test_invalid_misorientation_type(self):
+        with self.assertRaises(GBMakerTypeError):
+            self.gbm.misorientation = "invalid"
+
     def test_invalid_structure_type(self):
         with self.assertRaises(GBMakerTypeError):
             self.gbm.structure = 123
@@ -199,22 +207,11 @@ class TestGBMaker(unittest.TestCase):
         approx_matrix = self.gbm._GBMaker__approximate_matrix_as_int(
             rotation_matrix)
 
-        expected_matrix = np.array([[27720, 19601, 19601],
-                                    [27720, -19601, -19601],
+        expected_matrix = np.array([[118999, 84145, 84145],
+                                    [118999, -84145, -84145],
                                     [0, 1, -1]])
 
         np.testing.assert_array_equal(approx_matrix, expected_matrix)
-
-    def test_invalid_values_raise_exceptions(self):
-        with self.assertRaises(GBMakerValueError):
-            GBMaker(-1.0, self.structure,
-                    self.gb_thickness, self.misorientation)
-        with self.assertRaises(GBMakerValueError):
-            GBMaker(self.a0, 'invalid_structure',
-                    self.gb_thickness, self.misorientation)
-        with self.assertRaises(GBMakerValueError):
-            GBMaker(self.a0, self.structure,
-                    self.gb_thickness, np.array([0.1, 0.2]))
 
     def test_calculate_periodic_spacing_logic(self):
         with patch.object(GBMaker, '_GBMaker__calculate_periodic_spacing', return_value={'x': 5.0, 'y': 10.0, 'z': 15.0}):

@@ -98,6 +98,51 @@ class GBMaker:
         self.__generate_gb()
         self.__box_dims = self.__calculate_box_dimensions()
 
+    # Private class methods
+    def __approximate_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
+        """
+        Approximate the matrix in integer format given the original matrix and
+        the desired precision.
+
+        :param m: The matrix to approximate
+        :param precision: Decimal precision to use during calculations, defaults to 5
+        :return: Integer approximation of the rotation matrix m
+        """
+        # first round the matrix to the desired precision
+        R0 = np.linalg.norm(Rotation.from_matrix(m).as_rotvec(degrees=True))
+        min_by_row_excluding_0 = [
+            min([max(np.abs(row)) if s == 0 else abs(s) for s in row]) for row in m]
+        ratio = np.array(
+            [[s / rowmin for s in row] for row, rowmin in zip(m, min_by_row_excluding_0)])
+
+        ratio_as_fraction = np.array(
+            [
+                [Fraction(i).limit_denominator(10**precision) for i in row]
+                for row in ratio
+            ]
+        )
+        scale_factors = [
+            np.lcm.reduce([f.denominator for f in row]) for row in ratio_as_fraction
+        ]
+        ratio_scaled = np.array(
+            [
+                [f.numerator * scale // f.denominator for f in row]
+                for row, scale in zip(ratio_as_fraction, scale_factors)
+            ]
+        )
+        gcds = np.array([np.gcd.reduce([*row]) for row in ratio_scaled])
+        approx_m = ratio_scaled / gcds[:, None]
+
+        R_approx_normed = np.linalg.norm(
+            Rotation.from_matrix(
+                approx_m / np.linalg.norm(approx_m, axis=1)[:, None]
+            ).as_rotvec(degrees=True)
+        )
+
+        if abs(R0-R_approx_normed) > 0.5:
+            warnings.warn("Approximated matrix error is greater than 0.5 degrees.")
+        return approx_m.astype(int)
+
     def __assign_orientations(self, misorientation: np.ndarray) -> None:
         """
         Private method to separate the misorientation and inclination from the passed in
@@ -109,16 +154,9 @@ class GBMaker:
         """
         self.__misorientation = misorientation[:3]
         self.__inclination = misorientation[3:]
-
-    def __init_unit_cell(self) -> UnitCell:
-        """
-        Initializes the unit cell.
-
-        :return: The unit cell initialized by structure.
-        """
-        unit_cell = UnitCell()
-        unit_cell.init_by_structure(self.__structure, self.__a0)
-        return unit_cell
+        self.__Rmis = Rotation.from_euler('ZXZ', misorientation[:3]).as_matrix()
+        self.__Rincl = (Rotation.from_euler(
+            'z', misorientation[4]) * Rotation.from_euler('y', misorientation[3])).as_matrix()
 
     def __calculate_box_dimensions(self) -> np.ndarray:
         """
@@ -135,6 +173,51 @@ class GBMaker:
             ]
         )
 
+    def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
+        """
+        Calculate the periodic spacing based on the rotation matrix.
+
+        :param threshold: The maximum allowed value that any spacing can take.
+        :return: Dict containing the periodic spacing along the 'x', 'y', and 'z'
+            directions for the given misorientation.
+        """
+        if threshold is None:
+            threshold = self.__a0 * 15
+
+        # approximate the rotation matrix as integers
+        R_left = self.__Rincl
+        R_right = np.dot(self.__Rmis, self.__Rincl)
+        # # We store the approximate matrices as objects to allow for large numbers
+        R_left_approx = self.__approximate_matrix_as_int(R_left).astype(object)
+        R_right_approx = self.__approximate_matrix_as_int(R_right).astype(object)
+        # The rows of the approximated matrix gives the Miller indices of the directions
+        # that are now aligned along the x, y, and z axes. We calculate the interplanar
+        # spacings using the usual formula: d = a / sqrt(h**2+k**2+l**2)
+        # Note that math.sqrt is used  to take advantage of the lack of a limit on Python
+        # integers
+        interplanar_spacings_left = self.__a0 / \
+            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
+                     for row in R_left_approx])
+        interplanar_spacings_right = self.__a0 / \
+            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
+                     for row in R_right_approx])
+
+        # The number of planes before periodicity is the square of the denominator in
+        # the interplanar_spacings calculation above. Thus, the total periodic distance
+        # is going to be (a / d) ** 2 * 2 = a**2 / d
+        # We limit the spacing to some threshold value to prevent overly
+        # large systems.
+        spacing_left = {axis: min(val, threshold) for axis, val in zip(
+            ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_left)}
+        spacing_right = {axis: min(val, threshold) for axis, val in zip(
+            ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_right)}
+
+        spacing = {axis: max(spacing_left[axis], spacing_right[axis])
+                   for axis in ['x', 'y', 'z']}
+        if threshold in spacing.values():
+            warnings.warn("Resulting boundary is non-periodic.")
+        return spacing
+
     def __generate_gb(self) -> None:
         """
         Private method to calculate the left grain, right grain, and whole GB system
@@ -143,95 +226,15 @@ class GBMaker:
         self.__right_grain = self.__generate_right_grain()
         self.__gb = np.vstack((self.__left_grain, self.__right_grain))
 
-    def __approximate_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
+    def __init_unit_cell(self) -> UnitCell:
         """
-        Approximate the matrix in integer format given the original matrix and
-        the desired precision.
+        Initializes the unit cell.
 
-        :param m: The matrix to approximate
-        :param precision: Decimal precision to use during calculations, defaults to 5
-        :return: Integer approximation of the rotation matrix m
+        :return: The unit cell initialized by structure.
         """
-
-        # First, convert each value to a fraction. Limit the denominator according to
-        # the desired precision.
-        m_fraction = np.array(
-            [[Fraction(i).limit_denominator(10**precision)
-              for i in row] for row in m]
-        )
-        # Extract the denominators of each value
-        denoms = np.array([[i.denominator for i in row] for row in m_fraction])
-
-        # Multiplying by the least common multiple for the denominators in a row-wise
-        # manner gives an integer representation of m
-        scale_factors = np.array([math.lcm(*row) for row in denoms])
-
-        # Scale each row by the LCM of the denominators
-        scaled_m = np.array(
-            [
-                [int(i) for i in row * scale]
-                for row, scale in zip(m_fraction, scale_factors)
-            ],
-            dtype=int,
-        )
-
-        # This might occassionally result in an integer matrix that can be reduced.
-        # This reduction occurs by determining the GCD of each row and dividing the row
-        # by that value.
-        gcds = [math.gcd(*row) for row in scaled_m]
-
-        approx_m = np.array(
-            [row / s for row, s in zip(scaled_m, gcds)], dtype=int)
-        min_val = np.min(abs(approx_m))
-        # TODO: Figure out how this value relates to the threshold parameter in
-        # get_periodic_spacing
-        if min_val > 100:
-            warnings.warn("Resulting boundary is non-periodic.")
-        return approx_m
-
-    def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
-        """
-        Calculate the periodic spacing based on the rotation matrix.
-        TODO: Implement inclination dependence. Currently only implements
-        misorientation. Part of this will require minimizing the strain between the two
-        GBs.
-
-        :param threshold: The maximum allowed value that any spacing can take
-        :return: Dict containing the periodic spacing along the 'x', 'y', and 'z'
-            directions for the given misorientation.
-        """
-        if threshold is None:
-            threshold = self.__a0 * 15
-        R = Rotation.from_euler(
-            'ZXZ', self.__misorientation, degrees=False).as_matrix()
-        # R_incl = Rotation.from_euler()
-
-        # approximate the rotation matrix as integers
-        # R_left = R_incl.as_matrix()
-        # R_right = R.as_matrix() - R_incl.as_matrix()
-        # # We store the approximate matrices as objects to allow for large numbers
-        # R_left_approx = self.__approximate_matrix_as_int(R_left).astype(object)
-        # R_right_approx = self.__approximate_matrix_as_int(R_right).astype(object)
-        R_approx = self.__approximate_matrix_as_int(R).astype(object)
-        # The rows of the approximated matrix gives the Miller indices of the directions
-        # that are now aligned along the x, y, and z axes. We calculate the interplanar
-        # spacings using the usual formula: d = a / sqrt(h**2+k**2+l**2)
-        # Note that math.sqrt is used  to take advantage of the lack of a limit on Python
-        # integers
-        interplanar_spacings = self.__a0 / \
-            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2]*row[2])
-                     for row in R_approx])
-
-        # The number of planes before periodicity is the square of the denominator in
-        # the interplanar_spacings calculation above. Thus, the total periodic distance
-        # is going to be (a / d) ** 2 * 2 = a**2 / d
-        # We limit the spacing
-        spacing = {axis: min(val, threshold) for axis, val in zip(
-            ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings)}
-
-        # TODO: compare the spacings from the left and right grain
-
-        return spacing
+        unit_cell = UnitCell()
+        unit_cell.init_by_structure(self.__structure, self.__a0)
+        return unit_cell
 
     def __generate_left_grain(self) -> np.ndarray:
         """
@@ -247,6 +250,8 @@ class GBMaker:
 
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
         atoms = self.get_supercell(corners)
+
+        atoms[:, 1:] = np.dot(atoms[:, 1:], self.__Rincl.T)
 
         return self.__get_points_inside_box(
             atoms,
@@ -267,8 +272,7 @@ class GBMaker:
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
         atoms = self.get_supercell(corners)
 
-        R = Rotation.from_euler(
-            'ZXZ', self.__misorientation, degrees=False).as_matrix()
+        R = np.dot(self.__Rincl, self.__Rmis)
         atoms[:, 1:] = np.dot(atoms[:, 1:], R.T)
 
         atoms[:, 1] += np.amax(self.left_grain[:, 1])
@@ -496,6 +500,11 @@ class GBMaker:
             value, np.ndarray, "misorientation", expected_length=5)
         self.__misorientation = misorientation[:3]
         self.__inclination = misorientation[3:]
+        self.__Rmis = Rotation.from_euler('ZXZ', misorientation[:3]).as_matrix()
+        self.__Rincl = (
+            Rotation.from_euler('z', misorientation[4]) *
+            Rotation.from_euler('y', misorientation[3])
+        ).as_matrix()
         self.update_spacing()
 
     @property
