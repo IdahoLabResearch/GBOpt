@@ -16,15 +16,19 @@ class TestGBMaker(unittest.TestCase):
         self.a0 = 3.61
         self.structure = 'fcc'
         self.gb_thickness = 10.0
+        theta = math.radians(36.869898)
         self.misorientation = np.array(
-            [math.radians(36.869898), 0.0, 0.0, 0.0, 0.0])
-        self.repeat_factor = 5
+            [theta, 0.0, 0.0, 0.0, -theta / 2.0])
+        self.repeat_factor = 6
         self.x_dim = 60.0
         self.vacuum = 10.0
         self.gb_id = 0
+        self.interaction_distance = 10
         self.gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
                            self.misorientation, repeat_factor=self.repeat_factor,
-                           x_dim=self.x_dim, vacuum=self.vacuum, gb_id=self.gb_id)
+                           x_dim=self.x_dim, vacuum=self.vacuum,
+                           interaction_distance=self.interaction_distance,
+                           gb_id=self.gb_id)
 
     def test_initialization(self):
         # Test that all values are set correctly at initialization
@@ -33,14 +37,27 @@ class TestGBMaker(unittest.TestCase):
         self.assertEqual(self.gbm.gb_thickness, self.gb_thickness)
         np.testing.assert_array_equal(
             self.gbm.misorientation, self.misorientation)
-        self.assertEqual(self.gbm.repeat_factor, self.repeat_factor)
+        self.assertEqual(self.gbm.repeat_factor, [
+                         self.repeat_factor, self.repeat_factor])
         self.assertEqual(self.gbm.x_dim, self.x_dim)
         self.assertEqual(self.gbm.vacuum_thickness, self.vacuum)
         self.assertEqual(self.gbm.id, self.gb_id)
         unit_cell = UnitCell()
         unit_cell.init_by_structure(self.structure, self.a0)
         self.assertTrue(repr(self.gbm.unit_cell) == repr(unit_cell))
+        self.assertEqual(self.gbm.interaction_distance, self.interaction_distance)
+        self.assertTrue(self.gbm.gb.shape[0] > 0)
+        self.assertTrue(isinstance(self.gbm.gb, np.ndarray))
+        self.assertIsNotNone(self.gbm.left_grain)
+        self.assertIsNotNone(self.gbm.right_grain)
+        self.assertEqual(self.gbm.gb.shape[1], 4)
+        left_grain = self.gbm.left_grain
+        right_grain = self.gbm.right_grain
+        gb = self.gbm.gb
+        self.assertEqual(
+            left_grain.shape[0] + right_grain.shape[0], gb.shape[0])
 
+    # Tests for invalid values
     def test_invalid_a0_type(self):
         with self.assertRaises(GBMakerTypeError):
             self.gbm.a0 = "invalid"
@@ -57,27 +74,43 @@ class TestGBMaker(unittest.TestCase):
         with self.assertRaises(GBMakerValueError):
             self.gbm.structure = "invalid_structure"
 
-    def test_invalid_misorientation_type(self):
-        with self.assertRaises(GBMakerTypeError):
-            self.gbm.misorientation = "invalid"
-
-    def test_invalid_misorientation_length(self):
+    def test_invalid_values_raise_exceptions(self):
         with self.assertRaises(GBMakerValueError):
-            self.gbm.misorientation = np.array([0.1, 0.2])
+            GBMaker(-1.0, self.structure,
+                    self.gb_thickness, self.misorientation)
+        with self.assertRaises(GBMakerValueError):
+            GBMaker(self.a0, 'invalid_structure',
+                    self.gb_thickness, self.misorientation)
+        with self.assertRaises(GBMakerValueError):
+            GBMaker(self.a0, self.structure,
+                    self.gb_thickness, np.array([0.1, 0.2]))
+        with self.assertRaises(GBMakerValueError):
+            GBMaker(self.a0, self.structure, -5.0,
+                    self.misorientation)
 
-    def test_update_spacing(self):
-        initial_spacing = self.gbm.spacing
-        self.gbm.misorientation = np.array([0.2, 0.3, 0.4, 0.5, 0.6])
-        self.assertNotEqual(initial_spacing, self.gbm.spacing)
-
-    def test_generate_gb(self):
-        self.assertTrue(self.gbm.gb.shape[0] > 0)
-        self.assertTrue(isinstance(self.gbm.gb, np.ndarray))
+    # Tests for additional getters
+    def test_additional_getters(self):
+        self.assertGreater(self.gbm.y_dim, 0)
+        self.assertGreater(self.gbm.z_dim, 0)
+        self.assertGreater(self.gbm.radius, 0)
 
     def test_box_dimensions(self):
         box_dims = self.gbm.box_dims
         self.assertTrue(isinstance(box_dims, np.ndarray))
         self.assertEqual(box_dims.shape, (3, 2))
+
+    # Tests for public methods
+    def test_get_supercell(self):
+        corners = np.array([[0, 0, 0], [10, 10, 10]])
+        supercell = self.gbm.get_supercell(corners)
+        self.assertTrue(isinstance(supercell, np.ndarray))
+        self.assertGreater(supercell.shape[0], 0)
+
+    def test_update_spacing(self):
+        initial_spacing = self.gbm.spacing
+        theta = math.radians(22.619865)
+        self.gbm.misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
+        self.assertNotEqual(initial_spacing, self.gbm.spacing)
 
     def test_write_lammps(self):
         atoms = self.gbm.gb
@@ -90,18 +123,24 @@ class TestGBMaker(unittest.TestCase):
             self.assertIn("atoms", content[2].lower())
             self.assertIn("atom types", content[3].lower())
 
-    def test_get_supercell(self):
-        corners = np.array([[0, 0, 0], [10, 10, 10]])
-        supercell = self.gbm.get_supercell(corners)
-        self.assertTrue(isinstance(supercell, np.ndarray))
-        self.assertGreater(supercell.shape[0], 0)
+    # Tests for setters
+    def test_box_dimensions_after_updates(self):
+        original_box_dims = self.gbm.box_dims.copy()
+        self.gbm.x_dim = 80.0
+        self.assertFalse(np.allclose(original_box_dims, self.gbm.box_dims))
 
-    def test_additional_getters(self):
-        self.assertGreater(self.gbm.y_dim, 0)
-        self.assertGreater(self.gbm.z_dim, 0)
-        self.assertGreater(self.gbm.radius, 0)
+    def test_misorientation_spacing(self):
+        original_spacing = self.gbm.spacing.copy()
+        theta = math.radians(90-36.869898)
+        self.gbm.misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
+        self.assertNotEqual(original_spacing, self.gbm.spacing)
 
     def test_setters_update_properties(self):
+        self.gbm.interaction_distance = 6
+        self.assertEqual(self.gbm.interaction_distance, 6)
+        self.assertGreater(self.gbm.y_dim, 2*self.gbm.interaction_distance)
+        self.assertGreater(self.gbm.z_dim, 2*self.gbm.interaction_distance)
+
         self.gbm.a0 = 4.0
         self.assertEqual(self.gbm.a0, 4.0)
 
@@ -111,13 +150,27 @@ class TestGBMaker(unittest.TestCase):
         self.gbm.gb_thickness = 12.0
         self.assertEqual(self.gbm.gb_thickness, 12.0)
 
-        new_misorientation = np.array([0.3, 0.4, 0.5, 0.6, 0.7])
+        with self.assertWarns(UserWarning):
+            self.gbm.misorientation = np.array([0.3, 0.4, 0.5, 0.6, 0.7])
+
+        theta = math.radians(90-36.869898)
+        new_misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
         self.gbm.misorientation = new_misorientation
         np.testing.assert_array_equal(
             self.gbm.misorientation, new_misorientation)
 
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.repeat_factor = [-2, -1]
+
         self.gbm.repeat_factor = 6
-        self.assertEqual(self.gbm.repeat_factor, 6)
+        self.assertEqual(self.gbm.repeat_factor, [6, 6])
+
+        with self.assertWarns(UserWarning):
+            self.gbm.repeat_factor = 1
+            self.gbm.repeat_factor = [1, 1]
+
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.repeat_factor = [1.5, 2.0]
 
         self.gbm.x_dim = 80.0
         self.assertEqual(self.gbm.x_dim, 80.0)
@@ -128,6 +181,16 @@ class TestGBMaker(unittest.TestCase):
         self.gbm.id = 2
         self.assertEqual(self.gbm.id, 2)
 
+    def test_thin_thick_box_dimensions(self):
+        # Thin box
+        self.gbm.x_dim = 5.0
+        self.assertLess(self.gbm.box_dims[0][1], 25.0)
+
+        # Thick box
+        self.gbm.vacuum_thickness = 50.0
+        self.assertGreater(self.gbm.box_dims[0][1], 50.0)
+
+    # Tests for private methods
     def test_approximate_matrix_as_int(self):
         rotation_matrix = np.array([[0.70710678, 0.5, 0.5],
                                     [0.70710678, -0.5, -0.5],
@@ -160,33 +223,25 @@ class TestGBMaker(unittest.TestCase):
             self.assertEqual(self.gbm.spacing['y'], 10.0)
             self.assertEqual(self.gbm.spacing['z'], 15.0)
 
-    # def test_large_repeat_factor(self):
-    #     large_repeat_gbmaker = GBMaker(
-    #         self.a0, self.structure, self.gb_thickness, self.misorientation,
-    #         repeat_factor=100, x_dim=self.x_dim, vacuum=self.vacuum
-    #     )
-    #     self.assertEqual(large_repeat_gbmaker.repeat_factor, 100)
+    # Tests for warnings
+    def test_repeat_factor_warning(self):
+        with self.assertWarns(UserWarning):
+            gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
+                          self.misorientation, repeat_factor=[2, 3],
+                          x_dim=self.x_dim, vacuum=self.vacuum,
+                          interaction_distance=30,
+                          gb_id=self.gb_id)
 
-    def test_misorientation_rotation(self):
-        original_spacing = self.gbm.spacing.copy()
-        self.gbm.misorientation = np.array([0.5, 0.5, 0.5, 0.5, 0.5])
-        self.assertNotEqual(original_spacing, self.gbm.spacing)
-
-    def test_grain_boundary_generation(self):
-        self.assertIsNotNone(self.gbm.left_grain)
-        self.assertIsNotNone(self.gbm.right_grain)
-        self.assertEqual(self.gbm.gb.shape[1], 4)
-
-    def test_box_dimensions_after_updates(self):
-        original_box_dims = self.gbm.box_dims.copy()
-        self.gbm.x_dim = 80.0
-        self.assertFalse(np.allclose(original_box_dims, self.gbm.box_dims))
+        with self.assertWarns(UserWarning):
+            gbm.interaction_distance = 32
 
     def test_non_periodic_boundary_warning(self):
         with self.assertWarns(UserWarning):
             self.gbm._GBMaker__approximate_matrix_as_int(
                 np.array([[0.123456789, 0.56789123, -0.918273645], [-0.135792468, 0.246813579, 0.1], [0.159283746, -0.2, 0.1]]))
 
+    # Additional tests
+    # Output data file format is as expected.
     def test_lammps_file_formatting(self):
         atoms = np.array([[1, 0.0, 0.0, 0.0], [2, 1.0, 1.0, 1.0]])
         box_sizes = np.array([[0.0, 10.0], [0.0, 10.0], [0.0, 10.0]])
@@ -196,31 +251,6 @@ class TestGBMaker(unittest.TestCase):
                 content = f.readlines()
             self.assertEqual(content[2].strip(), '2 atoms')
             self.assertEqual(content[3].strip(), '2 atom types')
-
-    def test_data_integrity_in_gb(self):
-        left_grain = self.gbm.left_grain
-        right_grain = self.gbm.right_grain
-        gb = self.gbm.gb
-
-        self.assertEqual(
-            left_grain.shape[0] + right_grain.shape[0], gb.shape[0])
-
-    def test_inconsistent_data_raises_exceptions(self):
-        with self.assertRaises(GBMakerValueError):
-            GBMaker(self.a0, self.structure, -5.0,
-                    self.misorientation)  # Negative thickness
-
-    # Test 13: Edge Cases for Box Dimension Calculations
-    def test_thin_thick_box_dimensions(self):
-        # Thin box
-        self.gbm.x_dim = 5.0
-        # Ensure small x-dimension
-        self.assertLess(self.gbm.box_dims[0][1], 25.0)
-
-        # Thick box
-        self.gbm.vacuum_thickness = 50.0
-        # Ensure large x-dimension
-        self.assertGreater(self.gbm.box_dims[0][1], 50.0)
 
 
 if __name__ == '__main__':

@@ -2,7 +2,7 @@ import math
 import warnings
 from fractions import Fraction
 from numbers import Number
-from typing import Any, Tuple, Union
+from typing import Any, Sequence, Tuple, Union
 
 import numpy as np
 from scipy.spatial.transform import Rotation
@@ -35,36 +35,64 @@ class GBMaker:
         'fluorite', 'rocksalt', 'zincblende'].
     :param gb_thickness: The width of the GB region (Angstroms).
     :param misorientation: Misorientation angles (alpha, beta, gamma, theta, phi) in
-        radians.
+        radians. Alpha, beta, and gamma represent the ZXZ Euler angles, and theta and
+        phi represent the additional rotation about y and z, respectively.
     :param repeat_factor: The number of times to repeat the unit cell in the y and z
-        directions, optional, defaults to 5.
-    :param x_dim: Size of the grain in the x dimension (Angstroms), optional, defaults
-        to 60.
+        directions, optional, defaults to 2. A single integer value is assumed to be
+        used for both directions, while a list of length 2 is assumed to apply
+        sequentially to y and z. Values less than 2 give a warning.
+    :param x_dim: Size of one grain in the x dimension (Angstroms), optional, defaults
+        to 50.
     :param vacuum: Thickness of the vacuum region around the grains in the x dimension
         (Angstroms), optional, defaults to 10.
+    :param interaction_distance: The maximum distance that atoms interact with each
+        other, optional, defaults to 15.0. If y_dim or z_dim are less than twice this
+        number with the given repeat_factor(s), a new value is calculated that
+        accommodates this value.
     :param gb_id: The identifier for the created GB system, optional, defaults to 0.
     """
 
     def __init__(self, a0: float, structure: str, gb_thickness: float,
-                 misorientation: np.ndarray, *, repeat_factor: int = 5,
-                 x_dim: float = 60, vacuum: float = 10, gb_id: int = 1):
+                 misorientation: np.ndarray, *,
+                 repeat_factor: Union[int, Sequence[int]] = 2, x_dim: float = 50,
+                 vacuum: float = 10, interaction_distance: float = 15.0, gb_id: int = 1):
         self.__a0 = self.__validate(a0, Number, 'a0', positive=True)
         self.__structure = self.__validate(structure, str, 'structure')
         self.__gb_thickness = self.__validate(
-            gb_thickness, Number, 'gb_thickness', positive=True)
-        self.__assign_orientations(self.__validate(np.asarray(
-            misorientation), np.ndarray, 'misorientation', expected_length=5))
+            gb_thickness,
+            Number,
+            'gb_thickness',
+            positive=True
+        )
+        self.__assign_orientations(
+            self.__validate(
+                np.asarray(misorientation),
+                np.ndarray,
+                'misorientation',
+                expected_length=5
+            )
+        )
         self.__repeat_factor = self.__validate(
-            repeat_factor, int, 'repeat_factor', positive=True)
+            repeat_factor,
+            (int, Sequence),
+            'repeat_factor',
+            expected_length=2,
+            positive=True
+        )
         self.__x_dim = self.__validate(x_dim, Number, 'x_dim', positive=True)
         self.__vacuum_thickness = self.__validate(
-            vacuum, Number, 'vacuum_thickness', positive=True)
+            vacuum,
+            Number,
+            'vacuum_thickness',
+            positive=True
+        )
+        self.__interaction_distance = self.__validate(
+            interaction_distance, Number, 'interaction_distance', positive=True)
         self.__id = self.__validate(gb_id, int, 'id', positive=True)
 
         self.__unit_cell = self.__init_unit_cell()
-        self.__spacing = self.__calculate_periodic_spacing()  # Dict of periodic distances
-        self.__y_dim = self.__repeat_factor*self.__spacing['y']
-        self.__z_dim = self.__repeat_factor*self.__spacing['z']
+        self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
+        self.__update_periodic_dims()
 
         self.__radius = a0 * self.__unit_cell.radius  # atom radius
         self.__generate_gb()
@@ -265,6 +293,34 @@ class GBMaker:
             y_slice[:, 3] >= z_min, y_slice[:, 3] < z_max))]
         return z_slice
 
+    def __update_periodic_dims(self) -> None:
+        """
+        Updates the y_dim and z_dim parameters after a relevant parameter has been
+        changed.
+
+        :raises UserWarning: Warning issued when the repeat factors are modified to
+            accommodate the interaction distance.
+        """
+        self.__y_dim = self.__repeat_factor[0] * self.__spacing['y']
+        self.__z_dim = self.__repeat_factor[1] * self.__spacing['z']
+        repeat_z = self.__repeat_factor[1]
+        cutoff = 2 * self.__interaction_distance
+        if self.__y_dim < cutoff:
+            repeat_y = math.ceil(cutoff/self.__spacing['y'])
+            self.__y_dim = repeat_y * self.__spacing['y']
+            warnings.warn(
+                f"Repeat factor in y modified to {repeat_y} to accommodate interaction "
+                f"distance of {cutoff}.")
+            self.__repeat_factor[0] = repeat_y
+        if self.__z_dim < cutoff:
+            repeat_z = math.ceil(cutoff / self.__spacing['z'])
+            self.__z_dim = repeat_z * self.__spacing['z']
+            warnings.warn(
+                f"Repeat factor in z modified to {repeat_z} to accommodate interaction "
+                f"distance of {cutoff}.")
+            self.__repeat_factor[1] = repeat_z
+        self.__box_dims = self.__calculate_box_dimensions()
+
     def __validate(self, value: Any, expected_types: Union[type, Tuple[type, ...]],
                    parameter_name: str, *, positive: bool = False, expected_length: int = None):
         """
@@ -296,7 +352,13 @@ class GBMaker:
             raise GBMakerValueError(
                 f"{parameter_name} must be a positive value.")
 
-        if expected_length is not None and isinstance(value, (list, tuple, np.ndarray)) and len(value) != expected_length:
+        if isinstance(value, (Sequence, np.ndarray)) and all([isinstance(val, Number) for val in value]) and positive:
+            for val in value:
+                if val < 0:
+                    raise GBMakerValueError(
+                        f"{parameter_name} must have all positive values.")
+
+        if expected_length is not None and isinstance(value, (Sequence, np.ndarray)) and len(value) != expected_length:
             raise GBMakerValueError(
                 f"{parameter_name} must have {expected_length} elements."
             )
@@ -307,17 +369,22 @@ class GBMaker:
             raise GBMakerValueError(
                 f"{parameter_name} ({value}) must be one of ['fcc', 'bcc', 'sc', " +
                 "'diamond', 'fluorite', 'rocksalt', 'zincblende'].")
+
+        if parameter_name == 'repeat_factor':
+            if isinstance(value, int):
+                if value < 2:
+                    warnings.warn("Recommended repeat distance at least 2.")
+                value = [value, value]
+            else:  # isinstance(value, (Sequence, np.ndarray))
+                for val in value:
+                    if not isinstance(val, int):
+                        raise GBMakerValueError(
+                            "repeat_factor must be a sequence of type int.")
+                    if val < 2:
+                        warnings.warn("Recommended repeat distance is at least 2.")
         return value
 
-    def update_spacing(self, threshold: float = None) -> None:
-        """
-        Update the periodic spacing based on the rotation matrix and the optional
-        threshold parameter.
-
-        :param threshold: The maximum allowed value that any spacing can take
-        """
-        self.__spacing = self.__calculate_periodic_spacing(threshold)
-
+    # Public methods
     def get_supercell(self, corners: np.ndarray) -> np.ndarray:
         """
         Generates a supercell of lattice sites.
@@ -334,6 +401,15 @@ class GBMaker:
         supercell = np.column_stack(
             (atom_types_expanded, translated_positions))
         return supercell
+
+    def update_spacing(self, threshold: float = None) -> None:
+        """
+        Update the periodic spacing based on the rotation matrix and the optional
+        threshold parameter.
+
+        :param threshold: The maximum allowed value that any spacing can take
+        """
+        self.__spacing = self.__calculate_periodic_spacing(threshold)
 
     def write_lammps(self, atoms: np.ndarray, box_sizes: np.ndarray, file_name: str) -> None:
         """
@@ -370,9 +446,8 @@ class GBMaker:
             for i, pos in enumerate(atoms):
                 fdata.write('{} {:n} {} {} {}\n'.format(i+1, *pos))
 
-    # Standard getters and setters. In situations that require it, updates to additional
-    # parameters are automatically taken care of. In all cases, copies of the values
-    # are returned from the getter methods to prevent unintentional updates.
+    # Properties with getters and setters. Automatic updates for related parameters are
+    # automatically taken care of.
     @property
     def a0(self) -> float:
         return self.__a0
@@ -384,15 +459,6 @@ class GBMaker:
         self.update_spacing()
 
     @property
-    def structure(self) -> str:
-        return self.__structure
-
-    @structure.setter
-    def structure(self, value: str) -> None:
-        self.__structure = self.__validate(value, str, "structure")
-        self.__unit_cell = self.__init_unit_cell()
-
-    @property
     def gb_thickness(self) -> float:
         return self.__gb_thickness
 
@@ -401,6 +467,24 @@ class GBMaker:
         self.__gb_thickness = self.__validate(
             value, float, "gb_thickness", positive=True)
         self.__box_dims = self.__calculate_box_dimensions()
+
+    @property
+    def id(self) -> int:
+        return self.__id
+
+    @id.setter
+    def id(self, value: int):
+        self.__id = self.__validate(value, int, "id", positive=True)
+
+    @property
+    def interaction_distance(self) -> float:
+        return self.__interaction_distance
+
+    @interaction_distance.setter
+    def interaction_distance(self, value: Number) -> None:
+        self.__interaction_distance = self.__validate(
+            value, Number, "interaction_distance", positive=True)
+        self.__update_periodic_dims()
 
     @property
     def misorientation(self) -> np.ndarray:
@@ -421,27 +505,17 @@ class GBMaker:
     @repeat_factor.setter
     def repeat_factor(self, value: int):
         self.__repeat_factor = self.__validate(
-            value, int, "repeat_factor", positive=True)
-        self.__y_dim = self.__repeat_factor*self.__spacing['y']
-        self.__z_dim = self.__repeat_factor*self.__spacing['z']
-        self.__box_dims = self.__calculate_box_dimensions()
+            value, (int, Sequence), "repeat_factor", positive=True)
+        self.__update_periodic_dims()
 
     @property
-    def x_dim(self) -> int:
-        return self.__x_dim
+    def structure(self) -> str:
+        return self.__structure
 
-    @x_dim.setter
-    def x_dim(self, value: Number):
-        self.__x_dim = self.__validate(value, Number, "x_dim", positive=True)
-        self.__box_dims = self.__calculate_box_dimensions()
-
-    @property
-    def y_dim(self) -> int:
-        return self.__y_dim
-
-    @property
-    def z_dim(self) -> int:
-        return self.__z_dim
+    @structure.setter
+    def structure(self, value: str) -> None:
+        self.__structure = self.__validate(value, str, "structure")
+        self.__unit_cell = self.__init_unit_cell()
 
     @property
     def vacuum_thickness(self) -> int:
@@ -454,24 +528,18 @@ class GBMaker:
         self.__box_dims = self.__calculate_box_dimensions()
 
     @property
-    def id(self) -> int:
-        return self.__id
+    def x_dim(self) -> int:
+        return self.__x_dim
 
-    @id.setter
-    def id(self, value: int):
-        self.__id = self.__validate(value, int, "id", positive=True)
+    @x_dim.setter
+    def x_dim(self, value: Number):
+        self.__x_dim = self.__validate(value, Number, "x_dim", positive=True)
+        self.__box_dims = self.__calculate_box_dimensions()
 
+    # Additional getters for other class properties
     @property
-    def unit_cell(self) -> UnitCell:
-        return self.__unit_cell
-
-    @property
-    def spacing(self) -> dict:
-        return self.__spacing
-
-    @property
-    def radius(self) -> float:
-        return self.__radius
+    def box_dims(self) -> np.ndarray:
+        return self.__box_dims
 
     @property
     def gb(self) -> np.ndarray:
@@ -482,23 +550,33 @@ class GBMaker:
         return self.__left_grain
 
     @property
+    def radius(self) -> float:
+        return self.__radius
+
+    @property
     def right_grain(self) -> np.ndarray:
         return self.__right_grain
 
     @property
-    def box_dims(self) -> np.ndarray:
-        return self.__box_dims
+    def spacing(self) -> dict:
+        return self.__spacing
+
+    @property
+    def unit_cell(self) -> UnitCell:
+        return self.__unit_cell
+
+    @property
+    def y_dim(self) -> int:
+        return self.__y_dim
+
+    @property
+    def z_dim(self) -> int:
+        return self.__z_dim
 
 
 if __name__ == '__main__':
     theta = math.radians(36.869898)
-    G = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0,
-                misorientation=[theta, 0, 0, 0, 0], repeat_factor=2)
-    # G = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0,
-    #             misorientation=[1, 0.25, -0.1], repeat_factor=2)
+    G = GBMaker(a0=3.61, structure='fcc', gb_thickness=10.0,
+                misorientation=[theta, 0, 0, 0, -theta/2], repeat_factor=[3, 9])
     G.write_lammps(np.vstack((G.left_grain, G.right_grain)),
                    G.box_dims, "test1.dat")
-    # G2 = GBMaker(a0=4.08, structure='bcc',
-    #              gb_thickness=0.0, misorientation=[theta, 0, 0], repeat_factor=4)
-    # G2.write_lammps(np.vstack((G2.left_grain, G2.right_grain)),
-    #                 G2.box_dims, "test2.dat")
