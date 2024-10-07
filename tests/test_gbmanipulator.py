@@ -1,3 +1,4 @@
+import filecmp
 import math
 import tempfile
 import unittest
@@ -27,13 +28,21 @@ class TestGBManipulator(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         theta = math.radians(36.869898)
-        cls.system = GBMaker(
+        cls.tilt = GBMaker(
             a0=1.0,
             structure='fcc',
             gb_thickness=10.0,
             misorientation=[theta, 0, 0, 0, -theta/2],
-            interaction_distance=10,
-            repeat_factor=1
+            interaction_distance=1,
+            repeat_factor=(2, 5)
+        )
+        cls.twist = GBMaker(
+            a0=1.0,
+            structure='fcc',
+            gb_thickness=10.0,
+            misorientation=[0, theta, 0, 0, 0],
+            interaction_distance=1,
+            repeat_factor=2
         )
 
     def setUp(self):
@@ -46,13 +55,13 @@ class TestGBManipulator(unittest.TestCase):
         self.seed = 100
 
     def test_init_with_one_gbmaker_parent(self):
-        manipulator = GBManipulator(self.system)
+        manipulator = GBManipulator(self.tilt)
         self.assertIsNotNone(manipulator.parents[0])
         self.assertIsNone(manipulator.parents[1])
         self.assertTrue(manipulator._GBManipulator__one_parent)
 
     def test_init_with_two_gbmaker_parents(self):
-        manipulator = GBManipulator(self.system, self.system)
+        manipulator = GBManipulator(self.tilt, self.tilt)
         self.assertIsNotNone(manipulator.parents[0])
         self.assertIsNotNone(manipulator.parents[1])
 
@@ -79,136 +88,145 @@ class TestGBManipulator(unittest.TestCase):
         unit_cell.init_by_structure(self.structure, self.a0)
         gb_thickness = 10
         manipulator = GBManipulator(
-            self.system, self.file1, unit_cell=unit_cell, gb_thickness=gb_thickness)
+            self.tilt, self.file1, unit_cell=unit_cell, gb_thickness=gb_thickness)
         self.assertIsNotNone(manipulator.parents[0])
         self.assertIsNotNone(manipulator.parents[1])
 
         manipulator2 = GBManipulator(
-            self.file1, self.system, unit_cell=unit_cell, gb_thickness=gb_thickness)
+            self.file1, self.tilt, unit_cell=unit_cell, gb_thickness=gb_thickness)
         self.assertIsNotNone(manipulator2.parents[0])
         self.assertIsNotNone(manipulator2.parents[1])
 
     def test_grain_translation(self):
-        manipulator = GBManipulator(self.system)
+        manipulator = GBManipulator(self.tilt)
         new_system = manipulator.translate_right_grain(1.0, 1.0)
-        self.assertTrue(not np.allclose(self.system.gb, new_system))
+        self.assertTrue(not np.allclose(self.tilt.gb, new_system))
 
     def test_grain_translation_warning(self):
-        manipulator = GBManipulator(self.system, self.system)
+        manipulator = GBManipulator(self.tilt, self.tilt)
         with self.assertWarns(UserWarning):
             _ = manipulator.translate_right_grain(1.0, 1.0)
 
     def test_slice_and_merge(self):
-        manipulator = GBManipulator(self.system, self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         new_system = manipulator.slice_and_merge()
-        self.assertFalse(np.allclose(self.system.gb, new_system))
+        self.assertFalse(np.allclose(self.tilt.gb, new_system))
 
     def test_slice_and_merge_error(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.slice_and_merge()
 
     @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(0.10)
-        self.assertGreater(len(self.system.gb), len(new_system))
+        self.assertGreater(len(self.tilt.gb), len(new_system))
 
     @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_fraction_error(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.remove_atoms(0.50)
 
     @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_2_parent_warning(self):
-        manipulator = GBManipulator(self.system, self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(0.10)
 
     @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_calculated_fraction_warning(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(0.0000001)
 
     @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_with_specific_number(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(0.10, num_to_remove=1)
-        self.assertEqual(len(self.system.gb)-1, len(new_system))
+        self.assertEqual(len(self.tilt.gb)-1, len(new_system))
 
     def test_insert_atoms(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
-        new_system1 = manipulator.insert_atoms(fill_fraction=0.10, method='delaunay')
-        self.assertGreater(len(new_system1), len(self.system.gb))
-        new_system2 = manipulator.insert_atoms(fill_fraction=0.10, method='grid')
-        self.assertGreater(len(new_system2), len(self.system.gb))
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
+        new_system1 = manipulator.insert_atoms(0.10, method='delaunay')
+        self.assertGreater(len(new_system1), len(self.tilt.gb))
+        new_system2 = manipulator.insert_atoms(0.10, method='grid')
+        self.assertGreater(len(new_system2), len(self.tilt.gb))
 
     def test_insert_atoms_fraction_error(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.insert_atoms(fill_fraction=0.50, method='delaunay')
 
     def test_insert_atoms_2_parent_warning(self):
-        manipulator = GBManipulator(self.system, self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.insert_atoms(fill_fraction=0.10, method='delaunay')
 
     def test_insert_atoms_calculated_fraction_warning(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.insert_atoms(fill_fraction=0.0000001, method='delaunay')
 
     def test_insert_atoms_invalid_method(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.insert_atoms(fill_fraction=0.10, method='invalid')
 
     def test_insert_atoms_with_specific_number(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
-        new_system1 = manipulator.insert_atoms(method='delaunay', num_to_insert=1)
-        self.assertEqual(len(self.system.gb) + 1, len(new_system1))
-        new_system2 = manipulator.insert_atoms(method='grid', num_to_insert=1)
-        self.assertEqual(len(self.system.gb) + 1, len(new_system2))
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
+        new_system1 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        self.assertEqual(len(self.tilt.gb) + 1, len(new_system1))
+        new_system2 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        self.assertEqual(len(self.tilt.gb) + 1, len(new_system2))
 
     def test_displace_along_soft_modes(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(NotImplementedError):
             _ = manipulator.displace_along_soft_modes()
 
     def test_apply_group_symmetry(self):
-        manipulator = GBManipulator(self.system, seed=self.seed)
+        manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(NotImplementedError):
             _ = manipulator.apply_group_symmetry("group")
 
     def test_parents_getter(self):
-        manipulator = GBManipulator(self.system)
+        manipulator = GBManipulator(self.tilt)
         parents = manipulator.parents
         self.assertTrue(isinstance(parents, _ParentsProxy))
         self.assertTrue(isinstance(parents[0], Parent))
         self.assertIsNone(parents[1])
 
     def test_parents_setter(self):
-        manipulator = GBManipulator(self.system)
+        manipulator = GBManipulator(self.tilt)
         self.assertIsNone(manipulator.parents[1])
-        manipulator.parents[1] = Parent(self.system)
+        manipulator.parents[1] = Parent(self.tilt)
         self.assertIsNotNone(manipulator.parents[1])
-        manipulator.parents = [Parent(self.file1, unit_cell=self.system.unit_cell),
-                               Parent(self.file2, unit_cell=self.system.unit_cell)]
+        manipulator.parents = [Parent(self.file1, unit_cell=self.tilt.unit_cell),
+                               Parent(self.file2, unit_cell=self.tilt.unit_cell)]
         self.assertFalse(None in manipulator.parents)
 
     def test_write_lammps_after_manipulate(self):
-        manipulator = GBManipulator(self.system, self.system)
+        manipulator = GBManipulator(self.tilt, self.tilt)
         p1 = manipulator.translate_right_grain(1, 1)
         p2 = manipulator.slice_and_merge()
         p3 = manipulator.insert_atoms(fill_fraction=0.2, method='delaunay')
         # p4 = manipulator.remove_atoms(0.2)
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.system.write_lammps(p1, self.system.box_dims, temp_file.name)
-            self.system.write_lammps(p2, self.system.box_dims, temp_file.name)
-            self.system.write_lammps(p3, self.system.box_dims, temp_file.name)
-            # self.system.write_lammps(p4, self.system.box_dims, temp_file.name)
+            self.tilt.write_lammps(p1, self.tilt.box_dims, temp_file.name)
+            self.tilt.write_lammps(p2, self.tilt.box_dims, temp_file.name)
+            self.tilt.write_lammps(p3, self.tilt.box_dims, temp_file.name)
+            # self.GB.write_lammps(p4, self.GB.box_dims, temp_file.name)
+
+    def test_created_gbs(self):
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            self.tilt.write_lammps(self.tilt.gb, self.tilt.box_dims, temp_file.name)
+            self.assertTrue(filecmp.cmp("./tests/gold/sigma5_tilt.txt",
+                            temp_file.name, shallow=False))
+            self.twist.write_lammps(self.twist.gb, self.twist.box_dims, temp_file.name)
+            self.assertTrue(filecmp.cmp("./tests/gold/sigma5_twist.txt",
+                            temp_file.name, shallow=False))
 
 
 class TestParent(unittest.TestCase):

@@ -1,6 +1,5 @@
 import math
 import warnings
-from fractions import Fraction
 from numbers import Number
 from typing import Any, Sequence, Tuple, Union
 
@@ -110,28 +109,13 @@ class GBMaker:
         """
         # first round the matrix to the desired precision
         R0 = np.linalg.norm(Rotation.from_matrix(m).as_rotvec(degrees=True))
-        min_by_row_excluding_0 = [
-            min([max(np.abs(row)) if s == 0 else abs(s) for s in row]) for row in m]
-        ratio = np.array(
-            [[s / rowmin for s in row] for row, rowmin in zip(m, min_by_row_excluding_0)])
+        min_by_row_excluding_0 = np.ma.amin(np.ma.masked_equal(np.abs(m), 0), axis=1)
+        ratio = m / min_by_row_excluding_0[:, np.newaxis]
 
-        ratio_as_fraction = np.array(
-            [
-                [Fraction(i).limit_denominator(10**precision) for i in row]
-                for row in ratio
-            ]
-        )
-        scale_factors = [
-            np.lcm.reduce([f.denominator for f in row]) for row in ratio_as_fraction
-        ]
-        ratio_scaled = np.array(
-            [
-                [f.numerator * scale // f.denominator for f in row]
-                for row, scale in zip(ratio_as_fraction, scale_factors)
-            ]
-        )
-        gcds = np.array([np.gcd.reduce([*row]) for row in ratio_scaled])
-        approx_m = ratio_scaled / gcds[:, None]
+        rounded = np.round(ratio, precision)
+        scaled = (10**precision * rounded).astype(int)
+        gcds = np.gcd.reduce(scaled, axis=1)
+        approx_m = scaled / gcds[:, None]
 
         R_approx_normed = np.linalg.norm(
             Rotation.from_matrix(
@@ -193,8 +177,8 @@ class GBMaker:
         # The rows of the approximated matrix gives the Miller indices of the directions
         # that are now aligned along the x, y, and z axes. We calculate the interplanar
         # spacings using the usual formula: d = a / sqrt(h**2+k**2+l**2)
-        # Note that math.sqrt is used  to take advantage of the lack of a limit on Python
-        # integers
+        # Note that math.sqrt is used to take advantage of the lack of a limit on Python
+        # integers - np.sqrt() cannot generally be used.
         interplanar_spacings_left = self.__a0 / \
             np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
                      for row in R_left_approx])
