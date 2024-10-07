@@ -95,21 +95,27 @@ class Parent:
     """
     Class containing the information about a parent of a new structure.
 
-    :param GB: A GBMaker instance or string containing the filename of a LAMMPS dump
+    :param system: A GBMaker instance or string containing the filename of a LAMMPS dump
         file.
     :param unit_cell: Required only if GB is specified using a LAMMPS dump file. Gives
         the nominal unit cell of the system.
     :param gb_thickness: Thickness of the GB region, optional, defaults to 10.
     """
 
-    def __init__(self, GB: Union[GBMaker, str], *, unit_cell: UnitCell = None, gb_thickness: float = 10) -> None:
-        if isinstance(GB, GBMaker):
-            self.__init_by_gbmaker(GB)
+    def __init__(
+        self,
+        system: Union[GBMaker, str],
+        *,
+        unit_cell: UnitCell = None,
+        gb_thickness: float = 10
+    ) -> None:
+        if isinstance(system, GBMaker):
+            self.__init_by_gbmaker(system)
         else:
             if gb_thickness is None:  # defaults to 10 if passed in as None.
                 gb_thickness = 10
-            self.__init_by_snapshot(GB, unit_cell, gb_thickness)
-        self.__whole_gb = np.vstack((self.__left_grain, self.__right_grain))
+            self.__init_by_snapshot(system, unit_cell, gb_thickness)
+        self.__whole_system = np.vstack((self.__left_grain, self.__right_grain))
         left_x_max = max(self.__left_grain[:, 1])
         right_x_min = min(self.__right_grain[:, 1])
         left_cut = left_x_max - self.__gb_thickness / 2.0
@@ -117,46 +123,50 @@ class Parent:
         left_gb_indices = self.__left_grain[:, 1] > left_cut
         right_gb_indices = self.__right_grain[:, 1] < right_cut
         gb_indices = np.hstack((left_gb_indices, right_gb_indices))
-        self.__gb_indices = np.array(range(len(self.__whole_gb)))[gb_indices]
+        self.__gb_indices = np.array(range(len(self.__whole_system)))[gb_indices]
         left_gb = self.__left_grain[left_gb_indices]
         right_gb = self.__right_grain[right_gb_indices]
-        self.__gb_region = np.vstack((left_gb, right_gb))
-        # TODO: make this a more robust calculation, rather than assuming the GB is
-        # in the middle of the system.
-        self.__GBpos = self.__whole_gb[
+        self.__gb_atoms = np.vstack((left_gb, right_gb))
+        # TODO: make this a more robust calculation, rather than assuming the GB is in the middle of the system.
+        self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
-                    self.__whole_gb[:, 0] >= self.__box_dims[0, 1] /
+                    self.__whole_system[:, 0] >= self.__box_dims[0, 1] /
                     2 - self.__gb_thickness/2,
-                    self.__whole_gb[:, 0] <= self.__box_dims[0, 1] /
+                    self.__whole_system[:, 0] <= self.__box_dims[0, 1] /
                     2 + self.__gb_thickness/2
                 )
             )
         ]
 
-    def __init_by_gbmaker(self, GB: GBMaker) -> None:
+    def __init_by_gbmaker(self, system: GBMaker) -> None:
         """
         Method for initializing the Parent using a GBMaker instance.
 
-        :param GB: The GBMaker instance.
+        :param system: The GBMaker instance.
         """
-        self.__right_grain = GB.right_grain
-        self.__left_grain = GB.left_grain
-        self.__y_dim = GB.y_dim
-        self.__z_dim = GB.z_dim
-        self.__gb_thickness = GB.gb_thickness
-        self.__unit_cell = GB.unit_cell
-        self.__radius = GB.radius
-        self.__box_dims = GB.box_dims
+        self.__right_grain = system.right_grain
+        self.__left_grain = system.left_grain
+        self.__y_dim = system.y_dim
+        self.__z_dim = system.z_dim
+        self.__gb_thickness = system.gb_thickness
+        self.__unit_cell = system.unit_cell
+        self.__atom_radius = system.radius
+        self.__box_dims = system.box_dims
         # We do not use GB.x_dim because this is limited to a single grain of the GB,
         # not the entire system.
         self.__x_dim = self.__box_dims[0][1] - self.__box_dims[0][0]
 
-    def __init_by_snapshot(self, GB: str, unit_cell: UnitCell, gb_thickness: float) -> None:
+    def __init_by_snapshot(
+        self,
+        system: str,
+        unit_cell: UnitCell,
+        gb_thickness: float
+    ) -> None:
         """
         Method for initializing the Parent using a LAMMPS dump file.
 
-        :param GB: Filename of the LAMMPS dump file.
+        :param system: Filename of the LAMMPS dump file.
         :param unit_cell: Nominal unit cell of the bulk structure.
         :param gb_thickness: Thickness of the GB region, given in angstroms.
         :raises ParentValueError: Exception raised if unit_cell is not passed in.
@@ -171,16 +181,16 @@ class Parent:
             raise ParentValueError("Unit cell must be specified for snapshots")
         self.__unit_cell = unit_cell
         self.__gb_thickness = gb_thickness
-        if not isfile(GB):
-            raise ParentFileNotFoundError(f"{GB} does not exist.")
-        with open(GB) as f:
+        if not isfile(system):
+            raise ParentFileNotFoundError(f"{system} does not exist.")
+        with open(system) as f:
             line = f.readline()
             # skip to the box bounds
             while not line.startswith("ITEM: BOX BOUNDS"):
                 line = f.readline()
                 if not line:
                     raise ParentCorruptedSnapshotError(
-                        f"Box bounds not found in {GB}")
+                        f"Box bounds not found in {system}")
             if len(line.split()) == 6:  # orthogonal box
                 x_dims = [float(i) for i in f.readline().split()]
                 y_dims = [float(i) for i in f.readline().split()]
@@ -196,30 +206,31 @@ class Parent:
                 z_dims, _ = ([float(i)
                               for i in zline[0:2]], float(zline[2]))
             else:
-                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {GB}")
+                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {system}")
             if not (x_dims or y_dims or z_dims) or len(x_dims) != 2 or \
                     len(y_dims) != 2 or len(z_dims) != 2:
-                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {GB}")
+                raise ParentCorruptedSnapshotError(f"Box bounds corrupted in {system}")
             self.__box_dims = np.array([x_dims, y_dims, z_dims])
             self.__x_dim = x_dims[1] - x_dims[0]
             self.__y_dim = y_dims[1] - y_dims[0]
             self.__z_dim = z_dims[1] - z_dims[0]
-            # TODO: Need a more robust calculation of where the GB is located.
+            # TODO: Need a more robust calculation of where the GB is located. This calculation is duplicated.
             grain_cutoff = (x_dims[1] - x_dims[0]) / 2
             line = f.readline()
             while not line.startswith("ITEM: ATOMS"):
                 line = f.readline()
                 if not line:
-                    raise ParentCorruptedSnapshotError(f"Atoms not found in {GB}")
+                    raise ParentCorruptedSnapshotError(f"Atoms not found in {system}")
             atom_attributes = line.split()[2:]
-            required = ['id', 'type', 'x', 'y', 'z']
+            required_attributes = ['id', 'type', 'x', 'y', 'z']
 
-            if not all([i in atom_attributes for i in required]):
+            if not all([i in atom_attributes for i in required_attributes]):
                 raise ParentSnapshotMissingDataError(
                     f"One or more required attributes are missing.\n"
-                    f"Required: {required}, "
+                    f"Required: {required_attributes}, "
                     f"available: {atom_attributes}")
-            reqd_index = {attr: atom_attributes.index(attr) for attr in required}
+            required_attribute_indices = {attr: atom_attributes.index(
+                attr) for attr in required_attributes}
             left_grain = []
             right_grain = []
             line = f.readline()  # read the next line to move the file pointer ahead.
@@ -227,11 +238,11 @@ class Parent:
                 line = line.split()
                 if not line:
                     break
-                atom = Atom(int(line[reqd_index['id']]),
-                            int(line[reqd_index['type']]),
-                            float(line[reqd_index['x']]),
-                            float(line[reqd_index['y']]),
-                            float(line[reqd_index['z']])
+                atom = Atom(int(line[required_attribute_indices['id']]),
+                            int(line[required_attribute_indices['type']]),
+                            float(line[required_attribute_indices['x']]),
+                            float(line[required_attribute_indices['y']]),
+                            float(line[required_attribute_indices['z']])
                             )
                 # TODO: Swap to use Atom class.
                 if atom.position.x < grain_cutoff:
@@ -254,16 +265,16 @@ class Parent:
         return self.__right_grain
 
     @property
-    def whole_gb(self) -> np.ndarray:
-        return self.__whole_gb
+    def whole_system(self) -> np.ndarray:
+        return self.__whole_system
 
     @property
     def gb_indices(self) -> np.ndarray:
         return self.__gb_indices
 
     @property
-    def gb_region(self) -> np.ndarray:
-        return self.__gb_region
+    def gb_atoms(self) -> np.ndarray:
+        return self.__gb_atoms
 
     @property
     def unit_cell(self) -> UnitCell:
@@ -348,12 +359,12 @@ class _ParentsProxy:
 @jit(float64(float64, float64), nopython=True, cache=True)
 def _gaussian(x: float, sigma: float = 0.02) -> float:
     """
-    Calculates a Gaussian-smeared delta function at **x** given a standard deviation
-    of **sigma**.
+    Calculates a Gaussian-smeared delta function at *x* given a standard deviation of
+    *sigma*.
 
-    :param x: where to calculate the Gaussian-smeared delta function.
-    :param sigma: Standard deviation of the Gaussian-smeared delta
-        function, optional, defaults to 0.02.
+    :param x: Where to calculate the Gaussian-smeared delta function.
+    :param sigma: Standard deviation of the Gaussian-smeared delta function, optional,
+        defaults to 0.02.
     :return: Value of the Gaussian-smeared delta function at x.
     """
     prefactor = 1 / (sigma * np.sqrt(2 * np.pi))
@@ -363,7 +374,7 @@ def _gaussian(x: float, sigma: float = 0.02) -> float:
 @jit(nopython=True, cache=True)
 def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
     """
-    Calculates the fingerprint for **atom** as described in Lyakhov *et al.*,
+    Calculates the fingerprint for *atom* as described in Lyakhov *et al.*,
     Computer Phys. Comm. 181 (2010) 1623-1632 (Eq. 4).
 
     :param np.ndarray atom: The atom we are calculating the fingerprint for.
@@ -372,8 +383,9 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
     :param float V: The volume of the unit cell in angstroms**3.
     :param int Btype: The type of neighbors we are interested in.
     :param float Delta: The discretization length for Rs in angstroms.
-    :param float Rmax: The maximum distance from atom to calculate the fingerprint.
-    :return: The vector containing the fingerprint for **atom**.
+    :param float Rmax: The maximum distance from the *atom* to another atom to
+        calculate the fingerprint.
+    :return: The vector containing the fingerprint for *atom*.
     """
     Rs = np.arange(0, Rmax+Delta, Delta)
 
@@ -386,10 +398,10 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
                 # Rij = atom['position'].distance(neigh['position']) # TODO: Swap to use Atom class
                 diff = atom[1:] - neigh[1:]
                 # Rij = np.linalg.norm(atom[1:] - neigh[1:])
-                Rij = np.sqrt(np.dot(diff, diff))
-                delta = _gaussian(R-Rij, 0.02)
+                distance = np.sqrt(np.dot(diff, diff))
+                delta = _gaussian(R-distance, 0.02)
                 local_sum += delta / \
-                    (4 * np.pi * Rij * Rij * (NB / V) * Delta)
+                    (4 * np.pi * distance * distance * (NB / V) * Delta)
                 # pdb.set_trace()
         fingerprint_vector[idx] = local_sum - 1
 
@@ -403,15 +415,14 @@ def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta
     Comm. 181 (2010) 1623-1632 (Eq. 5).
 
     :param np.ndarray atom: Atom we are calculating the local order for.
-    :param np.ndarray neighs: Neighbors of **atom**.
+    :param np.ndarray neighs: Neighbors of *atom*.
     :param np.ndarray unit_cell_types: The types of the atoms in the unit cell.
     :param float unit_cell_a0: The lattice parameter.
     :param int N: The number of atoms in the unit cell.
-    :param float Delta: Bin size to calculate the fingerprint vector, optional, defaults
-        to 0.05.
-    :param float Rmax: Maximum distance from **atom** to consider as a neighbor to
-        **atom** in angstroms, optional, defaults to 10.
-    :return: The local order parameter for **atom** based on its neighbors.
+    :param float Delta: Bin size to calculate the fingerprint vector.
+    :param float Rmax: Maximum distance from *atom* to consider as a neighbor to
+        *atom* in angstroms.
+    :return: The local order parameter for *atom* based on its neighbors.
     """
     local_sum = 0
     # atom_types = set([a['type'] for a in neighs]) # TODO: Swap to use Atom class
@@ -432,9 +443,9 @@ class GBManipulator:
     """
     Class to manipulate atoms in the grain boundary region.
 
-    :param GB1: The GBMaker instance containing the generated GB or the filename
+    :param system1: The GBMaker instance containing the generated GB or the filename
         containing the name of the LAMMPS dump file. First parent.
-    :param GB2: The GBMaker instance containing the generated GB or the filename
+    :param system2: The GBMaker instance containing the generated GB or the filename
         containing the name of the LAMMPS dump file for the second parent, optional,
         defaults to None.
     :param unit_cell: The unit cell of the system. Required if GB1 or GB2 is a LAMMPS
@@ -444,7 +455,15 @@ class GBManipulator:
         (automatically seeded).
     """
 
-    def __init__(self, GB1: Union[GBMaker, str], GB2: Union[GBMaker, str] = None, *, gb_thickness: float = None, unit_cell: UnitCell = None, seed: int = None) -> None:
+    def __init__(
+        self,
+        system1: Union[GBMaker, str],
+        system2: Union[GBMaker, str] = None,
+        *,
+        gb_thickness: float = None,
+        unit_cell: UnitCell = None,
+        seed: int = None
+    ) -> None:
         # initialize the random number generator
         if not seed:
             self.__rng = np.random.default_rng()
@@ -453,41 +472,49 @@ class GBManipulator:
 
         self.__parents = [None, None]
 
-        if not GB2:
+        if not system2:
             # Some mutators require two parents, so we set __one_parent to True so we do
             # not attempt to perform those in the case that only one GB is passed in.
             self.__one_parent = True
-            self.__set_parents(GB1, unit_cell=unit_cell,
+            self.__set_parents(system1, unit_cell=unit_cell,
                                gb_thickness=gb_thickness)
         else:
             self.__one_parent = False
-            self.__set_parents(GB1, GB2, unit_cell=unit_cell,
+            self.__set_parents(system1, system2, unit_cell=unit_cell,
                                gb_thickness=gb_thickness)
 
-    def __set_parents(self, GB1: Union[GBMaker, str], GB2: Union[GBMaker, str] = None, unit_cell=None, gb_thickness=None) -> None:
+    def __set_parents(
+        self,
+        system1: Union[GBMaker, str],
+        system2: Union[GBMaker, str] = None,
+        *,
+        unit_cell=None,
+        gb_thickness=None
+    ) -> None:
         """
         Method to assign the parent(s) that will create the child(ren).
 
-        :param GB1: The first parent.
-        :param GB2: The second parent, optional, defaults to None.
-        :param unit_cell: The nominal unit cell of the bulk structure, optional,
-            defaults to None. Required only when GB1 is of type str.
-        :param gb_thickness: The thickness of the GB region, optional, defaults to None.
-            Note that if None is passed to the Parent class constructor, a value of 10
-            is assigned.
+        :param system1: The first parent.
+        :param system2: The second parent, optional, defaults to None.
+        :param unit_cell: Keyword argument. The nominal unit cell of the bulk structure,
+            optional, defaults to None. Required only when system1 is of type str.
+        :param gb_thickness: Keyword argument. The thickness of the GB region, optional,
+            defaults to None. Note that if None is passed to the Parent class
+            constructor, a value of 10 is assigned.
         """
-        self.__parents[0] = Parent(GB1, unit_cell=unit_cell, gb_thickness=gb_thickness)
-        if GB2 is not None:
+        self.__parents[0] = Parent(
+            system1, unit_cell=unit_cell, gb_thickness=gb_thickness)
+        if system2 is not None:
             # If there are 2 parents, with the first one being of type GBMaker, and
             # unit_cell has not been passed in, we assume that the unit cell from the
             # GBMaker instance applies to the second system.
-            if isinstance(GB1, GBMaker) and isinstance(GB2, str):
+            if isinstance(system1, GBMaker) and isinstance(system2, str):
                 if unit_cell is None:
-                    unit_cell = GB1.unit_cell
+                    unit_cell = system1.unit_cell
                 if gb_thickness is None:
-                    gb_thickness = GB1.gb_thickness
+                    gb_thickness = system1.gb_thickness
             self.__parents[1] = Parent(
-                GB2, unit_cell=unit_cell, gb_thickness=gb_thickness)
+                system2, unit_cell=unit_cell, gb_thickness=gb_thickness)
 
     def __create_neighbor_list(self, rcut: float, pos: np.ndarray) -> list:
         """
@@ -514,9 +541,9 @@ class GBManipulator:
         :return: Atom positions after translation of the right grain.
         """
         if not self.__one_parent:
-            warnings.warn("Grain translation only occuring based on parent 1.")
+            warnings.warn("Grain translation only occurring based on parent 1.")
         parent = self.__parents[0]
-        updated_right_grain = parent.right_grain
+        updated_right_grain = np.copy(parent.right_grain)
         # Displace all atoms in the right grain by [0, dy, dz]. We modulo by the
         # grain dimensions so atoms do not exceed the original boundary conditions
         updated_right_grain[:, 2] = (
@@ -535,16 +562,17 @@ class GBManipulator:
         """
         # TODO: Make the slice a randomly oriented, randomly placed plane, rather than a
         # randomly placed x-oriented plane. Would need a check that the maximum
-        # deviataion from the x axis isn't too high though.
+        # deviation from the x axis isn't too high though.
         if self.__one_parent:
             raise GBManipulatorValueError(
                 "Unable to slice and merge with only one parent.")
         parent1 = self.__parents[0]
         parent2 = self.__parents[1]
-        pos1 = parent1.whole_gb
-        pos2 = parent2.whole_gb
+        pos1 = parent1.whole_system
+        pos2 = parent2.whole_system
         # Limit the slice site to be a quarter of the gb width from the GB itself.
         # TODO: use a more robust calculation for GB position.
+        # Note that this is the third time this has been calculated.
         slice_pos = (parent1.box_dims[0, 1] - parent1.box_dims[0, 0]) / 2.0 + \
             parent1.gb_thickness * (-0.25 + 0.5*self.__rng.random())
         pos1 = pos1[pos1[:, 1] < slice_pos]
@@ -553,27 +581,38 @@ class GBManipulator:
 
         return new_positions
 
-    def remove_atoms(self, fraction: float, *, num_to_remove: int = None) -> np.ndarray:
+    def remove_atoms(
+        self,
+        *,
+        gb_fraction: float = None,
+        num_to_remove: int = None
+    ) -> np.ndarray:
         """
-        Removes **fraction** of atoms in the GB slab. Uses the local order parameter
-        method of Lyakhov *et al.*, Computer Phys. Comm. 181 (2010) 1623-1632.
+        Removes *gb_fraction* of atoms or *num_to_remove* atom(s) in the GB region. Uses
+        the local order parameter method of Lyakhov *et al.*, Computer Phys. Comm. 181
+        (2010) 1623-1632.
 
-        :param fraction: The fraction of atoms in the GB plane to remove. Must be
-            less than 25% of the total number of atoms in the GB slab.
-        :param num_to_remove: The specific number of atoms to remove. This option
-            ignores the fraction parameter.
+        One of the following parameters must be specified.
+        :param gb_fraction: Keyword argument. The fraction of atoms in the GB plane to
+            remove. Must be less than 25% of the total number of atoms in the GB region.
+        :param num_to_remove: Keyword argument. The specific number of atoms to remove.
+            Maximum is 25% of the total number of atoms in the GB region.
         :return: Atom positions after atom removal.
         """
+        if not gb_fraction and not num_to_remove:
+            raise GBManipulatorValueError(
+                "gb_fraction or num_to_remove must be specified.")
         # TODO: Include logic to maintain stoichiometry/charge neutrality (as desired)
         if not self.__one_parent:
             warnings.warn("Atom removal only occuring based on parent 1.")
         parent = self.__parents[0]
-        atoms = parent.whole_gb
-        if fraction <= 0 or fraction > 0.25:
-            raise GBManipulatorValueError("Invalid value for fraction ("
-                                          f"{fraction=}). Must be 0 < fraction <= 0.25")
+        atoms = parent.whole_system
+        if gb_fraction <= 0 or gb_fraction > 0.25:
+            raise GBManipulatorValueError("Invalid value for gb_fraction ("
+                                          f"{gb_fraction=}). Must be 0 < gb_fraction "
+                                          "<= 0.25")
         positions = atoms[:, 1:]
-        GB_slab_indices = np.where(
+        gb_atom_indices = np.where(
             np.logical_and(
                 positions[:, 0] >= (parent.box_dims[0, 1] -
                                     parent.box_dims[0, 0])/2 - parent.gb_thickness/2,
@@ -582,15 +621,15 @@ class GBManipulator:
             )
         )[0]
 
-        GB_slab = positions[GB_slab_indices]
+        gb_atoms = positions[gb_atom_indices]
         if num_to_remove is None:
-            num_to_remove = int(fraction * len(GB_slab))
-        if num_to_remove == 0:
-            warnings.warn(
-                "Calculated fraction of atoms to remove is 0 "
-                f"(int({fraction}*{len(GB_slab)} = 0)"
-            )
-            return atoms
+            num_to_remove = int(gb_fraction * len(gb_atoms))
+            if num_to_remove == 0:
+                warnings.warn(
+                    "Calculated fraction of atoms to remove is 0 "
+                    f"(int({gb_fraction}*{len(gb_atoms)} = 0)"
+                )
+                return atoms
 
         # TODO: use a more robust calculation than '6' for the cutoff distance. Base it
         # off the crystal structure?
@@ -605,9 +644,9 @@ class GBManipulator:
         #     calc_order_partial = partial(
         #         self.__calculate_local_order, atom_types=atom_types, V=V, N=N, NBs=NBs, Delta=0.05, Rmax=15)
         #     order = pool.starmap(calc_order_partial[(atom, atoms[neigh_indices])] for atom_idx, atom in enumerate(
-        #         GB_slab) for neigh_indices in neighbor_list[atom_idx])
-        order = np.zeros(len(GB_slab_indices))
-        for idx, atom_idx in enumerate(GB_slab_indices):
+        #         gb_atoms) for neigh_indices in neighbor_list[atom_idx])
+        order = np.zeros(len(gb_atom_indices))
+        for idx, atom_idx in enumerate(gb_atom_indices):
             atom = atoms[atom_idx]
             neigh_indices = neighbor_list[atom_idx]
             order[idx] = _calculate_local_order(
@@ -628,50 +667,80 @@ class GBManipulator:
         probabilities = probabilities / np.sum(probabilities, dtype=float)
 
         indices_to_remove = self.__rng.choice(
-            GB_slab_indices, num_to_remove, replace=False, p=probabilities)
+            gb_atom_indices, num_to_remove, replace=False, p=probabilities)
         pos = np.delete(atoms, indices_to_remove, axis=0)
         return pos
 
-    def insert_atoms(self, fraction: float, *, method: str, num_to_insert: int = None) -> np.ndarray:
+    def insert_atoms(
+        self,
+        *,
+        fill_fraction: float = None,
+        num_to_insert: int = None,
+        method: str = 'delaunay',
+        keep_stoichiometry: bool = True
+    ) -> np.ndarray:
         """
         Inserts **fraction** atoms in the GB at empty lattice sites. 'Empty' sites are
         determined through Delaunay triangulation (method='Delaunay') or through a grid
         with a resolution of 1 angstrom (method='grid').
 
-        :param fraction: The fraction of empty lattice sites to fill. Must be less
-            than or equal to 25% of the total number of atoms in the GB slab.
-        :param method: The method to use. Must be either 'delaunay' or 'grid'
-        :param num_to_insert: The number of atoms to insert, optional, defaults to None.
-            If this parameter is set, the fraction parameter is ignored.
+        One of the following parameters must be specified.
+        :param fill_fraction: Keyword argument. The fraction of empty lattice sites to
+            fill. Must be less than or equal to 25% of the total number of atoms in the
+            GB slab.
+        :param num_to_insert: Keyword argument. The number of atoms to insert. Must be
+            less than or equal to 25% of the total number of atoms in the GB slab.
+
+        :param method: Keyword argument, optional, defaults to 'delaunay'. The method to
+            use. Must be either 'delaunay' or 'grid.'
+        :param keep_stoichiometry: Keyword argument, optional, defaults to True. Flag
+            specifying whether or not to keep stoichiometric ratios in the system with
+            the added atoms.
         :raises GBManipulatorValueError: Exception raised if an invalid method is
             specified.
         :return: Atom positions after atom insertion.
         """
-        # TODO: Logic to maintain stoichiometry/charge neutrality needed.
-        if fraction <= 0 or fraction > 0.25:
-            raise GBManipulatorValueError("Invalid value for fraction ("
-                                          f"{fraction=}). Must be 0 < fraction <= 0.25")
-        if num_to_insert is not None and num_to_insert < 1:
-            raise GBManipulatorValueError("Invalid max inserted value. Must be >= 1.")
+        if not fill_fraction and not num_to_insert:
+            raise GBManipulatorValueError(
+                "fill_fraction or num_to_insert must be specified.")
 
         if not self.__one_parent:
-            warnings.warn("Atom insertion only occuring based on parent 1.")
+            warnings.warn("Atom insertion only occurring based on parent 1.")
         parent = self.__parents[0]
-        GB_slab = parent.gb_region
+        gb_atoms = parent.gb_atoms
 
-        def Delaunay_approach(GB_slab: np.ndarray, atom_radius: float, num_to_insert: int) -> np.ndarray:
+        if fill_fraction is not None and (fill_fraction <= 0 or fill_fraction > 0.25):
+            raise GBManipulatorValueError("Invalid value for fill_fraction ("
+                                          f"{fill_fraction=}). Must be 0 < "
+                                          "fill_fraction <= 0.25")
+
+        if (num_to_insert is not None and
+                (
+                    num_to_insert < 1 or
+                    num_to_insert > int(0.25 * len(gb_atoms))
+                )
+            ):
+            raise GBManipulatorValueError(
+                "Invalid num_to_insert value. Must be >= 1, and must be less than or "
+                "equal to 25% of the total number of atoms in the GB region")
+
+        def Delaunay_approach(
+            gb_atoms: np.ndarray,
+            atom_radius: float,
+            num_to_insert: int
+        ) -> np.ndarray:
             """
             Delaunay triangulation approach for inserting atoms. Potential insertion
             sites are the circumcenters of the tetrahedra.
 
-            :param GB_slab: Array of atom positions where we are considering inserting
+            :param gb_atoms: Array of atom positions where we are considering inserting
                 new atoms.
             :param atom_radius: The radius of an atom.
             :param num_to_insert: The number of atoms to insert.
             :return: The sites at which new atoms are inserted.
             """
             # Delaunay triangulation approach
-            triangulation = Delaunay(GB_slab)
+            triangulation = Delaunay(gb_atoms)
             # ijk is for the 3x3 transformation matrix triangulation.transform[:, :3, :]
             # ik is for the offset vector triangulation.transform[:, 3, :], and ij is
             # the resulting circumcenter coordinates
@@ -687,7 +756,7 @@ class GBManipulator:
             valid_circumcenters = circumcenters[valid_mask]
             valid_simplices = triangulation.simplices[valid_mask, 0]
             sphere_radii = np.linalg.norm(
-                GB_slab[valid_simplices] - valid_circumcenters, axis=1)
+                gb_atoms[valid_simplices] - valid_circumcenters, axis=1)
             interstitial_radii = sphere_radii - atom_radius
             probabilities = interstitial_radii / np.sum(interstitial_radii)
             probabilities = probabilities / np.sum(probabilities)  # normalize
@@ -696,11 +765,11 @@ class GBManipulator:
             num_sites = len(circumcenters)
 
             if num_to_insert is None:
-                num_to_insert = int(fraction * num_sites)
+                num_to_insert = int(fill_fraction * num_sites)
 
             if num_to_insert == 0:
                 warnings.warn("Calculated fraction of atoms to insert is 0: "
-                              f"int({fraction}*{len(GB_slab)}) = 0"
+                              f"int({fill_fraction}*{len(gb_atoms)}) = 0"
                               )
             indices = self.__rng.choice(
                 list(range(len(valid_circumcenters))),
@@ -710,20 +779,25 @@ class GBManipulator:
             )
             return valid_circumcenters[indices]
 
-        def grid_approach(GB_slab: np.ndarray, atom_radius: float, num_to_insert: int) -> np.ndarray:
+        def grid_approach(
+            gb_atoms: np.ndarray,
+            atom_radius: float,
+            num_to_insert: int,
+        ) -> np.ndarray:
             """
             Grid approach for inserting atoms. Potential insertion sites are on a 1x1x1
-            Angstrom grid where sites must be at least **atom_radius** away.
+            Angstrom grid where sites must be at least *atom_radius* away.
 
-            :param GB_slab: Array of atom positions where we are considering inserting
+            :param gb_atoms: Array of atom positions where we are considering inserting
                 new atoms.
             :param atom_radius: The radius of an atom.
             :param num_to_insert: The number of atoms to insert.
+
             :return: The sites at which new atoms are inserted.
             """
             # Grid approach
-            max_x, max_y, max_z = GB_slab.max(axis=0)
-            min_x, min_y, min_z = GB_slab.min(axis=0)
+            max_x, max_y, max_z = gb_atoms.max(axis=0)
+            min_x, min_y, min_z = gb_atoms.min(axis=0)
             X, Y, Z = np.meshgrid(
                 np.arange(np.floor(min_x), np.ceil(max_x) + 1),
                 np.arange(np.floor(min_y), np.ceil(max_y) + 1),
@@ -731,7 +805,7 @@ class GBManipulator:
                 indexing='ij'
             )
             sites = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
-            GB_tree = KDTree(GB_slab)
+            GB_tree = KDTree(gb_atoms)
             sites_tree = KDTree(sites)
             indices_to_remove = GB_tree.query_ball_tree(sites_tree, atom_radius)
             indices_to_remove = list(set(
@@ -746,11 +820,11 @@ class GBManipulator:
             num_sites = len(filtered_sites)
 
             if num_to_insert is None:
-                num_to_insert = int(fraction * num_sites)
+                num_to_insert = int(fill_fraction * num_sites)
 
             if num_to_insert == 0:
                 warnings.warn("Calculated fraction of atoms to insert is 0: "
-                              f"int({fraction}*{len(GB_slab)}) = 0"
+                              f"int({fill_fraction}*{len(gb_atoms)}) = 0"
                               )
 
             indices = self.__rng.choice(num_sites,
@@ -761,6 +835,8 @@ class GBManipulator:
             return filtered_sites[indices]
 
         available_types = set(parent.unit_cell.types())
+
+        # Calculate the ratio of atom types so we maintain the same atom ratios.
         type_counts = {}
         for i in available_types:
             type_counts[i] = np.sum(parent.unit_cell.types() == i)
@@ -768,15 +844,17 @@ class GBManipulator:
                        for key, value in type_counts.items()}
         total_ratio = sum(type_ratios.values())
 
+        # Calculate the insertion sites using the specified approach.
         if method == 'delaunay':
             new_pos = Delaunay_approach(
-                GB_slab[:, 1:], parent.unit_cell.radius, num_to_insert)
+                gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
         elif method == 'grid':
             new_pos = grid_approach(
-                GB_slab[:, 1:], parent.unit_cell.radius, num_to_insert)
+                gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
         else:
             raise GBManipulatorValueError(f"Unrecognized insert_atoms method: {method}")
 
+        # The number of extra atoms needed to maintain stoichiometry.
         extra = len(new_pos) % total_ratio
         if extra != 0:
             new_pos = new_pos[:-extra]
@@ -786,7 +864,7 @@ class GBManipulator:
             available_types, num_elements) for _ in range(num)])
         self.__rng.shuffle(new_types)
 
-        return np.vstack((parent.whole_gb, np.insert(new_pos, 0, new_types, axis=1)))
+        return np.vstack((parent.whole_system, np.insert(new_pos, 0, new_types, axis=1)))
 
     def displace_along_soft_modes(self) -> np.ndarray:
         """
@@ -795,7 +873,7 @@ class GBManipulator:
         :raises NotImplementedError: Not currently implemented.
         :return: Atom positions after displacement.
         """
-        pos = self.__parents[0].whole_gb
+        pos = self.__parents[0].whole_system
         raise NotImplementedError("This mutator has not been implemented yet.")
         return pos
 
@@ -808,7 +886,7 @@ class GBManipulator:
         :return: Atoms positions after applying group symmetry.
         """
 
-        pos = self.__parents[0].whole_gb
+        pos = self.__parents[0].whole_system
         raise NotImplementedError("This mutator has not been implemented yet.")
         return pos
 
