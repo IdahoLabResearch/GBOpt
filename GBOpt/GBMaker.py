@@ -399,16 +399,24 @@ class GBMaker:
         """
         self.__spacing = self.__calculate_periodic_spacing(threshold)
 
-    def write_lammps(self, atoms: np.ndarray, box_sizes: np.ndarray, file_name: str) -> None:
+    def write_lammps(self, file_name: str, atoms: np.ndarray = None, box_sizes: np.ndarray = None) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
 
+        :param str filename: The filename to save the data
         :param np.ndarray positions: The positions of the atoms.
         :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
             each of the x, y, and z dimensions
-        :param str filename: The filename to save the data
         """
 
+        if atoms is None and box_sizes is None:
+            atoms = self.__gb
+            box_sizes = self.__box_dims
+        elif (atoms is None and box_sizes is not None) or (
+            atoms is not None and box_sizes is None
+        ):
+            raise GBMakerValueError(
+                "'atoms' and 'box_sizes' must be specified together.")
         # Write LAMMPS data file
         with open(file_name, 'w') as fdata:
             # First line is a comment line

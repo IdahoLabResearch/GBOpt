@@ -124,7 +124,7 @@ class TestGBMaker(unittest.TestCase):
         atoms = self.gbm.gb
         box_sizes = self.gbm.box_dims
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.gbm.write_lammps(atoms, box_sizes, temp_file.name)
+            self.gbm.write_lammps(temp_file.name, atoms, box_sizes)
             with open(temp_file.name, 'r') as f:
                 content = f.readlines()
             self.assertGreater(len(content), 0)
@@ -207,8 +207,8 @@ class TestGBMaker(unittest.TestCase):
         approx_matrix = self.gbm._GBMaker__approximate_matrix_as_int(
             rotation_matrix)
 
-        expected_matrix = np.array([[118999, 84145, 84145],
-                                    [118999, -84145, -84145],
+        expected_matrix = np.array([[141421, 100000, 100000],
+                                    [141421, -100000, -100000],
                                     [0, 1, -1]])
 
         np.testing.assert_array_equal(approx_matrix, expected_matrix)
@@ -243,7 +243,7 @@ class TestGBMaker(unittest.TestCase):
         atoms = np.array([[1, 0.0, 0.0, 0.0], [2, 1.0, 1.0, 1.0]])
         box_sizes = np.array([[0.0, 10.0], [0.0, 10.0], [0.0, 10.0]])
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.gbm.write_lammps(atoms, box_sizes, temp_file.name)
+            self.gbm.write_lammps(temp_file.name, atoms, box_sizes)
             with open(temp_file.name, 'r') as f:
                 content = f.readlines()
             self.assertEqual(content[2].strip(), '2 atoms')

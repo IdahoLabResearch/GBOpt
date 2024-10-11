@@ -149,9 +149,9 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_insert_atoms(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
-        new_system1 = manipulator.insert_atoms(0.10, method='delaunay')
+        new_system1 = manipulator.insert_atoms(fill_fraction=0.10, method='delaunay')
         self.assertGreater(len(new_system1), len(self.tilt.gb))
-        new_system2 = manipulator.insert_atoms(0.10, method='grid')
+        new_system2 = manipulator.insert_atoms(fill_fraction=0.10, method='grid')
         self.assertGreater(len(new_system2), len(self.tilt.gb))
 
     def test_insert_atoms_fraction_error(self):
@@ -176,9 +176,9 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_insert_atoms_with_specific_number(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
-        new_system1 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        new_system1 = manipulator.insert_atoms(method='delaunay', num_to_insert=1)
         self.assertEqual(len(self.tilt.gb) + 1, len(new_system1))
-        new_system2 = manipulator.insert_atoms(0.10, method='delaunay', num_to_insert=1)
+        new_system2 = manipulator.insert_atoms(method='delaunay', num_to_insert=1)
         self.assertEqual(len(self.tilt.gb) + 1, len(new_system2))
 
     def test_displace_along_soft_modes(self):
@@ -214,17 +214,17 @@ class TestGBManipulator(unittest.TestCase):
         p3 = manipulator.insert_atoms(fill_fraction=0.2, method='delaunay')
         # p4 = manipulator.remove_atoms(0.2)
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.tilt.write_lammps(p1, self.tilt.box_dims, temp_file.name)
-            self.tilt.write_lammps(p2, self.tilt.box_dims, temp_file.name)
-            self.tilt.write_lammps(p3, self.tilt.box_dims, temp_file.name)
-            # self.GB.write_lammps(p4, self.GB.box_dims, temp_file.name)
+            self.tilt.write_lammps(temp_file.name, p1, self.tilt.box_dims)
+            self.tilt.write_lammps(temp_file.name, p2, self.tilt.box_dims)
+            self.tilt.write_lammps(temp_file.name, p3, self.tilt.box_dims)
+            # self.GB.write_lammps(temp_file.name, p4, self.GB.box_dims)
 
     def test_created_gbs(self):
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.tilt.write_lammps(self.tilt.gb, self.tilt.box_dims, temp_file.name)
+            self.tilt.write_lammps(temp_file.name, self.tilt.gb, self.tilt.box_dims)
             self.assertTrue(filecmp.cmp("./tests/gold/sigma5_tilt.txt",
                             temp_file.name, shallow=False))
-            self.twist.write_lammps(self.twist.gb, self.twist.box_dims, temp_file.name)
+            self.twist.write_lammps(temp_file.name, self.twist.gb, self.twist.box_dims)
             self.assertTrue(filecmp.cmp("./tests/gold/sigma5_twist.txt",
                             temp_file.name, shallow=False))
 
