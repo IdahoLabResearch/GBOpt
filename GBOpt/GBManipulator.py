@@ -777,7 +777,11 @@ class GBManipulator:
                 triangulation.transform[:, :3, :],
                 triangulation.transform[:, 3, :]
             )
-            volumes = np.abs(np.linalg.det(triangulation.transform[:, :3, :]))
+            # Calculating the volume may occasionally fail if the points are collinear,
+            # so we catch the warning so users are not concerned.
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore", category=RuntimeWarning)
+                volumes = np.abs(np.linalg.det(triangulation.transform[:, :3, :]))
             volume_threshold = 1e-8
             valid_mask = (volumes > volume_threshold) & ~np.isnan(
                 circumcenters).any(axis=1)
