@@ -130,31 +130,26 @@ class TestGBManipulator(unittest.TestCase):
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.slice_and_merge()
 
-    @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(0.10)
         self.assertGreater(len(self.tilt.whole_system), len(new_system))
 
-    @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_fraction_error(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.remove_atoms(0.50)
 
-    @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(0.10)
 
-    @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_calculated_fraction_warning(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(0.0000001)
 
-    @unittest.skip("Currently get hung on generating the neighbor list.")
     def test_remove_atoms_with_specific_number(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(0.10, num_to_remove=1)

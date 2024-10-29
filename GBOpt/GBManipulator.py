@@ -1,4 +1,5 @@
 import math
+import multiprocessing as mp
 import warnings
 from os.path import isfile
 from typing import Union
@@ -440,7 +441,7 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
     return fingerprint_vector
 
 
-@jit(nopython=True, cache=True)
+@jit(nopython=True, cache=True, parallel=True)
 def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta, Rmax):
     """
     Calculates the local order parameter following Lyakhov *et al.*, Computer Phys.
@@ -466,6 +467,22 @@ def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta
             atom, neighs, NB, V, Btype, Delta, Rmax)
         local_sum += NB * prefactor * np.dot(fingerprint, fingerprint)
     return np.sqrt(local_sum)
+
+
+def _create_neighbor_list(rcut: float, pos: np.ndarray) -> list:
+    """
+    Creates a neighbor list using a KDTree.
+
+    :param rcut: Cutoff distance for considering an atom a neighbor to another.
+    :param pos: The array of atom positions.
+    :return: The neighbor list for the atoms in **pos**
+    """
+    kdtree = cKDTree(pos)
+    neighbor_list = kdtree.query_ball_tree(kdtree, r=rcut)
+    # Remove an atom from using itself as a neighbor.
+    for i, neighbor in enumerate(neighbor_list):
+        neighbor.remove(i)
+    return neighbor_list
 
 
 class GBManipulator:
@@ -511,6 +528,7 @@ class GBManipulator:
             self.__one_parent = False
             self.__set_parents(system1, system2, unit_cell=unit_cell,
                                gb_thickness=gb_thickness)
+        self.__num_processes = mp.cpu_count() // 2 or 1
 
     def __set_parents(
         self,
@@ -543,24 +561,10 @@ class GBManipulator:
                 if gb_thickness is None:
                     gb_thickness = system1.gb_thickness
             self.__parents[1] = Parent(
-                system2, unit_cell=unit_cell, gb_thickness=gb_thickness)
-
-    def __create_neighbor_list(self, rcut: float, pos: np.ndarray) -> list:
-        """
-        Creates a neighbor list using a KDTree.
-
-        :param rcut: Cutoff distance for considering an atom a neighbor to another.
-        :param pos: The array of atom positions.
-        :return: The neighbor list for the atoms in **pos**
-        """
-        kdtree = cKDTree(pos)
-        neighbor_list = kdtree.query_ball_tree(kdtree, r=rcut)
-        # Remove an atom from using itself as a neighbor.
-        for i, neighbor in enumerate(neighbor_list):
-            neighbor.remove(i)
-        return neighbor_list
+                GB2, unit_cell=unit_cell, gb_thickness=gb_thickness)
 
     # TODO: Swap to use Atom class if it can be vectorized for each of these mutators.
+
     def translate_right_grain(self, dy: float, dz: float) -> np.ndarray:
         """
         Displace the right grain in the plane of the GB by (0, dy, dz).
@@ -635,7 +639,7 @@ class GBManipulator:
                 "gb_fraction or num_to_remove must be specified.")
         # TODO: Include logic to maintain stoichiometry/charge neutrality (as desired)
         if not self.__one_parent:
-            warnings.warn("Atom removal only occuring based on parent 1.")
+            warnings.warn("Atom removal only occurring based on parent 1.")
         parent = self.__parents[0]
         # We use the array format because numba/jit has issues with strings.
         atoms = Atom.asarray(parent.whole_system)
@@ -665,32 +669,23 @@ class GBManipulator:
 
         # TODO: use a more robust calculation than '6' for the cutoff distance. Base it
         # off the crystal structure?
-        neighbor_list = self.__create_neighbor_list(6, positions)
-        # unit_cell = self.__parents[0].unit_cell
-        # N = len(unit_cell.unit_cell)
-        # V = unit_cell.a0**3
-        # atom_types = np.array(list(set(unit_cell.types())))
-        # NBs = np.array([np.sum(unit_cell.types() == Btype) for Btype in atom_types])
+        neighbor_list = _create_neighbor_list(6, positions)
 
-        # with multiprocessing.Pool() as pool:
-        #     calc_order_partial = partial(
-        #         self.__calculate_local_order, atom_types=atom_types, V=V, N=N, NBs=NBs, Delta=0.05, Rmax=15)
-        #     order = pool.starmap(calc_order_partial[(atom, atoms[neigh_indices])] for atom_idx, atom in enumerate(
-        #         gb_atoms) for neigh_indices in neighbor_list[atom_idx])
-        order = np.zeros(len(gb_atom_indices))
-        atom_types = np.array([t for t in set(atoms[:, 0])])
-        for idx, atom_idx in enumerate(gb_atom_indices):
-            atom = atoms[atom_idx]
-            neigh_indices = neighbor_list[atom_idx]
-            order[idx] = _calculate_local_order(
-                atom,
-                atoms[neigh_indices],
-                atom_types,
+        args_list = [
+            (
+                atoms[atom_idx],
+                atoms[neighbor_list[atom_idx]],
+                parent.unit_cell.types(),
                 parent.unit_cell.a0,
                 len(parent.unit_cell.unit_cell),
-                Delta=0.05,
-                Rmax=15
+                0.05,
+                15
             )
+            for idx, atom_idx in enumerate(GB_slab_indices)
+        ]
+        with mp.Pool(self.__num_processes) as pool:
+            order = pool.starmap(_calculate_local_order, args_list)
+        order = np.array(order)
 
         # We want the probabilities to be inversely proportional to the order parameter.
         # Higher order values should be more 'stable' against removal than low order
