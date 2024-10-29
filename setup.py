@@ -8,8 +8,8 @@ setup(
         'numpy',
         'scipy',
         'numba',
-	'matplotlib',
-	'pandas'
+        'matplotlib',
+        'pytest'
     ],
     author="Chaitanya Bhave and Jarin French",
     author_email="chaitanya.bhave@inl.gov and jarin.french@inl.gov",
