@@ -283,6 +283,11 @@ class GBMaker:
         :return: 4xn array containing the Atom positions inside the given box.
         """
         x_min, y_min, z_min, x_max, y_max, z_max = box_dim
+
+        # We use '<' for the y and z directions to not duplicate atoms across the
+        # periodic boundary. For the x direction this doesn't matter as much because we
+        # do not have periodic boundaries in this direction, but '<=' allows for more
+        # atoms to be placed.
         inside_box = (
             (atoms['x'] >= x_min) & (atoms['x'] <= x_max) &
             (atoms['y'] >= y_min) & (atoms['y'] < y_max) &
