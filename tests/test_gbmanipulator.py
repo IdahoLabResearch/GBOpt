@@ -132,27 +132,27 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_remove_atoms(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
-        new_system = manipulator.remove_atoms(0.10)
+        new_system = manipulator.remove_atoms(gb_fraction=0.10)
         self.assertGreater(len(self.tilt.whole_system), len(new_system))
 
     def test_remove_atoms_fraction_error(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
-            _ = manipulator.remove_atoms(0.50)
+            _ = manipulator.remove_atoms(gb_fraction=0.50)
 
     def test_remove_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
-            _ = manipulator.remove_atoms(0.10)
+            _ = manipulator.remove_atoms(gb_fraction=0.10)
 
     def test_remove_atoms_calculated_fraction_warning(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
-            _ = manipulator.remove_atoms(0.0000001)
+            _ = manipulator.remove_atoms(gb_fraction=0.0000001)
 
     def test_remove_atoms_with_specific_number(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
-        new_system = manipulator.remove_atoms(0.10, num_to_remove=1)
+        new_system = manipulator.remove_atoms(num_to_remove=1)
         self.assertEqual(len(self.tilt.whole_system)-1, len(new_system))
 
     def test_insert_atoms(self):

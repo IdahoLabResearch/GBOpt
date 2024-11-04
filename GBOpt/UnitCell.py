@@ -233,9 +233,14 @@ class UnitCell:
         """Returns the positions of the atoms in the UnitCell."""
         return self.__a0 * np.vstack([a.position.asarray() for a in self.__unit_cell])
 
-    def names(self) -> np.ndarray:
+    def names(self, *, asint=False) -> np.ndarray:
         """Returns an array containing the types of atoms in the UnitCell."""
-        return np.hstack([a.name for a in self.__unit_cell])
+        if asint:
+            names = [a.name for a in self.__unit_cell]
+            name_int_dict = {name: idx + 1 for idx, name in enumerate(set(names))}
+            return np.hstack([name_int_dict[name] for name in names], dtype=int)
+        else:
+            return np.hstack([a.name for a in self.__unit_cell])
 
     @property
     def reciprocal(self) -> np.ndarray:

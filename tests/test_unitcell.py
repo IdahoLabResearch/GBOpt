@@ -397,6 +397,12 @@ class TestUnitCell(unittest.TestCase):
         self.assertEqual(cell.radius, 0.0)
         self.assertTrue(np.allclose(cell.reciprocal, np.zeros((3, 3))))
 
+    def test_names_as_ints(self):
+        cell = UnitCell()
+        cell.init_by_structure(structure='fcc', a0=1.0, atoms='Cu')
+        self.assertTrue(np.allclose(cell.names(asint=True),
+                        np.array([1, 1, 1, 1], dtype=int)))
+
     def test_setter(self):
         cell = UnitCell()
         cell.init_by_structure('fcc', 1.0, 'Ni')

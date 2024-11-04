@@ -561,7 +561,7 @@ class GBManipulator:
                 if gb_thickness is None:
                     gb_thickness = system1.gb_thickness
             self.__parents[1] = Parent(
-                GB2, unit_cell=unit_cell, gb_thickness=gb_thickness)
+                system2, unit_cell=unit_cell, gb_thickness=gb_thickness)
 
     # TODO: Swap to use Atom class if it can be vectorized for each of these mutators.
 
@@ -643,7 +643,7 @@ class GBManipulator:
         parent = self.__parents[0]
         # We use the array format because numba/jit has issues with strings.
         atoms = Atom.asarray(parent.whole_system)
-        if gb_fraction <= 0 or gb_fraction > 0.25:
+        if gb_fraction is not None and (gb_fraction <= 0 or gb_fraction > 0.25):
             raise GBManipulatorValueError("Invalid value for gb_fraction ("
                                           f"{gb_fraction=}). Must be 0 < gb_fraction "
                                           "<= 0.25")
@@ -675,13 +675,13 @@ class GBManipulator:
             (
                 atoms[atom_idx],
                 atoms[neighbor_list[atom_idx]],
-                parent.unit_cell.types(),
+                parent.unit_cell.names(asint=True),
                 parent.unit_cell.a0,
                 len(parent.unit_cell.unit_cell),
                 0.05,
                 15
             )
-            for idx, atom_idx in enumerate(GB_slab_indices)
+            for idx, atom_idx in enumerate(gb_atom_indices)
         ]
         with mp.Pool(self.__num_processes) as pool:
             order = pool.starmap(_calculate_local_order, args_list)
