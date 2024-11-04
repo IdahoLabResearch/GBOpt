@@ -52,9 +52,10 @@ class GBMaker:
     """
 
     def __init__(self, a0: float, structure: str, gb_thickness: float,
-                 misorientation: np.ndarray, *,
+                 misorientation: np.ndarray, atom_types: str | Tuple[str, ...], *,
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim: float = 50,
-                 vacuum: float = 10, interaction_distance: float = 15.0, gb_id: int = 1):
+                 vacuum: float = 10, interaction_distance: float = 15.0,
+                 gb_id: int = 1):
         self.__a0 = self.__validate(a0, Number, 'a0', positive=True)
         self.__structure = self.__validate(structure, str, 'structure')
         self.__gb_thickness = self.__validate(
@@ -89,7 +90,7 @@ class GBMaker:
             interaction_distance, Number, 'interaction_distance', positive=True)
         self.__id = self.__validate(gb_id, int, 'id', positive=True)
 
-        self.__unit_cell = self.__init_unit_cell()
+        self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
         self.__update_periodic_dims()
 
@@ -158,6 +159,14 @@ class GBMaker:
             ]
         )
 
+    def __generate_gb(self) -> None:
+        """
+        Private method to calculate the left grain, right grain, and whole GB system
+        """
+        self.__left_grain = self.__generate_left_grain()
+        self.__right_grain = self.__generate_right_grain()
+        self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
+
     def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
         """
         Calculate the periodic spacing based on the rotation matrix.
@@ -208,22 +217,14 @@ class GBMaker:
 
         return spacing
 
-    def __generate_gb(self) -> None:
-        """
-        Private method to calculate the left grain, right grain, and whole GB system
-        """
-        self.__left_grain = self.__generate_left_grain()
-        self.__right_grain = self.__generate_right_grain()
-        self.__gb = np.vstack((self.__left_grain, self.__right_grain))
-
-    def __init_unit_cell(self) -> UnitCell:
+    def __init_unit_cell(self, atom_types: str | Tuple[str, ...]) -> UnitCell:
         """
         Initializes the unit cell.
 
         :return: The unit cell initialized by structure.
         """
         unit_cell = UnitCell()
-        unit_cell.init_by_structure(self.__structure, self.__a0)
+        unit_cell.init_by_structure(self.__structure, self.__a0, atom_types)
         return unit_cell
 
     def __generate_left_grain(self) -> np.ndarray:
@@ -241,7 +242,9 @@ class GBMaker:
         corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
         atoms = self.get_supercell(corners)
 
-        atoms[:, 1:] = np.dot(atoms[:, 1:], self.__Rincl.T)
+        positions = np.vstack((atoms['x'], atoms['y'], atoms['z'])).T
+        rotated_positions = np.dot(positions, self.__Rincl.T)
+        atoms['x'], atoms['y'], atoms['z'] = rotated_positions.T
 
         return self.__get_points_inside_box(
             atoms,
@@ -263,9 +266,10 @@ class GBMaker:
         atoms = self.get_supercell(corners)
 
         R = np.dot(self.__Rincl, self.__Rmis)
-        atoms[:, 1:] = np.dot(atoms[:, 1:], R.T)
-
-        atoms[:, 1] += np.amax(self.left_grain[:, 1])
+        positions = np.vstack((atoms['x'], atoms['y'], atoms['z'])).T
+        rotated_positions = np.dot(positions, R.T)
+        atoms['x'], atoms['y'], atoms['z'] = rotated_positions.T
+        atoms['x'] += np.amax(self.__left_grain['x'])
         return self.__get_points_inside_box(
             atoms,
             [self.__x_dim, 0, 0, 2*self.__x_dim, self.__y_dim, self.__z_dim])
@@ -279,13 +283,17 @@ class GBMaker:
         :return: 4xn array containing the Atom positions inside the given box.
         """
         x_min, y_min, z_min, x_max, y_max, z_max = box_dim
-        x_slice = atoms[np.where(np.logical_and(
-            atoms[:, 1] >= x_min, atoms[:, 1] <= x_max))]
-        y_slice = x_slice[np.where(np.logical_and(
-            x_slice[:, 2] >= y_min, x_slice[:, 2] < y_max))]
-        z_slice = y_slice[np.where(np.logical_and(
-            y_slice[:, 3] >= z_min, y_slice[:, 3] < z_max))]
-        return z_slice
+
+        # We use '<' for the y and z directions to not duplicate atoms across the
+        # periodic boundary. For the x direction this doesn't matter as much because we
+        # do not have periodic boundaries in this direction, but '<=' allows for more
+        # atoms to be placed.
+        inside_box = (
+            (atoms['x'] >= x_min) & (atoms['x'] <= x_max) &
+            (atoms['y'] >= y_min) & (atoms['y'] < y_max) &
+            (atoms['z'] >= z_min) & (atoms['z'] < z_max)
+        )
+        return atoms[inside_box]
 
     def __update_periodic_dims(self) -> None:
         """
@@ -384,16 +392,16 @@ class GBMaker:
         Generates a supercell of lattice sites.
 
         :param corners: Array containing the position of the corners of the unit cells.
-        :return: Populated lattice sites based on the unit cell.
+        :return: Structured numpy array containing the atom data (type and position) for
+            the supercell.
         """
-        # TODO: Implement this using the Atom class
-        atom_data = np.array([[t, x, y, z] for t, (x, y, z) in zip(
-            self.__unit_cell.types(), self.__unit_cell.positions())])
-        translated_positions = (
-            atom_data[:, 1:] + corners[:, np.newaxis, :]).reshape(-1, 3)
-        atom_types_expanded = np.repeat(atom_data[:, 0], len(corners))
-        supercell = np.column_stack(
-            (atom_types_expanded, translated_positions))
+        # Unit cell as structured array
+        unit_cell = self.__unit_cell.asarray()
+        supercell = np.tile(unit_cell, len(corners))
+        translations = np.repeat(corners, len(unit_cell), axis=0)
+        supercell['x'] += translations[:, 0]
+        supercell['y'] += translations[:, 1]
+        supercell['z'] += translations[:, 2]
         return supercell
 
     def update_spacing(self, threshold: float = None) -> None:
@@ -405,24 +413,38 @@ class GBMaker:
         """
         self.__spacing = self.__calculate_periodic_spacing(threshold)
 
-    def write_lammps(self, file_name: str, atoms: np.ndarray = None, box_sizes: np.ndarray = None) -> None:
+    def write_lammps(
+        self,
+        file_name: str,
+        atoms: np.ndarray = None,
+        box_sizes: np.ndarray = None,
+        *,
+        type_as_int: bool = False
+    ) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
 
         :param str filename: The filename to save the data
-        :param np.ndarray positions: The positions of the atoms.
+        :param np.ndarray positions: The positions of the atoms. Keyword argument,
+            defaults to None.
         :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
-            each of the x, y, and z dimensions
+            each of the x, y, and z dimensions. Keyword argument, defaults to None.
+        :param bool type_as_int: Whether to write the atom types as a chemical name or a
+            number. Keyword argument, optional, defaults to False (write as a chemical
+            name).
         """
 
         if atoms is None and box_sizes is None:
-            atoms = self.__gb
+            atoms = self.__whole_system
             box_sizes = self.__box_dims
         elif (atoms is None and box_sizes is not None) or (
             atoms is not None and box_sizes is None
         ):
             raise GBMakerValueError(
                 "'atoms' and 'box_sizes' must be specified together.")
+
+        name_to_int = {name: i+1 for i, name in enumerate(np.unique(atoms['name']))}
+
         # Write LAMMPS data file
         with open(file_name, 'w') as fdata:
             # First line is a comment line
@@ -431,7 +453,7 @@ class GBMaker:
             # --- Header ---#
             # Specify number of atoms and atom types
             fdata.write('{} atoms\n'.format(len(atoms)))
-            fdata.write('{} atom types\n'.format(len(set(atoms[:, 0]))))
+            fdata.write('{} atom types\n'.format(len(set(atoms['name']))))
             # Specify box dimensions
             fdata.write('{} {} xlo xhi\n'.format(
                 box_sizes[0][0], box_sizes[0][1]))
@@ -439,14 +461,23 @@ class GBMaker:
                 box_sizes[1][0], box_sizes[1][1]))
             fdata.write('{} {} zlo zhi\n'.format(
                 box_sizes[2][0], box_sizes[2][1]))
-            fdata.write('\n')
+
+            if not type_as_int:
+                fdata.write('\nAtom Type Labels\n\n')
+                for name, value in name_to_int.items():
+                    fdata.write(f"{value} {name}\n")
 
             # Atoms section
-            fdata.write('Atoms\n\n')
+            fdata.write('\nAtoms\n\n')
 
-            # Write each position. Write the type as an integer.
-            for i, pos in enumerate(atoms):
-                fdata.write('{} {:n} {} {} {}\n'.format(i+1, *pos))
+            # Write each position.
+            if type_as_int:
+                for i, (name, *pos) in enumerate(atoms):
+                    fdata.write('{} {:n} {} {} {}\n'.format(
+                        i+1, name_to_int[name], *pos))
+            else:
+                for i, (name, *pos) in enumerate(atoms):
+                    fdata.write('{} {} {} {} {}\n'.format(i+1, name, *pos))
 
     # Properties with getters and setters. Automatic updates for related parameters are
     # automatically taken care of.
@@ -455,9 +486,10 @@ class GBMaker:
         return self.__a0
 
     @a0.setter
-    def a0(self, value: Number):
+    def a0(self, value: Number) -> None:
+        atom_types = tuple(self.__unit_cell.names())
         self.__a0 = self.__validate(value, float, "a0", positive=True)
-        self.__unit_cell = self.__init_unit_cell()
+        self.__unit_cell = self.__init_unit_cell(atom_types)
         self.update_spacing()
 
     @property
@@ -522,7 +554,16 @@ class GBMaker:
     @structure.setter
     def structure(self, value: str) -> None:
         self.__structure = self.__validate(value, str, "structure")
-        self.__unit_cell = self.__init_unit_cell()
+        if set([self.__structure, value]).issubset(
+            set(["fluorite", "rocksalt", "zincblende"])
+        ):
+            raise GBMakerValueError(
+                "Cannot estimate conversion from " f"{self.__structure} to {value}"
+            )
+        else:
+            atom_types = tuple(set(self.__unit_cell.names()))
+
+        self.__unit_cell = self.__init_unit_cell(atom_types)
 
     @property
     def vacuum_thickness(self) -> int:
@@ -549,8 +590,8 @@ class GBMaker:
         return self.__box_dims
 
     @property
-    def gb(self) -> np.ndarray:
-        return self.__gb
+    def whole_system(self) -> np.ndarray:
+        return self.__whole_system
 
     @property
     def left_grain(self) -> np.ndarray:

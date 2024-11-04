@@ -35,13 +35,15 @@ class PositionValueError(PositionError):
 class Position:
     """Represents a point in 3D space."""
 
+    __slots__ = ['__x', '__y', '__z']
+
     def __init__(self, x: float, y: float, z: float) -> None:
-        self._x: float = self._validate_coordinate('x', x)
-        self._y: float = self._validate_coordinate('y', y)
-        self._z: float = self._validate_coordinate('z', z)
+        self.__x: float = self.__validate_coordinate('x', x)
+        self.__y: float = self.__validate_coordinate('y', y)
+        self.__z: float = self.__validate_coordinate('z', z)
 
     @staticmethod
-    def _validate_coordinate(coordinate: str, value: float) -> float:
+    def __validate_coordinate(coordinate: str, value: float) -> float:
         """
         Validates a coordinate value.
 
@@ -57,31 +59,31 @@ class Position:
     # Standard getters and setters. Setters validate the values.
     @property
     def x(self) -> float:
-        return self._x
+        return self.__x
 
     @x.setter
     def x(self, value: float) -> None:
-        self._x = self._validate_coordinate('x', value)
+        self.__x = self.__validate_coordinate('x', value)
 
     @property
     def y(self) -> float:
-        return self._y
+        return self.__y
 
     @y.setter
     def y(self, value: float) -> None:
-        self._y = self._validate_coordinate('y', value)
+        self.__y = self.__validate_coordinate('y', value)
 
     @property
     def z(self) -> float:
-        return self._z
+        return self.__z
 
     @z.setter
     def z(self, value: float) -> None:
-        self._z = self._validate_coordinate('z', value)
+        self.__z = self.__validate_coordinate('z', value)
 
     def __iter__(self) -> Iterator[float]:
         """Allows for iteration over the coordinates in the order (x, y, z)."""
-        return iter((self._x, self._y, self._z))
+        return iter((self.__x, self.__y, self.__z))
 
     def __getitem__(self, index: Union[int, str, slice]) -> Union[float, Tuple[float, ...]]:
         """Allows indexed access to the coordinates."""
@@ -89,20 +91,20 @@ class Position:
             return tuple(self)[index]
         elif isinstance(index, int):
             if index == 0:
-                return self._x
+                return self.__x
             elif index == 1:
-                return self._y
+                return self.__y
             elif index == 2:
-                return self._z
+                return self.__z
             else:
                 raise PositionIndexError("Index out of range")
         elif isinstance(index, str):
             if index == 'x':
-                return self._x
+                return self.__x
             elif index == 'y':
-                return self._y
+                return self.__y
             elif index == 'z':
-                return self._z
+                return self.__z
             else:
                 raise PositionKeyError(f"Invalid key: {index}")
         else:
@@ -154,14 +156,18 @@ class Position:
             raise PositionTypeError(
                 "Argument must be a Position instance, a sequence, or a numpy array "
                 "with 3 numeric elements.")
-        return math.sqrt((self.x - x) ** 2 + (self.y - y) ** 2 + (self.z - z) ** 2)
+        return math.sqrt((self.__x - x) ** 2 + (self.__y - y) ** 2 + (self.__z - z) ** 2)
+
+    def asarray(self) -> np.ndarray:
+        """ Method to convert the Position to a numpy array"""
+        return np.array([self.__x, self.__y, self.__z])
 
     # Dunder methods relevant to Positions
     def __add__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, Position):
-            return Position(self.x + other.x, self.y + other.y, self.z + other.z)
+            return Position(self.__x + other.x, self.__y + other.y, self.__z + other.z)
         elif isinstance(other, (list, tuple, np.ndarray)) and len(other) == 3:
-            return Position(self.x + other[0], self.y + other[1], self.z + other[2])
+            return Position(self.__x + other[0], self.__y + other[1], self.__z + other[2])
         else:
             raise PositionTypeError(
                 "Operand must be a Position instance or a sequence with 3 elements.")
@@ -171,23 +177,23 @@ class Position:
 
     def __sub__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, Position):
-            return Position(self.x - other.x, self.y - other.y, self.z - other.z)
+            return Position(self.__x - other.x, self.__y - other.y, self.__z - other.z)
         elif isinstance(other, (Sequence, np.ndarray)) and len(other) == 3:
-            return Position(self.x - other[0], self.y - other[1], self.z - other[2])
+            return Position(self.__x - other[0], self.__y - other[1], self.__z - other[2])
         else:
             raise PositionTypeError(
                 "Operand must be a Position instance or a sequence with 3 elements.")
 
     def __rsub__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, (Sequence, np.ndarray)) and len(other) == 3:
-            return Position(other[0] - self.x, other[1] - self.y, other[2] - self.z)
+            return Position(other[0] - self.__x, other[1] - self.__y, other[2] - self.__z)
         else:
             raise PositionTypeError(
                 "Operand must be a sequence with 3 elements.")
 
     def __mul__(self, other: numbers.Number) -> Position:
         if isinstance(other, numbers.Number):
-            return Position(self.x * other, self.y * other, self.z * other)
+            return Position(self.__x * other, self.__y * other, self.__z * other)
         else:
             raise PositionTypeError("Operand must be a numeric type")
 
@@ -198,19 +204,19 @@ class Position:
         if isinstance(other, numbers.Number):
             if other == 0:
                 raise PositionValueError("Cannot divide by 0.")
-            return Position(self.x / other, self.y / other, self.z / other)
+            return Position(self.__x / other, self.__y / other, self.__z / other)
         else:
             raise PositionTypeError("Operand must be a numeric type")
 
     def __iadd__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, Position):
-            self._x += other.x
-            self._y += other.y
-            self._z += other.z
+            self.__x += other.x
+            self.__y += other.y
+            self.__z += other.z
         elif isinstance(other, (Sequence, np.ndarray)) and len(other) == 3:
-            self._x += other[0]
-            self._y += other[1]
-            self._z += other[2]
+            self.__x += other[0]
+            self.__y += other[1]
+            self.__z += other[2]
         else:
             raise PositionTypeError(
                 "Operand must be a Position instance or a sequence with 3 elements.")
@@ -219,13 +225,13 @@ class Position:
 
     def __isub__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, Position):
-            self._x -= other.x
-            self._y -= other.y
-            self._z -= other.z
+            self.__x -= other.x
+            self.__y -= other.y
+            self.__z -= other.z
         elif isinstance(other, (Sequence, np.ndarray)) and len(other) == 3:
-            self._x -= other[0]
-            self._y -= other[1]
-            self._z -= other[2]
+            self.__x -= other[0]
+            self.__y -= other[1]
+            self.__z -= other[2]
         else:
             raise PositionTypeError(
                 "Operand must be a Position instance or a sequence with 3 elements.")
@@ -234,9 +240,9 @@ class Position:
 
     def __imul__(self, other: numbers.Number) -> Position:
         if isinstance(other, numbers.Number):
-            self._x *= other
-            self._y *= other
-            self._z *= other
+            self.__x *= other
+            self.__y *= other
+            self.__z *= other
             return self
         else:
             raise PositionTypeError("Operand must be a numeric type")
@@ -245,15 +251,15 @@ class Position:
         if isinstance(other, numbers.Number):
             if other == 0:
                 raise PositionValueError("Cannot divide by 0.")
-            self._x /= other
-            self._y /= other
-            self._z /= other
+            self.__x /= other
+            self.__y /= other
+            self.__z /= other
             return self
         else:
             raise PositionTypeError("Operand must be a numeric type")
 
     def __eq__(self, other: Position) -> bool:
-        return self.x == other.x and self.y == other.y and self.z == other.z
+        return self.__x == other.x and self.__y == other.y and self.__z == other.z
 
     def __repr__(self) -> str:
-        return f"Position(x={self.x}, y={self.y}, z={self.z})"
+        return f"Position(x={self.__x}, y={self.__y}, z={self.__z})"

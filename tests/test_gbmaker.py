@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from GBOpt.Atom import Atom, AtomValueError
 from GBOpt.GBMaker import GBMaker, GBMakerTypeError, GBMakerValueError
 from GBOpt.UnitCell import UnitCell
 
@@ -15,6 +16,7 @@ class TestGBMaker(unittest.TestCase):
         # Common test setup
         self.a0 = 3.61
         self.structure = 'fcc'
+        self.atom_types = 'Cu'
         self.gb_thickness = 10.0
         theta = math.radians(36.869898)
         self.misorientation = np.array(
@@ -25,8 +27,9 @@ class TestGBMaker(unittest.TestCase):
         self.gb_id = 0
         self.interaction_distance = 10
         self.gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
-                           self.misorientation, repeat_factor=self.repeat_factor,
-                           x_dim=self.x_dim, vacuum=self.vacuum,
+                           self.misorientation, self.atom_types,
+                           repeat_factor=self.repeat_factor, x_dim=self.x_dim,
+                           vacuum=self.vacuum,
                            interaction_distance=self.interaction_distance,
                            gb_id=self.gb_id)
 
@@ -43,19 +46,19 @@ class TestGBMaker(unittest.TestCase):
         self.assertEqual(self.gbm.vacuum_thickness, self.vacuum)
         self.assertEqual(self.gbm.id, self.gb_id)
         unit_cell = UnitCell()
-        unit_cell.init_by_structure(self.structure, self.a0)
+        unit_cell.init_by_structure(self.structure, self.a0, self.atom_types)
         self.assertTrue(repr(self.gbm.unit_cell) == repr(unit_cell))
         self.assertEqual(self.gbm.interaction_distance, self.interaction_distance)
-        self.assertTrue(self.gbm.gb.shape[0] > 0)
-        self.assertTrue(isinstance(self.gbm.gb, np.ndarray))
+        self.assertTrue(self.gbm.whole_system.shape[0] > 0)
+        self.assertTrue(isinstance(self.gbm.whole_system, np.ndarray))
         self.assertIsNotNone(self.gbm.left_grain)
         self.assertIsNotNone(self.gbm.right_grain)
-        self.assertEqual(self.gbm.gb.shape[1], 4)
+        self.assertEqual(len(self.gbm.whole_system[0]), 4)
         left_grain = self.gbm.left_grain
         right_grain = self.gbm.right_grain
-        gb = self.gbm.gb
+        system = self.gbm.whole_system
         self.assertEqual(
-            left_grain.shape[0] + right_grain.shape[0], gb.shape[0])
+            left_grain.shape[0] + right_grain.shape[0], system.shape[0])
 
     # Tests for invalid values
     def test_invalid_a0_type(self):
@@ -85,16 +88,19 @@ class TestGBMaker(unittest.TestCase):
     def test_invalid_values_raise_exceptions(self):
         with self.assertRaises(GBMakerValueError):
             GBMaker(-1.0, self.structure,
-                    self.gb_thickness, self.misorientation)
+                    self.gb_thickness, self.misorientation, self.atom_types)
         with self.assertRaises(GBMakerValueError):
             GBMaker(self.a0, 'invalid_structure',
-                    self.gb_thickness, self.misorientation)
+                    self.gb_thickness, self.misorientation, self.atom_types)
         with self.assertRaises(GBMakerValueError):
             GBMaker(self.a0, self.structure,
-                    self.gb_thickness, np.array([0.1, 0.2]))
+                    self.gb_thickness, np.array([0.1, 0.2]), self.atom_types)
         with self.assertRaises(GBMakerValueError):
             GBMaker(self.a0, self.structure, -5.0,
-                    self.misorientation)
+                    self.misorientation, self.atom_types)
+        with self.assertRaises(AtomValueError):
+            GBMaker(self.a0, self.structure, self.gb_thickness,
+                    self.misorientation, "Invalid")
 
     # Tests for additional getters
     def test_additional_getters(self):
@@ -121,7 +127,7 @@ class TestGBMaker(unittest.TestCase):
         self.assertNotEqual(initial_spacing, self.gbm.spacing)
 
     def test_write_lammps(self):
-        atoms = self.gbm.gb
+        atoms = self.gbm.whole_system
         box_sizes = self.gbm.box_dims
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             self.gbm.write_lammps(temp_file.name, atoms, box_sizes)
@@ -154,6 +160,9 @@ class TestGBMaker(unittest.TestCase):
 
         self.gbm.structure = "bcc"
         self.assertEqual(self.gbm.structure, "bcc")
+
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.structure = 'fluorite'
 
         self.gbm.gb_thickness = 12.0
         self.assertEqual(self.gbm.gb_thickness, 12.0)
@@ -224,7 +233,7 @@ class TestGBMaker(unittest.TestCase):
     def test_repeat_factor_warning(self):
         with self.assertWarns(UserWarning):
             gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
-                          self.misorientation, repeat_factor=[2, 3],
+                          self.misorientation, self.atom_types, repeat_factor=[2, 3],
                           x_dim=self.x_dim, vacuum=self.vacuum,
                           interaction_distance=30,
                           gb_id=self.gb_id)
@@ -240,7 +249,8 @@ class TestGBMaker(unittest.TestCase):
     # Additional tests
     # Output data file format is as expected.
     def test_lammps_file_formatting(self):
-        atoms = np.array([[1, 0.0, 0.0, 0.0], [2, 1.0, 1.0, 1.0]])
+        atoms = np.array([('Cu', 0.0, 0.0, 0.0), ('H', 1.0, 1.0, 1.0)],
+                         dtype=Atom.atom_dtype)
         box_sizes = np.array([[0.0, 10.0], [0.0, 10.0], [0.0, 10.0]])
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             self.gbm.write_lammps(temp_file.name, atoms, box_sizes)
@@ -248,6 +258,40 @@ class TestGBMaker(unittest.TestCase):
                 content = f.readlines()
             self.assertEqual(content[2].strip(), '2 atoms')
             self.assertEqual(content[3].strip(), '2 atom types')
+
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            self.gbm.write_lammps(temp_file.name, atoms, box_sizes, type_as_int=False)
+            with open(temp_file.name, 'r') as f:
+                content = f.readlines()
+
+            self.assertEqual(content[8].strip(), 'Atom Type Labels')
+            self.assertEqual(content[10].strip(), '1 Cu')
+            self.assertEqual(content[11].strip(), '2 H')
+
+    def test_data_integrity_in_gb(self):
+        left_grain = self.gbm.left_grain
+        right_grain = self.gbm.right_grain
+        system = self.gbm.whole_system
+
+        self.assertEqual(
+            left_grain.shape[0] + right_grain.shape[0], system.shape[0])
+
+    def test_inconsistent_data_raises_exceptions(self):
+        with self.assertRaises(GBMakerValueError):
+            GBMaker(self.a0, self.structure, -5.0,
+                    self.misorientation, self.atom_types)  # Negative thickness
+
+    # Test 13: Edge Cases for Box Dimension Calculations
+    def test_thin_thick_box_dimensions(self):
+        # Thin box
+        self.gbm.x_dim = 5.0
+        # Ensure small x-dimension
+        self.assertLess(self.gbm.box_dims[0][1], 25.0)
+
+        # Thick box
+        self.gbm.vacuum_thickness = 50.0
+        # Ensure large x-dimension
+        self.assertGreater(self.gbm.box_dims[0][1], 50.0)
 
 
 if __name__ == '__main__':
