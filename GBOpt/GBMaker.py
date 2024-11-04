@@ -179,29 +179,33 @@ class GBMaker:
         # The rows of the approximated matrix gives the Miller indices of the directions
         # that are now aligned along the x, y, and z axes. We calculate the interplanar
         # spacings using the usual formula: d = a / sqrt(h**2+k**2+l**2)
-        # Note that math.sqrt is used to take advantage of the lack of a limit on Python
-        # integers - np.sqrt() cannot generally be used.
         interplanar_spacings_left = self.__a0 / \
-            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
-                     for row in R_left_approx])
+            np.linalg.norm(np.array(R_left_approx, np.float64), axis=0)
         interplanar_spacings_right = self.__a0 / \
-            np.array([math.sqrt(row[0] * row[0] + row[1] * row[1] + row[2] * row[2])
-                     for row in R_right_approx])
+            np.linalg.norm(np.array(R_right_approx, np.float64), axis=0)
 
         # The number of planes before periodicity is the square of the denominator in
         # the interplanar_spacings calculation above. Thus, the total periodic distance
         # is going to be (a / d) ** 2 * 2 = a**2 / d
-        # We limit the spacing to some threshold value to prevent overly
-        # large systems.
-        spacing_left = {axis: min(val, threshold) for axis, val in zip(
+        # spacing_left = {axis: min(val, threshold) for axis, val in zip(
+        #     ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_left)}
+        # spacing_right = {axis: min(val, threshold) for axis, val in zip(
+        #     ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_right)}
+        spacing_left = {axis: val for axis, val in zip(
             ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_left)}
-        spacing_right = {axis: min(val, threshold) for axis, val in zip(
+        spacing_right = {axis: val for axis, val in zip(
             ['x', 'y', 'z'], self.__a0**2 / interplanar_spacings_right)}
 
         spacing = {axis: max(spacing_left[axis], spacing_right[axis])
                    for axis in ['x', 'y', 'z']}
-        if threshold in spacing.values():
-            warnings.warn("Resulting boundary is non-periodic.")
+
+        warnings.simplefilter('once', UserWarning)
+        for key, val in spacing.items():
+            if threshold < val:
+                spacing[key] = threshold
+                warnings.warn("Resulting boundary is non-periodic.")
+        warnings.simplefilter('default', UserWarning)
+
         return spacing
 
     def __generate_gb(self) -> None:
