@@ -351,6 +351,19 @@ class TestUnitCell(unittest.TestCase):
                                 reciprocal=custom_reciprocal
                                 )
 
+    def test_lattice_parameter(self):
+        cell = UnitCell()
+        cell.init_by_structure(structure='fcc', a0=3.54, atoms='Cu')
+        cu_unit_cell = [
+            Atom('Cu', 0.0, 0.0, 0.0),
+            Atom('Cu', 0.0, 1.77, 1.77),
+            Atom('Cu', 1.77, 0.0, 1.77),
+            Atom('Cu', 1.77, 1.77, 0.0)
+        ]
+        cu_positions = [i['position'] for i in cu_unit_cell]
+        cell_positions = [i['position'] for i in cell.unit_cell]
+        self.assertEqual(cell_positions, cu_positions)
+
     def test_repr(self):
         cell = UnitCell()
         self.assertEqual(

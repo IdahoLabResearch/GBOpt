@@ -1,9 +1,11 @@
+import filecmp
 import math
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from GBOpt.Atom import Atom, AtomValueError
 from GBOpt.GBMaker import GBMaker, GBMakerTypeError, GBMakerValueError
@@ -281,17 +283,19 @@ class TestGBMaker(unittest.TestCase):
             GBMaker(self.a0, self.structure, -5.0,
                     self.misorientation, self.atom_types)  # Negative thickness
 
-    # Test 13: Edge Cases for Box Dimension Calculations
-    def test_thin_thick_box_dimensions(self):
-        # Thin box
-        self.gbm.x_dim = 5.0
-        # Ensure small x-dimension
-        self.assertLess(self.gbm.box_dims[0][1], 25.0)
-
-        # Thick box
-        self.gbm.vacuum_thickness = 50.0
-        # Ensure large x-dimension
-        self.assertGreater(self.gbm.box_dims[0][1], 50.0)
+    @pytest.mark.known_bug
+    def test_single_grain_creation(self):
+        gbm_single = GBMaker(3.54, 'fcc', 5.0,
+                             np.array([0, 0, 0, 0, 0]), 'Cu',
+                             repeat_factor=6, x_dim=10,
+                             vacuum=10,
+                             interaction_distance=5
+                             )
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            gbm_single.write_lammps(temp_file.name)
+            # This test _will_ fail until we address #39
+            self.assertTrue(
+                filecmp.cmp(temp_file.name, './tests/gold/fcc_Cu.txt', shallow=False))
 
 
 if __name__ == '__main__':

@@ -5,6 +5,7 @@ import unittest
 import warnings
 
 import numpy as np
+import pytest
 
 from GBOpt.GBMaker import GBMaker
 
@@ -131,26 +132,31 @@ class TestGBManipulator(unittest.TestCase):
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.slice_and_merge()
 
+    @pytest.mark.slow
     def test_remove_atoms(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(gb_fraction=0.10)
         self.assertGreater(len(self.tilt.whole_system), len(new_system))
 
+    @pytest.mark.slow
     def test_remove_atoms_fraction_error(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertRaises(GBManipulatorValueError):
             _ = manipulator.remove_atoms(gb_fraction=0.50)
 
+    @pytest.mark.slow
     def test_remove_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(gb_fraction=0.10)
 
+    @pytest.mark.slow
     def test_remove_atoms_calculated_fraction_warning(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(gb_fraction=0.0000001)
 
+    @pytest.mark.slow
     def test_remove_atoms_with_specific_number(self):
         manipulator = GBManipulator(self.tilt, seed=self.seed)
         new_system = manipulator.remove_atoms(num_to_remove=1)
