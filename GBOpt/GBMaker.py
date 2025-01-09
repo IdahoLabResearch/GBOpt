@@ -468,11 +468,11 @@ class GBMaker:
             fdata.write('{} atoms\n'.format(len(atoms)))
             fdata.write('{} atom types\n'.format(len(set(atoms['name']))))
             # Specify box dimensions
-            fdata.write('{} {} xlo xhi\n'.format(
+            fdata.write('{:.6f} {:.6f} xlo xhi\n'.format(
                 box_sizes[0][0], box_sizes[0][1]))
-            fdata.write('{} {} ylo yhi\n'.format(
+            fdata.write('{:.6f} {:.6f} ylo yhi\n'.format(
                 box_sizes[1][0], box_sizes[1][1]))
-            fdata.write('{} {} zlo zhi\n'.format(
+            fdata.write('{:.6f} {:.6f} zlo zhi\n'.format(
                 box_sizes[2][0], box_sizes[2][1]))
 
             if not type_as_int:
@@ -486,11 +486,11 @@ class GBMaker:
             # Write each position.
             if type_as_int:
                 for i, (name, *pos) in enumerate(atoms):
-                    fdata.write('{} {:n} {} {} {}\n'.format(
+                    fdata.write('{} {:n} {:.6f} {:.6f} {:.6f}\n'.format(
                         i+1, name_to_int[name], *pos))
             else:
                 for i, (name, *pos) in enumerate(atoms):
-                    fdata.write('{} {} {} {} {}\n'.format(i+1, name, *pos))
+                    fdata.write('{} {} {:.6f} {:.6f} {:.6f}\n'.format(i+1, name, *pos))
 
     # Properties with getters and setters. Automatic updates for related parameters are
     # automatically taken care of.
