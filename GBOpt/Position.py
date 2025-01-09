@@ -162,6 +162,10 @@ class Position:
         """ Method to convert the Position to a numpy array"""
         return np.array([self.__x, self.__y, self.__z])
 
+    def asarray(self) -> np.ndarray:
+        """ Method to convert the Position to a numpy array"""
+        return np.array([self.x, self.y, self.z])
+
     # Dunder methods relevant to Positions
     def __add__(self, other: Union[Position, Sequence[numbers.Number], np.ndarray]) -> Position:
         if isinstance(other, Position):

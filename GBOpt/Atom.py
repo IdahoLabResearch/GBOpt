@@ -42,7 +42,7 @@ class Atom:
 
     :param atom_name: The name of the Atom (from the periodic table)
     :param x, y, z: The coordinates of the Atom.
-    :param  \**kwargs: See below.
+    :param  **kwargs: See below.
 
     :Keyword Arguments
         Any valid string and any valid alphanumeric value can be assigned with keyword
@@ -237,6 +237,10 @@ class Atom:
     @property
     def position(self) -> Position:
         return self.__position
+
+    @property
+    def properties(self) -> Dict[str, Any]:
+        return self.__properties
 
     @position.setter
     def position(self, value: Union[Position, Sequence, np.ndarray]) -> None:

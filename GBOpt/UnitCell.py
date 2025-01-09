@@ -12,7 +12,12 @@ class UnitCellError(Exception):
 
 
 class UnitCellValueError(UnitCellError):
-    """Exceptions raised in the UnitCell class when an incorrect value is given."""
+    """Exceptions raised when an incorrect value is assigned to a UnitCell attribute."""
+    pass
+
+
+class UnitCellTypeError(UnitCellError):
+    """Exceptions raised when an incorrect type is assigned to a UnitCell attribute."""
     pass
 
 
