@@ -239,7 +239,7 @@ class TestGBManipulator(unittest.TestCase):
             # self.tilt.write_lammps(temp_file.name, p4, self.tilt.box_dims)
 
     def test_created_gbs(self):
-        manipulator = GBManipulator(self.system, self.system)
+        manipulator = GBManipulator(self.tilt, self.tilt)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", category=UserWarning)
             p1 = manipulator.translate_right_grain(1, 1)
