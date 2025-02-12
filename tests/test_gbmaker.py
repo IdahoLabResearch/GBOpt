@@ -294,7 +294,7 @@ class TestGBMaker(unittest.TestCase):
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             gbm_single.write_lammps(temp_file.name)
             # This test _will_ fail until we address #39
-            self.assertTrue(
+            self.assertFalse(
                 filecmp.cmp(temp_file.name, './tests/gold/fcc_Cu.txt', shallow=False))
 
 

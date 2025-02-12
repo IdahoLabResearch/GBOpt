@@ -212,6 +212,7 @@ class TestGBManipulator(unittest.TestCase):
             method='delaunay', num_to_insert=1)
         self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system2))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_base(self):
         # test the base case
         child = self.manipulator_tilt.displace_along_soft_modes()
@@ -219,6 +220,7 @@ class TestGBManipulator(unittest.TestCase):
         self.assertFalse(structured_array_equal(
             child[0], self.manipulator_tilt.parents[0].whole_system))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_with_displacement_threshold(self):
         # test the case with a displacement threshold specified
         child = self.manipulator_tilt.displace_along_soft_modes(1.0)
@@ -226,6 +228,7 @@ class TestGBManipulator(unittest.TestCase):
         self.assertFalse(structured_array_equal(
             child[0], self.manipulator_tilt.parents[0].whole_system))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_diff_mesh(self):
         # test differing mesh size
         child = self.manipulator_tilt.displace_along_soft_modes(mesh_size=2)
@@ -233,6 +236,7 @@ class TestGBManipulator(unittest.TestCase):
         self.assertFalse(structured_array_equal(
             child[0], self.manipulator_tilt.parents[0].whole_system))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_num_q_vecs(self):
         # test number of q vectors
         child = self.manipulator_tilt.displace_along_soft_modes(num_q=20)
@@ -240,6 +244,7 @@ class TestGBManipulator(unittest.TestCase):
         self.assertFalse(structured_array_equal(
             child[0], self.manipulator_tilt.parents[0].whole_system))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_num_child_structures(self):
         # test number of child structures
         children = self.manipulator_tilt.displace_along_soft_modes(num_children=2)
@@ -250,6 +255,7 @@ class TestGBManipulator(unittest.TestCase):
             children[1], self.manipulator_tilt.parents[0].whole_system))
         self.assertFalse(structured_array_equal(children[0], children[1]))
 
+    @pytest.mark.slow
     def test_displace_along_soft_modes_simple_case(self):
         # While we end up using the indicated file for the actual atomic configuration,
         # that configuration was developed using this set of parameters
