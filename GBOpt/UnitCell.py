@@ -288,9 +288,8 @@ class UnitCell:
         Returns an array assigning a 'type' number to each unique atom type.
         """
         names = np.array([a['name'] for a in self.__unit_cell])
-        names_dict = {name: idx + 1 for idx, name in enumerate(set(names))}
-        converted_names = np.array([names_dict[name] for name in names])
-        return converted_names
+        _, converted_names = np.unique(names, return_inverse=True)
+        return converted_names + 1  # starts the indexing from 1
 
     @property
     def reciprocal(self) -> np.ndarray:

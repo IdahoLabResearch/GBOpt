@@ -166,7 +166,7 @@ class TestGBManipulator(unittest.TestCase):
     @pytest.mark.slow
     def test_remove_atoms_calculated_fraction_warning(self):
         with self.assertWarns(UserWarning):
-            _ = self.manipulator_tilt.remove_atoms(gb_fraction=0.0000001)
+            _ = self.manipulator_tilt.remove_atoms(gb_fraction=1e-7)
 
     @pytest.mark.slow
     def test_remove_atoms_with_specific_number(self):
@@ -174,12 +174,12 @@ class TestGBManipulator(unittest.TestCase):
         self.assertEqual(len(self.tilt.whole_system)-1, len(new_system))
 
     def test_insert_atoms(self):
-        new_system1 = self.manipulator_tilt.insert_atoms(
+        new_system_delaunay = self.manipulator_tilt.insert_atoms(
             fill_fraction=0.10, method='delaunay')
-        self.assertGreater(len(new_system1), len(self.tilt.whole_system))
-        new_system2 = self.manipulator_tilt.insert_atoms(
+        self.assertGreater(len(new_system_delaunay), len(self.tilt.whole_system))
+        new_system_grid = self.manipulator_tilt.insert_atoms(
             fill_fraction=0.10, method='grid')
-        self.assertGreater(len(new_system2), len(self.tilt.whole_system))
+        self.assertGreater(len(new_system_grid), len(self.tilt.whole_system))
 
     def test_insert_atoms_fraction_error(self):
         with self.assertRaises(GBManipulatorValueError):
@@ -194,23 +194,23 @@ class TestGBManipulator(unittest.TestCase):
     def test_insert_atoms_calculated_fraction_warning(self):
         with self.assertWarns(UserWarning):
             _ = self.manipulator_tilt.insert_atoms(
-                fill_fraction=0.0000001, method='delaunay')
+                fill_fraction=1e-7, method='delaunay')
 
         with self.assertWarns(UserWarning):
             _ = self.manipulator_tilt.insert_atoms(
-                fill_fraction=0.0000001, method='grid')
+                fill_fraction=1e-7, method='grid')
 
     def test_insert_atoms_invalid_method(self):
         with self.assertRaises(GBManipulatorValueError):
             _ = self.manipulator_tilt.insert_atoms(fill_fraction=0.10, method='invalid')
 
     def test_insert_atoms_with_specific_number(self):
-        new_system1 = self.manipulator_tilt.insert_atoms(
+        new_system_delaunay = self.manipulator_tilt.insert_atoms(
             method='delaunay', num_to_insert=1)
-        self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system1))
-        new_system2 = self.manipulator_tilt.insert_atoms(
-            method='delaunay', num_to_insert=1)
-        self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system2))
+        self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system_delaunay))
+        new_system_grid = self.manipulator_tilt.insert_atoms(
+            method='grid', num_to_insert=1)
+        self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system_grid))
 
     @pytest.mark.slow
     def test_displace_along_soft_modes_base(self):
