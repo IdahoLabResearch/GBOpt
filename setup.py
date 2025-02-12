@@ -8,6 +8,7 @@ setup(
         'numpy',
         'scipy',
         'numba',
+        'pandas',
         'matplotlib',
         'pytest'
     ],
