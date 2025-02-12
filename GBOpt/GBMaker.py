@@ -100,7 +100,7 @@ class GBMaker:
         self.__box_dims = self.__calculate_box_dimensions()
 
     # Private class methods
-    def __approximate_rotation_matrix_as_int(self, m: np.ndarray, precision: float = 5) -> np.ndarray:
+    def __approximate_rotation_matrix_as_int(self, m: np.ndarray, precision: int = 5) -> np.ndarray:
         """
         Approximate a rotation matrix in integer format given the original matrix and
         the desired precision.
@@ -432,7 +432,8 @@ class GBMaker:
         atoms: np.ndarray = None,
         box_sizes: np.ndarray = None,
         *,
-        type_as_int: bool = False
+        type_as_int: bool = False,
+        precision: int = 6
     ) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
@@ -468,12 +469,12 @@ class GBMaker:
             fdata.write('{} atoms\n'.format(len(atoms)))
             fdata.write('{} atom types\n'.format(len(set(atoms['name']))))
             # Specify box dimensions
-            fdata.write('{:.6f} {:.6f} xlo xhi\n'.format(
-                box_sizes[0][0], box_sizes[0][1]))
-            fdata.write('{:.6f} {:.6f} ylo yhi\n'.format(
-                box_sizes[1][0], box_sizes[1][1]))
-            fdata.write('{:.6f} {:.6f} zlo zhi\n'.format(
-                box_sizes[2][0], box_sizes[2][1]))
+            fdata.write(
+                f'{box_sizes[0][0]:.{precision}f} {box_sizes[0][1]:.{precision}f} xlo xhi\n')
+            fdata.write(
+                f'{box_sizes[1][0]:.{precision}f} {box_sizes[1][1]:.{precision}f} ylo yhi\n')
+            fdata.write(
+                f'{box_sizes[2][0]:.{precision}f} {box_sizes[2][1]:.{precision}f} zlo zhi\n')
 
             if not type_as_int:
                 fdata.write('\nAtom Type Labels\n\n')
@@ -486,11 +487,12 @@ class GBMaker:
             # Write each position.
             if type_as_int:
                 for i, (name, *pos) in enumerate(atoms):
-                    fdata.write('{} {:n} {:.6f} {:.6f} {:.6f}\n'.format(
-                        i+1, name_to_int[name], *pos))
+                    fdata.write(
+                        f'{i+1} {name_to_int[name]:n} {pos[0]:.{precision}f} {pos[1]:.{precision}f} {pos[2]:.{precision}f}\n')
             else:
                 for i, (name, *pos) in enumerate(atoms):
-                    fdata.write('{} {} {:.6f} {:.6f} {:.6f}\n'.format(i+1, name, *pos))
+                    fdata.write(
+                        f'{i+1} {name} {pos[0]:.{precision}f} {pos[1]:.{precision}f} {pos[2]:.{precision}f}\n')
 
     # Properties with getters and setters. Automatic updates for related parameters are
     # automatically taken care of.
