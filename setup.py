@@ -5,12 +5,13 @@ setup(
     version="0.1",
     packages=find_packages(),
     install_requires=[
-        'numpy',
+        'numpy<=2.1',
         'scipy',
         'numba',
         'pandas',
         'matplotlib',
-        'pytest'
+        'pytest',
+        'spglib'
     ],
     author="Chaitanya Bhave and Jarin French",
     author_email="chaitanya.bhave@inl.gov and jarin.french@inl.gov",
