@@ -390,20 +390,29 @@ class Parent:
         :raises ParentFileMissingDataError: Exception raised if the file is otherwise
             formatted correctly, but is missing required data.
         """
-        skiprows = 0
-        n_atoms = 0
-        n_types = 0
-        x_dims = []
-        y_dims = []
-        z_dims = []
+        n_atoms = n_types = 0
+        x_dims = y_dims = z_dims = []
         type_dict = {}
+        skiprows = 0
+
         with open(system_file) as f:
-            next(f)  # header line
-            next(f)  # blank line
-            line = f.readline().strip()  # reads the next line
-            skiprows += 3
-            while not line.startswith('Atoms'):
+            lines = iter(f)
+            # Skip header and blank lines
+            next(lines)
+            next(lines)
+            skiprows += 2
+
+            for line in lines:
+                skiprows += 1
+                line = line.strip()
+
+                if line.startswith('Atoms'):
+                    next(lines)  # Skip the blank line after 'Atoms'
+                    skiprows += 1
+                    break
+
                 line_sp = line.split()
+
                 if "atoms" in line:
                     n_atoms = int(line_sp[0])
                 elif "atom types" in line:
@@ -415,22 +424,22 @@ class Parent:
                 elif "zlo zhi" in line:
                     z_dims = [float(line_sp[0]), float(line_sp[1])]
                 elif line == "Atom Type Labels":
-                    next(f)  # skip the blank line before the data
-                    label_line = f.readline().strip().split()
-                    skiprows += 2
+                    next(lines)  # Skip the blank line before the data
+                    skiprows += 1
                     num_labels = 0
-                    while label_line:
-                        type_dict[label_line[1]] = int(label_line[0])
-                        label_line = f.readline().strip().split()
+
+                    for label_line in lines:
                         skiprows += 1
+                        label_line = label_line.strip().split()
+                        if not label_line:
+                            break
+                        type_dict[label_line[1]] = int(label_line[0])
                         num_labels += 1
-                    if not num_labels == n_types:
+
+                    if num_labels != n_types:
                         raise ParentCorruptedFileError(
-                            "Number of labels does not equal number of atom types.")
-                line = f.readline().strip()
-                skiprows += 1
-            next(f)  # skip the blank line after the 'Atoms' section
-            skiprows += 1
+                            "Number of labels does not equal number of atom types."
+                        )
 
         def convert_type(value):
             if not type_dict:
