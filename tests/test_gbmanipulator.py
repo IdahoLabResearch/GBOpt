@@ -351,8 +351,15 @@ class TestParent(unittest.TestCase):
     def setUp(self):
         self.unit_cell = UnitCell()
         self.unit_cell.init_by_structure('fcc', 1.0, 'Cu')
-        self.GB = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0, misorientation=[
-            math.radians(36.869898), 0, 0, 0, 0], atom_types='Cu', repeat_factor=2, interaction_distance=1)
+        self.GB = GBMaker(
+            a0=1.0,
+            structure='fcc',
+            gb_thickness=10.0,
+            misorientation=[math.radians(36.869898), 0, 0, 0, 0],
+            atom_types='Cu',
+            repeat_factor=2,
+            interaction_distance=1
+        )
         self.parent = Parent(self.GB)
         self.file = 'tests/inputs/basic_dump_test1.txt'
 

@@ -24,13 +24,13 @@ class TestGBMaker(unittest.TestCase):
         self.misorientation = np.array(
             [theta, 0.0, 0.0, 0.0, -theta / 2.0])
         self.repeat_factor = 6
-        self.x_dim = 60.0
+        self.x_dim_min = 60.0
         self.vacuum = 10.0
         self.gb_id = 0
         self.interaction_distance = 10
         self.gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
                            self.misorientation, self.atom_types,
-                           repeat_factor=self.repeat_factor, x_dim=self.x_dim,
+                           repeat_factor=self.repeat_factor, x_dim_min=self.x_dim_min,
                            vacuum=self.vacuum,
                            interaction_distance=self.interaction_distance,
                            gb_id=self.gb_id)
@@ -44,7 +44,7 @@ class TestGBMaker(unittest.TestCase):
             self.gbm.misorientation, self.misorientation)
         self.assertEqual(self.gbm.repeat_factor, [
                          self.repeat_factor, self.repeat_factor])
-        self.assertEqual(self.gbm.x_dim, self.x_dim)
+        self.assertEqual(self.gbm.x_dim_min, self.x_dim_min)
         self.assertEqual(self.gbm.vacuum_thickness, self.vacuum)
         self.assertEqual(self.gbm.id, self.gb_id)
         unit_cell = UnitCell()
@@ -142,7 +142,9 @@ class TestGBMaker(unittest.TestCase):
     # Tests for setters
     def test_box_dimensions_after_updates(self):
         original_box_dims = self.gbm.box_dims.copy()
-        self.gbm.x_dim = 80.0
+        print(self.gbm.x_dim_min)
+        self.gbm.x_dim_min = 70
+        print(self.gbm.x_dim_min)
         self.assertFalse(np.allclose(original_box_dims, self.gbm.box_dims))
 
     def test_misorientation_spacing(self):
@@ -191,8 +193,8 @@ class TestGBMaker(unittest.TestCase):
         with self.assertRaises(GBMakerValueError):
             self.gbm.repeat_factor = [1.5, 2.0]
 
-        self.gbm.x_dim = 80.0
-        self.assertEqual(self.gbm.x_dim, 80.0)
+        self.gbm.x_dim_min = 80.0
+        self.assertEqual(self.gbm.x_dim_min, 80.0)
 
         self.gbm.vacuum_thickness = 15.0
         self.assertEqual(self.gbm.vacuum_thickness, 15.0)
@@ -202,8 +204,8 @@ class TestGBMaker(unittest.TestCase):
 
     def test_thin_thick_box_dimensions(self):
         # Thin box
-        self.gbm.x_dim = 5.0
-        self.assertLess(self.gbm.box_dims[0][1], 25.0)
+        self.gbm.x_dim_min = 5.0
+        self.assertLess(self.gbm.box_dims[0][1], 50.0)
 
         # Thick box
         self.gbm.vacuum_thickness = 50.0
@@ -218,9 +220,9 @@ class TestGBMaker(unittest.TestCase):
         approx_matrix = self.gbm._GBMaker__approximate_rotation_matrix_as_int(
             rotation_matrix)
 
-        expected_matrix = np.array([[141421, 100000, 100000],
-                                    [141421, -100000, -100000],
-                                    [0, 1, -1]])
+        expected_matrix = np.array([[27720,  19601,  19601],
+                                    [27720, -19601, -19601],
+                                    [0,      1,     -1]])
 
         np.testing.assert_array_equal(approx_matrix, expected_matrix)
 
@@ -236,9 +238,7 @@ class TestGBMaker(unittest.TestCase):
         with self.assertWarns(UserWarning):
             gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
                           self.misorientation, self.atom_types, repeat_factor=[2, 3],
-                          x_dim=self.x_dim, vacuum=self.vacuum,
-                          interaction_distance=30,
-                          gb_id=self.gb_id)
+                          vacuum=self.vacuum, interaction_distance=30, gb_id=self.gb_id)
 
         with self.assertWarns(UserWarning):
             gbm.interaction_distance = 32
@@ -246,7 +246,14 @@ class TestGBMaker(unittest.TestCase):
     def test_non_periodic_boundary_warning(self):
         with self.assertWarns(UserWarning):
             self.gbm._GBMaker__approximate_rotation_matrix_as_int(
-                np.array([[0.123456789, 0.56789123, -0.918273645], [-0.135792468, 0.246813579, 0.1], [0.159283746, -0.2, 0.1]]))
+                np.array(
+                    [
+                        [0.123456789, 0.56789123, -0.918273645],
+                        [-0.135792468, 0.246813579, 0.1],
+                        [0.159283746, -0.2, 0.1]
+                    ]
+                )
+            )
 
     # Additional tests
     # Output data file format is as expected.
@@ -283,18 +290,16 @@ class TestGBMaker(unittest.TestCase):
             GBMaker(self.a0, self.structure, -5.0,
                     self.misorientation, self.atom_types)  # Negative thickness
 
-    @pytest.mark.known_bug
+    @pytest.mark.xfail(reason="Fails due to issue #39")
     def test_single_grain_creation(self):
-        gbm_single = GBMaker(3.54, 'fcc', 5.0,
-                             np.array([0, 0, 0, 0, 0]), 'Cu',
-                             repeat_factor=6, x_dim=10,
-                             vacuum=10,
-                             interaction_distance=5
-                             )
+        gbm_single = GBMaker(
+            3.54, 'fcc', 5.0, np.array([0, 0, 0, 0, 0]), 'Cu',
+            repeat_factor=6, x_dim_min=10, vacuum=10, interaction_distance=5
+        )
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
             gbm_single.write_lammps(temp_file.name)
             # This test _will_ fail until we address #39
-            self.assertFalse(
+            self.assertTrue(
                 filecmp.cmp(temp_file.name, './tests/gold/fcc_Cu.txt', shallow=False))
 
 
