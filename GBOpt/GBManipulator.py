@@ -51,14 +51,14 @@ class ParentFileNotFoundError(ParentError):
     pass
 
 
-class ParentCorruptedSnapshotError(ParentError):
+class ParentCorruptedFileError(ParentError):
     """
     Exception raised in the Parent class when an error occurs while reading a snapshot.
     """
     pass
 
 
-class ParentSnapshotMissingDataError(ParentError):
+class ParentFileMissingDataError(ParentError):
     """
     Exception raised when data is missing from a snapshot that is otherwise formatted
     correctly.
@@ -120,7 +120,7 @@ class Parent:
         else:
             if gb_thickness is None:  # defaults to 10 if passed in as None.
                 gb_thickness = 10
-            self.__init_by_snapshot(system, unit_cell, gb_thickness, type_dict)
+            self.__init_by_file(system, unit_cell, gb_thickness, type_dict)
         # self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
         left_x_max = max(self.__left_grain['x'])
         right_x_min = min(self.__right_grain['x'])
@@ -164,7 +164,7 @@ class Parent:
         # not the entire system.
         self.__x_dim = self.__box_dims[0][1] - self.__box_dims[0][0]
 
-    def __init_by_snapshot(
+    def __init_by_file(
         self,
         system_file: str,
         unit_cell: UnitCell,
@@ -172,29 +172,97 @@ class Parent:
         type_dict: dict
     ) -> None:
         """
-        Method for initializing the Parent using a LAMMPS dump file.
+        Method for initializing the Parent using a file.
 
-        :param system_file: Filename of the LAMMPS dump file.
+        :param system_file: Filename of the atom structure file. Currently allowed
+            formats: LAMMPS dump file, LAMMPS input file.
         :param unit_cell: Nominal unit cell of the bulk structure.
         :param gb_thickness: Thickness of the GB region, given in angstroms.
         :param type_dict: Conversion from type number to type name, optional. Note that
             if this is not provided and the snapshot does not indicate the atom names,
             atom names are assumed started from 'H'.
-        :raises ParentValueError: Exception raised if unit_cell is not passed in.
+        :raises ParentValueError: Exception raised if unit_cell is not passed in or the
+            file format of the file is unrecognized, or the file has less than 10 lines.
         :raises ParentFileNotFoundError: Exception raised if the specified file is not
             found.
-        :raises ParentCorruptedSnapshotError: Exception raised if the dump file is not
-            formatted correctly
-        :raises ParentSnapshotMissingDataError: Exception raised if the dump file is
-            otherwise formatted correctly, but is missing required data.
         """
 
         if not unit_cell:
-            raise ParentValueError("Unit cell must be specified for snapshots")
+            raise ParentValueError("Unit cell must be specified for files")
         self.__unit_cell = unit_cell
         self.__gb_thickness = gb_thickness
         if not isfile(system_file):
             raise ParentFileNotFoundError(f"{system_file} does not exist.")
+        # We need to first identify what type of file it is. Since filenames can be just
+        # about anything, we do this by checking the first few lines of the file.
+        head = []
+        try:
+            # The 10 here is arbitrary. We may need to look into making this more robust.
+            with open(system_file) as f:
+                head = [next(f) for _ in range(10)]
+        except StopIteration as e:
+            raise ParentValueError(
+                f"Unable to determine format of {system_file}. File too short. {e}")
+
+        keywords = {
+            self.__init_from_lammps_dump: [
+                "ITEM: TIMESTEP",
+                "ITEM: NUMBER OF ATOMS",
+                "ITEM: BOX BOUNDS",
+                "ITEM: ATOMS"
+            ],
+            self.__init_from_lammps_input: [
+                "atoms",
+                "bonds",
+                "angles",
+                "dihedrals",
+                "impropers",
+                "atom types",
+                "bond types",
+                "angle types",
+                "dihedral types",
+                "improper types",
+                "xlo xhi",
+                "ylo yhi",
+                "zlo zhi",
+                "xy xz yz",
+                "avec",
+                "bvec",
+                "cvec",
+                "abc origin"
+            ]
+        }
+
+        for method, file_keywords in keywords.items():
+            if any(keyword in line for keyword in file_keywords for line in head):
+                method(system_file, unit_cell, gb_thickness, type_dict)
+                break
+        else:
+            raise ParentValueError(f"Unknown file format for {system_file}")
+
+    def __init_from_lammps_dump(
+        self,
+        system_file: str,
+        unit_cell: UnitCell,
+        gb_thickness: float,
+        type_dict: dict,
+    ) -> None:
+        """
+        Method for initializing the Parent using a LAMMPS dump file.
+
+        :param system_file: Filename of the dump file.
+        :param unit_cell: Nominal unit cell of the bulk structure.
+        :param gb_thickness: Thickness of the GB region, given in angstroms.
+        :param type_dict: Conversion from type number to type name, optional. Note that
+            if this is not provided and the snapshot does not indicate the atom names,
+            atom names are assumed started from 'H'.
+        :param file_keywords: List of keywords used to identify different sections of
+            the file.
+        :raises ParentCorruptedFileError: Exception raised if the file is not formatted
+            correctly.
+        :raises ParentFileMissingDataError: Exception raised if the file is otherwise
+            formatted correctly, but is missing required data.
+        """
         skip_rows = 0
         with open(system_file) as f:
             line = f.readline()
@@ -204,7 +272,7 @@ class Parent:
                 line = f.readline()
                 skip_rows += 1
                 if not line:
-                    raise ParentCorruptedSnapshotError(
+                    raise ParentCorruptedFileError(
                         f"Box bounds not found in {system_file}")
             skip_rows += 3
             if len(line.split()) == 6:  # orthogonal box
@@ -242,17 +310,17 @@ class Parent:
                 y_dims = [origin[1], origin[1] + a[1] + b[1]]
                 z_dims = [origin[2], origin[2] + c[2]]
             else:
-                raise ParentCorruptedSnapshotError(
+                raise ParentCorruptedFileError(
                     f"Box bounds corrupted in {system_file}")
             if not (x_dims or y_dims or z_dims) or len(x_dims) != 2 or \
                     len(y_dims) != 2 or len(z_dims) != 2:
-                raise ParentCorruptedSnapshotError(
+                raise ParentCorruptedFileError(
                     f"Box bounds corrupted in {system_file}")
             self.__box_dims = np.array([x_dims, y_dims, z_dims])
             self.__x_dim = x_dims[1] - x_dims[0]
             self.__y_dim = y_dims[1] - y_dims[0]
             self.__z_dim = z_dims[1] - z_dims[0]
-            # TODO: Need a more robust calculation of where the GB is located.
+            # TODO: Need a more robust calculation of where the GB is located. This calculation is duplicated.
             grain_cutoff = (x_dims[1] - x_dims[0]) / 2 + x_dims[0]
             line = f.readline()
             skip_rows += 1
@@ -260,13 +328,13 @@ class Parent:
                 line = f.readline()
                 skip_rows += 1
                 if not line:
-                    raise ParentCorruptedSnapshotError(
+                    raise ParentCorruptedFileError(
                         f"Atoms not found in {system_file}")
             atom_attributes = line.split()[2:]
             required_attributes = ['type', 'x', 'y', 'z']
 
             if not all([i in atom_attributes for i in required_attributes]):
-                raise ParentSnapshotMissingDataError(
+                raise ParentFileMissingDataError(
                     f"One or more required attributes are missing.\n"
                     f"Required: {required_attributes}, "
                     f"available: {atom_attributes}")
@@ -295,11 +363,115 @@ class Parent:
 
         self.__whole_system = np.loadtxt(system_file, skiprows=skip_rows, max_rows=max_rows, converters={
             col_indices[0]: convert_type}, usecols=tuple(col_indices), dtype=Atom.atom_dtype)
-        self.__left_grain = self.__whole_system[self.__whole_system['x'] < grain_cutoff]
-        self.__right_grain = self.__whole_system[self.__whole_system['x']
-                                                 >= grain_cutoff]
+        mask = self.__whole_system['x'] < grain_cutoff
+        self.__left_grain = self.__whole_system[mask]
+        self.__right_grain = self.__whole_system[~mask]
+
+    def __init_from_lammps_input(
+        self,
+        system_file: str,
+        unit_cell: UnitCell,
+        gb_thickness: float,
+        type_dict: dict,
+    ) -> None:
+        """
+        Method for initializing the Parent using a LAMMPS input file.
+
+        :param system_file: Filename of the LAMMPS input file.
+        :param unit_cell: Nominal unit cell of the bulk structure.
+        :param gb_thickness: Thickness of the GB region, given in angstroms.
+        :param type_dict: Conversion from type number to type name, optional. Note that
+            if this is not provided and the snapshot does not indicate the atom names,
+            atom names are assumed started from 'H'.
+        :param file_keywords: List of keywords used to identify different sections of
+            the file.
+        :raises ParentCorruptedFileError: Exception raised if the file is not formatted
+            correctly.
+        :raises ParentFileMissingDataError: Exception raised if the file is otherwise
+            formatted correctly, but is missing required data.
+        """
+        n_atoms = n_types = 0
+        x_dims = y_dims = z_dims = []
+        type_dict = {}
+        skiprows = 0
+
+        with open(system_file) as f:
+            lines = iter(f)
+            # Skip header and blank lines
+            next(lines)
+            next(lines)
+            skiprows += 2
+
+            for line in lines:
+                skiprows += 1
+                line = line.strip()
+
+                if line.startswith('Atoms'):
+                    next(lines)  # Skip the blank line after 'Atoms'
+                    skiprows += 1
+                    break
+
+                line_sp = line.split()
+
+                if "atoms" in line:
+                    n_atoms = int(line_sp[0])
+                elif "atom types" in line:
+                    n_types = int(line_sp[0])
+                elif "xlo xhi" in line:
+                    x_dims = [float(line_sp[0]), float(line_sp[1])]
+                elif "ylo yhi" in line:
+                    y_dims = [float(line_sp[0]), float(line_sp[1])]
+                elif "zlo zhi" in line:
+                    z_dims = [float(line_sp[0]), float(line_sp[1])]
+                elif line == "Atom Type Labels":
+                    next(lines)  # Skip the blank line before the data
+                    skiprows += 1
+                    num_labels = 0
+
+                    for label_line in lines:
+                        skiprows += 1
+                        label_line = label_line.strip().split()
+                        if not label_line:
+                            break
+                        type_dict[label_line[1]] = int(label_line[0])
+                        num_labels += 1
+
+                    if num_labels != n_types:
+                        raise ParentCorruptedFileError(
+                            "Number of labels does not equal number of atom types."
+                        )
+
+        def convert_type(value):
+            if not type_dict:
+                return self.__num_to_name[int(value)]
+            else:
+                return value
+        # We now have to make some assumptions about how the data is actually formatted.
+        # Here, we assume the following:
+        #  column 2: atom type (numeric, if 'Atom Type Labels' not found previously, else string)
+        #  column 3: x position
+        #  column 4: y position
+        #  column 5: z position
+        self.__box_dims = np.array([x_dims, y_dims, z_dims])
+        self.__x_dim = x_dims[1] - x_dims[0]
+        self.__y_dim = y_dims[1] - y_dims[0]
+        self.__z_dim = z_dims[1] - z_dims[0]
+        # TODO: Need a more robust calculation of where the GB is located. This calculation is duplicated.
+        grain_cutoff = (x_dims[1] - x_dims[0]) / 2 + x_dims[0]
+        self.__whole_system = np.loadtxt(
+            system_file,
+            skiprows=skiprows,
+            max_rows=n_atoms,
+            converters={1: convert_type},
+            usecols=[1, 2, 3, 4],
+            dtype=Atom.atom_dtype
+        )
+        mask = self.__whole_system['x'] < grain_cutoff
+        self.__left_grain = self.__whole_system[mask]
+        self.__right_grain = self.__whole_system[~mask]
 
     # Getters
+
     @property
     def left_grain(self) -> np.ndarray:
         return self.__left_grain
@@ -843,11 +1015,11 @@ class GBManipulator:
                                           "fill_fraction <= 0.25")
 
         if (num_to_insert is not None and
-            (
+                    (
                         num_to_insert < 1 or
                         num_to_insert > int(0.25 * len(gb_atoms))
                     )
-            ):
+                ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region")

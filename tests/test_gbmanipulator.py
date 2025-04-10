@@ -14,9 +14,9 @@ from GBOpt.GBManipulator import (
     GBManipulator,
     GBManipulatorValueError,
     Parent,
-    ParentCorruptedSnapshotError,
+    ParentCorruptedFileError,
+    ParentFileMissingDataError,
     ParentFileNotFoundError,
-    ParentSnapshotMissingDataError,
     ParentsProxyIndexError,
     ParentsProxyTypeError,
     ParentsProxyValueError,
@@ -73,8 +73,9 @@ class TestGBManipulator(unittest.TestCase):
         self.gb_thickness = 10.0
         self.atom_types = 'Cu'
         self.misorientation = [math.radians(36.869898), 0, 0, 0, 0]
-        self.file1 = "tests/inputs/test1.txt"
-        self.file2 = "tests/inputs/test2.txt"
+        self.file1 = "tests/inputs/basic_dump_test1.txt"
+        self.file2 = "tests/inputs/basic_dump_test2.txt"
+        self.seed = 100
 
     def test_init_with_one_gbmaker_parent(self):
         self.assertIsNotNone(self.manipulator_tilt.parents[0])
@@ -353,7 +354,7 @@ class TestParent(unittest.TestCase):
         self.GB = GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0, misorientation=[
             math.radians(36.869898), 0, 0, 0, 0], atom_types='Cu', repeat_factor=2, interaction_distance=1)
         self.parent = Parent(self.GB)
-        self.file = 'tests/inputs/test1.txt'
+        self.file = 'tests/inputs/basic_dump_test1.txt'
 
     def test_parent_init(self):
         parent1 = Parent(self.GB)
@@ -400,26 +401,81 @@ class TestParent(unittest.TestCase):
             _ = Parent(self.file)
         with self.assertRaises(ParentFileNotFoundError):
             _ = Parent("tests/inputs/file_not_found.txt", unit_cell=self.unit_cell)
-        with self.assertRaises(ParentCorruptedSnapshotError):
+        with self.assertRaises(ParentCorruptedFileError):
             _ = Parent("tests/inputs/file_without_box_bounds.txt",
                        unit_cell=self.unit_cell)
-        with self.assertRaises(ParentCorruptedSnapshotError):
+        with self.assertRaises(ParentCorruptedFileError):
             _ = Parent("tests/inputs/file_with_invalid_box_bounds.txt",
                        unit_cell=self.unit_cell)
-        with self.assertRaises(ParentCorruptedSnapshotError):
+        with self.assertRaises(ParentCorruptedFileError):
             _ = Parent("tests/inputs/file_with_invalid_box_bounds2.txt",
                        unit_cell=self.unit_cell)
-        with self.assertRaises(ParentCorruptedSnapshotError):
+        with self.assertRaises(ParentCorruptedFileError):
             _ = Parent("tests/inputs/file_without_atoms.txt",
                        unit_cell=self.unit_cell)
-        with self.assertRaises(ParentSnapshotMissingDataError):
+        with self.assertRaises(ParentFileMissingDataError):
             _ = Parent("tests/inputs/file_missing_required_info.txt",
                        unit_cell=self.unit_cell)
 
     def test_read_lammps_with_typelabel(self):
-        parent = Parent("tests/inputs/test3.txt",
+        parent = Parent("tests/inputs/lammps_dump_with_typelabel_test.txt",
                         unit_cell=self.unit_cell, gb_thickness=20)
         self.assertEqual(parent.whole_system[0]['name'], 'Cu')
+
+    def test_read_lammps_input(self):
+        uc = UnitCell()
+        uc.init_by_structure('fcc', 3.54, 'Cu')
+        parent1 = Parent("tests/inputs/lammps_input_with_labels.txt",
+                         unit_cell=uc, gb_thickness=10)
+        parent2 = Parent("tests/inputs/lammps_input_without_labels.txt",
+                         unit_cell=uc, gb_thickness=10)
+        self.assertEqual(len(parent1.whole_system), 792)
+        self.assertTrue(np.isclose(parent1.whole_system[0]['x'], 1.77))
+        self.assertTrue(np.isclose(parent1.whole_system[0]['y'], 1.77))
+        self.assertTrue(np.isclose(parent1.whole_system[0]['z'], 3.54))
+        self.assertTrue(np.allclose(parent1.box_dims, np.array(
+            [[-10, 30], [0, 21.24], [0, 21.24]])))
+        self.assertTrue(all(parent1.whole_system['name'] == 'Cu'))
+
+        self.assertEqual(len(parent2.whole_system), 792)
+        self.assertTrue(np.isclose(parent2.whole_system[0]['x'], 1.77))
+        self.assertTrue(np.isclose(parent2.whole_system[0]['y'], 1.77))
+        self.assertTrue(np.isclose(parent2.whole_system[0]['z'], 3.54))
+        self.assertTrue(np.allclose(parent2.box_dims, np.array(
+            [[-10, 30], [0, 21.24], [0, 21.24]])))
+        self.assertTrue(all(parent2.whole_system['name'] == 'H'))
+
+    def test_read_lammps_input_multiple_atom_types(self):
+        uc = UnitCell()
+        uc.init_by_structure('fcc', 3.54, 'Cu')
+        parent = Parent(
+            "tests/inputs/lammps_input_multiple_atom_types.txt",
+            unit_cell=uc, gb_thickness=10)
+        self.assertTrue(
+            all(np.unique(parent.whole_system['name']) == np.array(['Cu', 'Fe', 'Ni'])))
+
+    def test_read_lammps_input_errors(self):
+        uc = UnitCell()
+        uc.init_by_structure('fcc', 354, 'Cu')
+        with self.assertRaises(ParentCorruptedFileError):
+            _ = Parent(
+                "tests/inputs/lammps_input_multiple_atom_types_missing_labels.txt",
+                unit_cell=uc)
+
+        with self.assertRaises(ParentCorruptedFileError):
+            _ = Parent(
+                "tests/inputs/lammps_input_multiple_atom_types_wrong_num_types.txt",
+                unit_cell=uc)
+
+    def test_unknown_file_type(self):
+        with self.assertRaises(ParentValueError):
+            _ = Parent('tests/inputs/unknown_file_type.txt',
+                       unit_cell=self.unit_cell, gb_thickness=20)
+
+    def test_file_too_short(self):
+        with self.assertRaises(ParentValueError):
+            _ = Parent("tests/inputs/file_too_short.txt",
+                       unit_cell=self.unit_cell, gb_thickness=20)
 
 
 class TestParentProxy(unittest.TestCase):
@@ -427,7 +483,7 @@ class TestParentProxy(unittest.TestCase):
         self.unit_cell = UnitCell()
         self.unit_cell.init_by_structure('fcc', 1.0, 'Cu')
         self.manipulator = GBManipulator(
-            'tests/inputs/test1.txt', unit_cell=self.unit_cell)
+            'tests/inputs/basic_dump_test1.txt', unit_cell=self.unit_cell)
         self.parents_proxy = _ParentsProxy(self.manipulator)
 
     def test_getitem(self):
