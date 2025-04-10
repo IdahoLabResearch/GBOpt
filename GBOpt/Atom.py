@@ -166,9 +166,7 @@ class Atom:
         if not atoms.dtype == Atom.atom_dtype:
             raise AtomTypeError(f"Cannot convert array with dtype {atoms.dtype}")
 
-        converted = [None] * len(atoms)
-        for i, atom in enumerate(atoms):
-            converted[i] = Atom(*atom)
+        converted = [Atom(*a) for a in atoms]
 
         return converted
 
