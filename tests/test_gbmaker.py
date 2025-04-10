@@ -277,6 +277,44 @@ class TestGBMaker(unittest.TestCase):
             self.assertEqual(content[10].strip(), "1 Cu")
             self.assertEqual(content[11].strip(), "2 H")
 
+    def test_lammps_file_formatting_with_charge(self):
+        atoms = np.array(
+            [
+                ('U', 0.0, 0.0, 0.0),
+                ('O', 0.25, 0.25, 0.25),
+                ('O', 0.25, 0.25, 0.75)
+            ],
+            dtype=Atom.atom_dtype
+        )
+        charges = {'U': 2.4, 'O': -1.2}
+        box_sizes = np.array([[0.0, 1.0], [0.0, 1.0], [0.0, 1.0]])
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            self.gbm.write_lammps(temp_file.name, atoms, box_sizes, charges=charges)
+            with open(temp_file.name, 'r') as f:
+                content = f.readlines()
+            self.assertEqual(content[2].strip(), '3 atoms')
+            self.assertEqual(content[3].strip(), '2 atom types')
+            self.assertEqual(content[15].strip(),
+                             '1 U 2.400000 0.000000 0.000000 0.000000')
+            self.assertEqual(content[16].strip(),
+                             '2 O -1.200000 0.250000 0.250000 0.250000')
+            self.assertEqual(content[17].strip(),
+                             '3 O -1.200000 0.250000 0.250000 0.750000')
+
+        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+            self.gbm.write_lammps(temp_file.name, atoms, box_sizes,
+                                  charges=charges, type_as_int=True)
+            with open(temp_file.name, 'r') as f:
+                content = f.readlines()
+            self.assertEqual(content[2].strip(), '3 atoms')
+            self.assertEqual(content[3].strip(), '2 atom types')
+            self.assertEqual(content[10].strip(),
+                             '1 2 2.400000 0.000000 0.000000 0.000000')
+            self.assertEqual(content[11].strip(),
+                             '2 1 -1.200000 0.250000 0.250000 0.250000')
+            self.assertEqual(content[12].strip(),
+                             '3 1 -1.200000 0.250000 0.250000 0.750000')
+
     def test_data_integrity_in_gb(self):
         left_grain = self.gbm.left_grain
         right_grain = self.gbm.right_grain
