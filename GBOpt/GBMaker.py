@@ -434,8 +434,7 @@ class GBMaker:
                         )
                     if val < 2:
                         warnings.warn("Recommended repeat distance is at least 2.")
-                if not isinstance(value, list):
-                    value = list(value)
+                value = list(value)
         return value
 
     # Public methods
