@@ -114,7 +114,6 @@ class GBMaker:
             val).limit_denominator(10**precision))(m)
         denominators = np.array([[frac.denominator for frac in row]
                                 for row in m_fractions])
-        denominators[denominators == 0] = 1  # avoid divide by 0 errors
         scaling_factors = np.array([np.lcm.reduce(row) for row in denominators])
         scaled_matrix = m * scaling_factors[:, np.newaxis]
         approx_m_with_fractions = np.round(scaled_matrix).astype(int)
