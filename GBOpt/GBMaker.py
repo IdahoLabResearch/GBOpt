@@ -562,7 +562,8 @@ class GBMaker:
         box_sizes: np.ndarray = None,
         *,
         type_as_int: bool = False,
-        precision: int = 6
+        precision: int = 6,
+        charges: dict = None
     ) -> None:
         """
         Writes the atom positions with the given box dimensions to a LAMMPS input file.
@@ -571,9 +572,14 @@ class GBMaker:
         :param np.ndarray atoms: The numpy array containing the atom data.
         :param np.ndarray box_sizes: 3x2 array containing the min and max dimensions for
             each of the x, y, and z dimensions.
-        :param bool type_as_int: Whether to write the atom types as a chemical name or a
+        :param type_as_int: Whether to write the atom types as a chemical name or a
             number. Keyword argument, optional, defaults to False (write as a chemical
             name).
+        :param precision: The decimal precision to use when writing float values,
+            optional, default = 6.
+        :param charges: dict containing the charge values for each type. Keys are
+            expected to be integers, values are expected to be numeric. Optional,
+            default is None.
         """
         if not isinstance(file_name, str):
             raise GBMakerTypeError("file_name must be of type str")
@@ -589,10 +595,32 @@ class GBMaker:
 
         name_to_int = {name: i + 1 for i, name in enumerate(np.unique(atoms["name"]))}
 
+        if charges is not None:
+            if not all([isinstance(i, int) or isinstance(i, str) for i in charges.keys()]):
+                raise GBMakerValueError(
+                    "'charges' keys are required to be integers or strings.")
+            if not all([isinstance(i, Number) for i in charges.values()]):
+                raise GBMakerValueError("'charges' values are required to be numeric.")
+            if type_as_int:
+                if all([isinstance(i, str) for i in charges.keys()]):
+                    for name in np.unique(atoms["name"]):
+                        charges[name_to_int[name]] = charges[name]
+
+        def format_atom_line(index, name, pos, charge=None):
+            if type_as_int:
+                name = name_to_int[name]
+            if charge is not None:
+                return (f"{index} {name} {charge:.{precision}f} " +
+                        f"{pos[0]:.{precision}f} {pos[1]:.{precision}f} " +
+                        f"{pos[2]:.{precision}f}\n")
+            else:
+                return (f"{index} {name} {pos[0]:.{precision}f} " +
+                        f"{pos[1]:.{precision}f} {pos[2]:.{precision}f}\n")
+
         # Write LAMMPS data file
         with open(file_name, "w") as fdata:
             # First line is a comment line
-            fdata.write("Crystalline Cu atoms\n\n")
+            fdata.write(f"Crystalline {"".join(np.unique(atoms["name"]))} atoms\n\n")
 
             # --- Header ---#
             # Specify number of atoms and atom types
@@ -615,14 +643,12 @@ class GBMaker:
             fdata.write("\nAtoms\n\n")
 
             # Write each position.
-            if type_as_int:
-                for i, (name, *pos) in enumerate(atoms):
-                    fdata.write(
-                        f'{i+1} {name_to_int[name]:n} {pos[0]:.{precision}f} {pos[1]:.{precision}f} {pos[2]:.{precision}f}\n')
-            else:
-                for i, (name, *pos) in enumerate(atoms):
-                    fdata.write(
-                        f'{i+1} {name} {pos[0]:.{precision}f} {pos[1]:.{precision}f} {pos[2]:.{precision}f}\n')
+            for i, (name, *pos) in enumerate(atoms):
+                if charges is not None:
+                    charge = charges[name_to_int[name]]if type_as_int else charges[name]
+                else:
+                    charge = None
+                fdata.write(format_atom_line(i + 1, name, pos, charge))
 
     # Properties with getters and setters. Automatic updates for related parameters are
     # automatically taken care of.
