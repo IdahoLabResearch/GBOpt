@@ -670,7 +670,7 @@ def _create_neighbor_list(rcut: float, pos: np.ndarray) -> list:
 def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
     atom_info = {}
     atoms = parent.whole_system
-    types = Atom.asarray(parent.whole_system)[:, 0]
+    types = Atom.as_array(parent.whole_system)[:, 0]
     gb_indices = parent.gb_indices
     for idx, atom in enumerate(atoms):
         a = Atom(*atom)  # convert this to an Atom
@@ -915,7 +915,7 @@ class GBManipulator:
             warnings.warn("Atom removal only occurring based on parent 1.")
         parent = self.__parents[0]
         # We use the array format because numba/jit has issues with strings.
-        atoms = Atom.asarray(parent.whole_system)
+        atoms = Atom.as_array(parent.whole_system)
         if gb_fraction is not None and (gb_fraction <= 0 or gb_fraction > 0.25):
             raise GBManipulatorValueError("Invalid value for gb_fraction ("
                                           f"{gb_fraction=}). Must be 0 < gb_fraction "
@@ -1007,7 +1007,7 @@ class GBManipulator:
         if not self.__one_parent:
             warnings.warn("Atom insertion only occurring based on parent 1.")
         parent = self.__parents[0]
-        gb_atoms = Atom.asarray(parent.gb_atoms)
+        gb_atoms = Atom.as_array(parent.gb_atoms)
 
         if fill_fraction is not None and (fill_fraction <= 0 or fill_fraction > 0.25):
             raise GBManipulatorValueError("Invalid value for fill_fraction ("
@@ -1207,7 +1207,7 @@ class GBManipulator:
         if num_children < 1:
             raise GBManipulatorValueError("num_children must be >= 1.")
         parent = self.__parents[0]
-        atoms = Atom.asarray(parent.whole_system)
+        atoms = Atom.as_array(parent.whole_system)
         positions = atoms[:, 1:]
 
         ideal_bonds = parent.unit_cell.ideal_bond_lengths
