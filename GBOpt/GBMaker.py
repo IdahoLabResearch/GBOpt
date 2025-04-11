@@ -57,8 +57,8 @@ class GBMaker:
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim_min: float = 50,
                  vacuum: float = 10, interaction_distance: float = 15.0,
                  gb_id: int = 1):
-        self.__a0 = self.__validate(a0, Number, 'a0', positive=True)
-        self.__structure = self.__validate(structure, str, 'structure')
+        self.__a0 = self.__validate(a0, Number, "a0", positive=True)
+        self.__structure = self.__validate(structure, str, "structure")
         self.__gb_thickness = self.__validate(
             gb_thickness, Number, "gb_thickness", positive=True
         )
@@ -78,7 +78,7 @@ class GBMaker:
             positive=True,
         )
         self.__x_dim_min = self.__validate(
-            x_dim_min, Number, 'x_dim_min', positive=True)
+            x_dim_min, Number, "x_dim_min", positive=True)
         self.__vacuum_thickness = self.__validate(
             vacuum, Number, "vacuum_thickness", positive=True
         )
@@ -110,52 +110,102 @@ class GBMaker:
         """
         # first round the matrix to the desired precision
         R0 = np.linalg.norm(Rotation.from_matrix(m).as_rotvec(degrees=True))
-        m_fractions = np.vectorize(lambda val: Fraction(
-            val).limit_denominator(10**precision))(m)
-        denominators = np.array([[frac.denominator for frac in row]
-                                for row in m_fractions])
+
+        def gcd_reduce(matrix):
+            gcds = np.gcd.reduce(matrix, axis=1)
+            return matrix / gcds[:, np.newaxis]
+
+        def get_angle(matrix):
+            return np.linalg.norm(
+                Rotation.from_matrix(
+                    matrix / np.linalg.norm(matrix, axis=1)[:, np.newaxis]
+                ).as_rotvec(degrees=True)
+            )
+
+        def get_magnitude_sum(matrix):
+            abs_m = np.abs(matrix)
+            non_zero_elements = abs_m[abs_m > 0]
+            log_magnitudes = np.log(non_zero_elements)
+            return np.sum(log_magnitudes)
+
+        def calculate_best_approx(metrics1, metrics2, m1, m2):
+            diffs = [metrics1["angle"], metrics2["angle"]]
+            keys = list(metrics1.keys())
+
+            # Normalize each metric. Note that the if statement essentially only catches
+            # when both matrices gives essentially the same rotation as the original
+            # (as calculated by the get_angle function above).
+            metric1_norms = np.array(
+                [
+                    metrics1[key] / max(metrics1[key], metrics2[key])
+                    if not max(metrics1[key], metrics2[key]) == 0
+                    else 0
+                    for key in keys
+                ]
+            )
+            metric2_norms = np.array(
+                [
+                    metrics2[key] / max(metrics1[key], metrics2[key])
+                    if not max(metrics1[key], metrics2[key]) == 0
+                    else 0
+                    for key in keys
+                ]
+            )
+
+            # These weights *seem* to work, but there should be a better way to
+            # determine these (these were determine through trial and error for the
+            # R_right matrix for the misorientation matrix of [0.3, 0.4, 0.5, 0.6, 0.7])
+            # In a general sense, placing most of the weighting on the magnitude, then
+            # most of the rest on the condition, with the rest on the angle should give
+            # a good representation, at least based on the generated matrix mentioned.
+            weights = {"angle": 0.1, "condition": 0.3, "magnitude": 0.6}
+            weights = np.array([weights[key] for key in keys])  # keep order the same
+            metric1_overall = np.sum(metric1_norms * weights) / np.sum(weights)
+            metric2_overall = np.sum(metric2_norms * weights) / np.sum(weights)
+
+            if metric1_overall < metric2_overall:
+                return m1, diffs[0]
+            else:
+                return m2, diffs[1]
+
+        # Approximation with the least common multiple of denominators in their
+        # fraction representation
+        m_as_fractions = np.vectorize(
+            lambda val: Fraction(val).limit_denominator(10**precision)
+        )(m)
+        denominators = np.array(
+            [[f.denominator for f in row] for row in m_as_fractions]
+        )
         scaling_factors = np.array([np.lcm.reduce(row) for row in denominators])
         scaled_matrix = m * scaling_factors[:, np.newaxis]
-        approx_m_with_fractions = np.round(scaled_matrix).astype(int)
-        fraction_gcds = np.gcd.reduce(approx_m_with_fractions, axis=1)
-        approx_m_with_fractions = approx_m_with_fractions / fraction_gcds[:, np.newaxis]
+        approx_m_from_fractions = gcd_reduce(np.round(scaled_matrix).astype(int))
+        approx_m_from_fractions_metrics = {
+            "angle": abs(R0-get_angle(approx_m_from_fractions)),
+            "condition": np.linalg.cond(approx_m_from_fractions),
+            "magnitude": get_magnitude_sum(approx_m_from_fractions)
+        }
 
-        R_approx_with_fractions_normed = np.linalg.norm(
-            Rotation.from_matrix(
-                approx_m_with_fractions /
-                np.linalg.norm(approx_m_with_fractions, axis=1)[:, np.newaxis]
-            ).as_rotvec(degrees=True)
-        )
-
+        # Approximation by taking the ratio of the row values divided by the smallest
+        # values, scaling these ratios up by 10**precision, truncating the values,
+        # then simplifying.
         min_by_row_excluding_0 = np.ma.amin(
-            np.ma.masked_less(np.abs(m), 1e-8), axis=1).data
-        m_ratio = m / min_by_row_excluding_0[:, np.newaxis]
+            np.ma.masked_less(np.abs(m), 10**-precision), axis=1).data
+        m_ratio = m / min_by_row_excluding_0[:, np.newaxis]  # ratios of values to mins
+        m_rounded = np.round(m_ratio, precision)  # round to the desired precision
+        m_scaled = (10**precision * m_rounded).astype(int)  # scale by 10**precision
+        approx_m_from_scaling = gcd_reduce(m_scaled)
+        approx_m_from_scaling_metrics = {
+            "angle": abs(R0-get_angle(approx_m_from_scaling)),
+            "condition": np.linalg.cond(approx_m_from_scaling),
+            "magnitude": get_magnitude_sum(approx_m_from_scaling)
+        }
 
-        m_rounded = np.round(m_ratio, precision)
-        m_scaled = (10**precision * m_rounded).astype(int)
-        gcds = np.gcd.reduce(m_scaled, axis=1)
-        approx_m_with_gcds = m_scaled / gcds[:, np.newaxis]
-
-        R_approx_with_gcds_normed = np.linalg.norm(
-            Rotation.from_matrix(
-                approx_m_with_gcds /
-                np.linalg.norm(approx_m_with_gcds, axis=1)[:, np.newaxis]
-            ).as_rotvec(degrees=True)
+        result, diff = calculate_best_approx(
+            approx_m_from_fractions_metrics,
+            approx_m_from_scaling_metrics,
+            approx_m_from_fractions,
+            approx_m_from_scaling
         )
-
-        R_approx_with_fractions_diff = abs(R0 - R_approx_with_fractions_normed)
-        R_approx_with_gcd_diff = abs(R0 - R_approx_with_gcds_normed)
-
-        # Use the condition number to determine the ideal representation
-        R_approx_with_fractions_cond = np.linalg.cond(approx_m_with_fractions)
-        R_approx_with_gcds_cond = np.linalg.cond(approx_m_with_gcds)
-
-        if R_approx_with_gcds_cond < R_approx_with_fractions_cond:
-            result = approx_m_with_gcds
-            diff = R_approx_with_gcd_diff
-        else:
-            result = approx_m_with_fractions
-            diff = R_approx_with_fractions_diff
 
         if diff > 0.5:
             warnings.warn(
