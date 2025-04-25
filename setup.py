@@ -5,18 +5,18 @@ setup(
     version="0.1",
     packages=find_packages(),
     install_requires=[
-        'numpy<=2.1',
-        'scipy',
-        'numba',
-        'pandas',
-        'matplotlib',
-        'pytest',
-        'spglib'
+        "numpy<=2.1",
+        "scipy",
+        "numba",
+        "pandas",
+        "matplotlib",
+        "pytest",
+        "spglib"
     ],
     author="Chaitanya Bhave and Jarin French",
     author_email="chaitanya.bhave@inl.gov and jarin.french@inl.gov",
     description="A package for grain boundary optimization",
-    long_description=open('README.md').read(),
+    long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
     url="https://github.inl.gov/chaitanya-bhave/GBOpt",
     classifiers=[

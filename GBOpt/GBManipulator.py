@@ -122,12 +122,12 @@ class Parent:
                 gb_thickness = 10
             self.__init_by_file(system, unit_cell, gb_thickness, type_dict)
         # self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
-        left_x_max = max(self.__left_grain['x'])
-        right_x_min = min(self.__right_grain['x'])
+        left_x_max = max(self.__left_grain["x"])
+        right_x_min = min(self.__right_grain["x"])
         left_cut = left_x_max - self.__gb_thickness / 2.0
         right_cut = right_x_min + self.__gb_thickness / 2.0
-        left_gb_indices = self.__left_grain['x'] > left_cut
-        right_gb_indices = self.__right_grain['x'] < right_cut
+        left_gb_indices = self.__left_grain["x"] > left_cut
+        right_gb_indices = self.__right_grain["x"] < right_cut
         gb_indices = np.hstack((left_gb_indices, right_gb_indices))
         self.__gb_indices = np.array(range(len(self.__whole_system)))[gb_indices]
         left_gb = self.__left_grain[left_gb_indices]
@@ -137,9 +137,9 @@ class Parent:
         self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
-                    self.__whole_system['x'] >= self.__box_dims[0, 1] /
+                    self.__whole_system["x"] >= self.__box_dims[0, 1] /
                     2 - self.__gb_thickness/2,
-                    self.__whole_system['x'] <= self.__box_dims[0, 1] /
+                    self.__whole_system["x"] <= self.__box_dims[0, 1] /
                     2 + self.__gb_thickness/2
                 )
             )
@@ -180,7 +180,7 @@ class Parent:
         :param gb_thickness: Thickness of the GB region, given in angstroms.
         :param type_dict: Conversion from type number to type name, optional. Note that
             if this is not provided and the snapshot does not indicate the atom names,
-            atom names are assumed started from 'H'.
+            atom names are assumed started from "H".
         :raises ParentValueError: Exception raised if unit_cell is not passed in or the
             file format of the file is unrecognized, or the file has less than 10 lines.
         :raises ParentFileNotFoundError: Exception raised if the specified file is not
@@ -255,7 +255,7 @@ class Parent:
         :param gb_thickness: Thickness of the GB region, given in angstroms.
         :param type_dict: Conversion from type number to type name, optional. Note that
             if this is not provided and the snapshot does not indicate the atom names,
-            atom names are assumed started from 'H'.
+            atom names are assumed started from "H".
         :param file_keywords: List of keywords used to identify different sections of
             the file.
         :raises ParentCorruptedFileError: Exception raised if the file is not formatted
@@ -331,7 +331,7 @@ class Parent:
                     raise ParentCorruptedFileError(
                         f"Atoms not found in {system_file}")
             atom_attributes = line.split()[2:]
-            required_attributes = ['type', 'x', 'y', 'z']
+            required_attributes = ["type", "x", "y", "z"]
 
             if not all([i in atom_attributes for i in required_attributes]):
                 raise ParentFileMissingDataError(
@@ -341,12 +341,12 @@ class Parent:
             required_attribute_indices = {attr: atom_attributes.index(
                 attr) for attr in required_attributes}
 
-            typelabel_in_attrs = 'typelabel' in atom_attributes
+            typelabel_in_attrs = "typelabel" in atom_attributes
             if typelabel_in_attrs:
-                required_attribute_indices['typelabel'] = atom_attributes.index(
-                    'typelabel')
-            col_indices = [required_attribute_indices['typelabel'] if typelabel_in_attrs else required_attribute_indices['type'],
-                           required_attribute_indices['x'], required_attribute_indices['y'], required_attribute_indices['z']]
+                required_attribute_indices["typelabel"] = atom_attributes.index(
+                    "typelabel")
+            col_indices = [required_attribute_indices["typelabel"] if typelabel_in_attrs else required_attribute_indices["type"],
+                           required_attribute_indices["x"], required_attribute_indices["y"], required_attribute_indices["z"]]
 
             def convert_type(value):
                 if typelabel_in_attrs:
@@ -363,7 +363,7 @@ class Parent:
 
         self.__whole_system = np.loadtxt(system_file, skiprows=skip_rows, max_rows=max_rows, converters={
             col_indices[0]: convert_type}, usecols=tuple(col_indices), dtype=Atom.atom_dtype)
-        mask = self.__whole_system['x'] < grain_cutoff
+        mask = self.__whole_system["x"] < grain_cutoff
         self.__left_grain = self.__whole_system[mask]
         self.__right_grain = self.__whole_system[~mask]
 
@@ -382,7 +382,7 @@ class Parent:
         :param gb_thickness: Thickness of the GB region, given in angstroms.
         :param type_dict: Conversion from type number to type name, optional. Note that
             if this is not provided and the snapshot does not indicate the atom names,
-            atom names are assumed started from 'H'.
+            atom names are assumed started from "H".
         :param file_keywords: List of keywords used to identify different sections of
             the file.
         :raises ParentCorruptedFileError: Exception raised if the file is not formatted
@@ -406,8 +406,8 @@ class Parent:
                 skiprows += 1
                 line = line.strip()
 
-                if line.startswith('Atoms'):
-                    next(lines)  # Skip the blank line after 'Atoms'
+                if line.startswith("Atoms"):
+                    next(lines)  # Skip the blank line after "Atoms"
                     skiprows += 1
                     break
 
@@ -448,7 +448,7 @@ class Parent:
                 return value
         # We now have to make some assumptions about how the data is actually formatted.
         # Here, we assume the following:
-        #  column 2: atom type (numeric, if 'Atom Type Labels' not found previously, else string)
+        #  column 2: atom type (numeric, if "Atom Type Labels" not found previously, else string)
         #  column 3: x position
         #  column 4: y position
         #  column 5: z position
@@ -466,7 +466,7 @@ class Parent:
             usecols=[1, 2, 3, 4],
             dtype=Atom.atom_dtype
         )
-        mask = self.__whole_system['x'] < grain_cutoff
+        mask = self.__whole_system["x"] < grain_cutoff
         self.__left_grain = self.__whole_system[mask]
         self.__right_grain = self.__whole_system[~mask]
 
@@ -676,13 +676,13 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
         a = Atom(*atom)  # convert this to an Atom
         if a.name not in atom_info.keys():
             atom_info[a.name] = {
-                'num': types[idx],
-                'r_cov': a['r_cov'],
-                'valence': a['valence'],
-                'valence_electrons': a['valence_electrons']
+                "num": types[idx],
+                "r_cov": a["r_cov"],
+                "valence": a["valence"],
+                "valence_electrons": a["valence_electrons"]
             }
     atom_types = atom_info.keys()
-    atom_type_to_name = {atom_info[name]['num']: name for name in atom_types}
+    atom_type_to_name = {atom_info[name]["num"]: name for name in atom_types}
     atom_name_to_type = {name: num for num, name in atom_type_to_name.items()}
 
     n_of_bond_type = {
@@ -694,7 +694,7 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
         for jdx in neighbor_list[idx]:
             if jdx < idx:
                 continue
-            n_of_bond_type[(atoms[idx]['name'], atoms[jdx]['name'])] += 1
+            n_of_bond_type[(atoms[idx]["name"], atoms[jdx]["name"])] += 1
 
     # We precompute half of Delta_k since it is used frequently.
     Delta_k = {}
@@ -705,7 +705,7 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
             name2 = atom_type_to_name[type2]
             dk_tuple = (type1, type2) if type1 <= type2 else (type2, type1)
             Delta_k[dk_tuple] = 0.5 * (ideal_bonds[(type1, type2)] -
-                                       atom_info[name1]['r_cov'] - atom_info[name2]['r_cov'])
+                                       atom_info[name1]["r_cov"] - atom_info[name2]["r_cov"])
     bond_valence = np.sum(np.exp(-dk / 0.37) for dk in Delta_k.values())
 
     y_dim = parent.box_dims[1, 1] - parent.box_dims[1, 0]
@@ -715,19 +715,19 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
     Hij = np.zeros((len(atoms), len(atoms)))
     for i1 in gb_indices:
         atom1 = Atom(*atoms[i1])
-        type1 = atom_name_to_type[atom1['name']]
-        i1_CN = atom1['valence'] / bond_valence
+        type1 = atom_name_to_type[atom1["name"]]
+        i1_CN = atom1["valence"] / bond_valence
         for i2 in neighbor_list[i1]:
             atom2 = Atom(*atoms[i2])
-            type2 = atom_name_to_type[atom2['name']]
+            type2 = atom_name_to_type[atom2["name"]]
             dk_tuple = (type1, type2) if type1 <= type2 else (type2, type1)
             i1_electronegativity = 0.481 * \
-                atom1['valence_electrons'] / \
-                (atom1['r_cov'] + Delta_k[dk_tuple])
+                atom1["valence_electrons"] / \
+                (atom1["r_cov"] + Delta_k[dk_tuple])
             i2_electronegativity = 0.481 * \
-                atom2['valence_electrons'] / \
-                (atom2['r_cov'] + Delta_k[dk_tuple])
-            i2_CN = atom2['valence'] / bond_valence
+                atom2["valence_electrons"] / \
+                (atom2["r_cov"] + Delta_k[dk_tuple])
+            i2_CN = atom2["valence"] / bond_valence
             Xij = np.sqrt(i1_electronegativity / i1_CN * i2_electronegativity / i2_CN)
             fi = abs(i1_electronegativity-i2_electronegativity) / \
                 (4*np.sqrt(i1_electronegativity * i2_electronegativity))
@@ -856,8 +856,8 @@ class GBManipulator:
         # updated_right_grain[:, 2] + dy) % parent.y_dim
         # updated_right_grain[:, 3] = (
         #     updated_right_grain[:, 3] + dz) % parent.z_dim
-        updated_right_grain['y'] = (updated_right_grain['y'] + dy) % parent.y_dim
-        updated_right_grain['z'] = (updated_right_grain['z'] + dz) % parent.z_dim
+        updated_right_grain["y"] = (updated_right_grain["y"] + dy) % parent.y_dim
+        updated_right_grain["z"] = (updated_right_grain["z"] + dz) % parent.z_dim
 
         return np.hstack((self.__parents[0].left_grain, updated_right_grain))
 
@@ -883,8 +883,8 @@ class GBManipulator:
         # Note that this is the third time this has been calculated.
         slice_pos = (parent1.box_dims[0, 1] - parent1.box_dims[0, 0]) / 2.0 + \
             parent1.gb_thickness * (-0.25 + 0.5*self.__rng.random())
-        pos1 = pos1[pos1['x'] < slice_pos]
-        pos2 = pos2[pos2['x'] >= slice_pos]
+        pos1 = pos1[pos1["x"] < slice_pos]
+        pos2 = pos2[pos2["x"] >= slice_pos]
         new_positions = np.hstack((pos1, pos2))
 
         return new_positions
@@ -940,7 +940,7 @@ class GBManipulator:
                 )
                 return atoms
 
-        # TODO: use a more robust calculation than '6' for the cutoff distance. Base it
+        # TODO: use a more robust calculation than "6" for the cutoff distance. Base it
         # off the crystal structure?
         neighbor_list = _create_neighbor_list(6, positions)
         args_list = [
@@ -960,7 +960,7 @@ class GBManipulator:
         order = np.array(order)
 
         # We want the probabilities to be inversely proportional to the order parameter.
-        # Higher order values should be more 'stable' against removal than low order
+        # Higher order values should be more "stable" against removal than low order
         # values. We give small probabilities to the higher order values just to allow
         # for variety in the calculations.
         probabilities = max(order) - order + min(order)
@@ -976,13 +976,13 @@ class GBManipulator:
         *,
         fill_fraction: float = None,
         num_to_insert: int = None,
-        method: str = 'delaunay',
+        method: str = "delaunay",
         keep_stoichiometry: bool = True
     ) -> np.ndarray:
         """
-        Inserts **fraction** atoms in the GB at empty lattice sites. 'Empty' sites are
-        determined through Delaunay triangulation (method='Delaunay') or through a grid
-        with a resolution of 1 angstrom (method='grid').
+        Inserts **fraction** atoms in the GB at empty lattice sites. "Empty" sites are
+        determined through Delaunay triangulation (method="Delaunay") or through a grid
+        with a resolution of 1 angstrom (method="grid").
 
         One of the following parameters must be specified.
         :param fill_fraction: Keyword argument. The fraction of empty lattice sites to
@@ -991,8 +991,8 @@ class GBManipulator:
         :param num_to_insert: Keyword argument. The number of atoms to insert. Must be
             less than or equal to 25% of the total number of atoms in the GB slab.
 
-        :param method: Keyword argument, optional, defaults to 'delaunay'. The method to
-            use. Must be either 'delaunay' or 'grid.'
+        :param method: Keyword argument, optional, defaults to "delaunay". The method to
+            use. Must be either "delaunay" or "grid."
         :param keep_stoichiometry: Keyword argument, optional, defaults to True. Flag
             specifying whether or not to keep stoichiometric ratios in the system with
             the added atoms.
@@ -1045,7 +1045,7 @@ class GBManipulator:
             # ik is for the offset vector triangulation.transform[:, 3, :], and ij is
             # the resulting circumcenter coordinates
             circumcenters = -np.einsum(
-                'ijk,ik->ij',
+                "ijk,ik->ij",
                 triangulation.transform[:, :3, :],
                 triangulation.transform[:, 3, :]
             )
@@ -1106,7 +1106,7 @@ class GBManipulator:
                 np.arange(np.floor(min_x), np.ceil(max_x) + 1),
                 np.arange(np.floor(min_y), np.ceil(max_y) + 1),
                 np.arange(np.floor(min_z), np.ceil(max_z) + 1),
-                indexing='ij'
+                indexing="ij"
             )
             sites = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
             GB_tree = KDTree(gb_atoms)
@@ -1147,10 +1147,10 @@ class GBManipulator:
         total_ratio = sum(type_ratios.values())
 
         # Calculate the insertion sites using the specified approach.
-        if method == 'delaunay':
+        if method == "delaunay":
             new_pos = Delaunay_approach(
                 gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
-        elif method == 'grid':
+        elif method == "grid":
             new_pos = grid_approach(
                 gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
         else:
@@ -1166,10 +1166,10 @@ class GBManipulator:
             available_types, num_elements) for _ in range(num)])
         self.__rng.shuffle(new_types)
         new_atoms = np.empty((len(new_pos),), dtype=Atom.atom_dtype)
-        new_atoms['x'] = new_pos[:, 0]
-        new_atoms['y'] = new_pos[:, 1]
-        new_atoms['z'] = new_pos[:, 2]
-        new_atoms['name'] = new_types
+        new_atoms["x"] = new_pos[:, 0]
+        new_atoms["y"] = new_pos[:, 1]
+        new_atoms["z"] = new_pos[:, 2]
+        new_atoms["name"] = new_types
         return np.hstack((parent.whole_system, new_atoms))
 
     def displace_along_soft_modes(
@@ -1272,9 +1272,9 @@ class GBManipulator:
                 # this point. TODO: Will need testing.
                 if num_children >= 3 * n_atoms - 1 != num_children:
                     raise GBManipulatorValueError(
-                        'Cannot generated the specified number of children.')
+                        "Cannot generate the specified number of children.")
                 freq_vals, disp_vals = sps.linalg.eigsh(
-                    sparse_matrix, k=num_children, which='SA')
+                    sparse_matrix, k=num_children, which="SA")
             freqs[i] = freq_vals[:num_children]
             # The eigvec associated with the Nth eigfreq for the ith q vector is saved
             # in the (start + N)th index
@@ -1300,7 +1300,7 @@ class GBManipulator:
         # eigen displacements. We initialize this here.
         pos = np.zeros((num_children, *positions.shape))
 
-        # minimum allowable distance before atoms are 'too close'
+        # minimum allowable distance before atoms are "too close"
         d_min = 2 * parent.unit_cell.radius
 
         # Here we precompute the neighbor distances for each atom pair, subtracting off
@@ -1345,10 +1345,10 @@ class GBManipulator:
         structured_pos = []
         for child in pos:
             structured_p = np.zeros((len(atoms)), dtype=Atom.atom_dtype)
-            structured_p['name'] = parent.whole_system['name']
-            structured_p['x'] = child[:, 0]
-            structured_p['y'] = child[:, 1]
-            structured_p['z'] = child[:, 2]
+            structured_p["name"] = parent.whole_system["name"]
+            structured_p["x"] = child[:, 0]
+            structured_p["y"] = child[:, 1]
+            structured_p["z"] = child[:, 2]
             structured_pos.append(structured_p)
         return structured_pos
 
