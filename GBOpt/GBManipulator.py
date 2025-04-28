@@ -760,6 +760,24 @@ def _calculate_dynamical_matrix(hardness, positions, gb_atom_indices, neighbor_l
     return Dij
 
 
+def _get_stoichiometric_change(n_units: int, ratio: dict[int, int]) -> dict[int, int]:
+    """_summary_
+
+    Args:
+        n_units: The number of atom units (defined as the sum of the values in the ratio
+            dict) that will be modified. For example, given a ratio of
+            {1: 1, 2: 2, 3: 3, 4: 1}, this number would indicate how many of type 1
+            (and type 4) would be affected by the operation.
+        ratio: The ratio of each atom type in the unit cell. Must be a dict where the
+            keys and values are positive integers.
+
+    Returns:
+        dict[int, int]: The number of atoms of each type that will be changed.
+    """
+
+    return {atom_type: num * n_units for atom_type, num in ratio.items()}
+
+
 class GBManipulator:
     """
     Class to manipulate atoms in the grain boundary region.
@@ -903,7 +921,8 @@ class GBManipulator:
         self,
         *,
         gb_fraction: float = None,
-        num_to_remove: int = None
+        num_to_remove: int = None,
+        keep_ratio: bool = True,
     ) -> np.ndarray:
         """
         Removes *gb_fraction* of atoms or *num_to_remove* atom(s) in the GB region. Uses
@@ -915,21 +934,27 @@ class GBManipulator:
             remove. Must be less than 25% of the total number of atoms in the GB region.
         :param num_to_remove: Keyword argument. The specific number of atoms to remove.
             Maximum is 25% of the total number of atoms in the GB region.
+        :param keep_ratio: Keyword argument. Whether or not to maintain stochiometric
+            ratios. Default: True.
         :return: Atom positions after atom removal.
         """
         if not gb_fraction and not num_to_remove:
             raise GBManipulatorValueError(
-                "gb_fraction or num_to_remove must be specified.")
+                "gb_fraction or num_to_remove must be specified."
+            )
         # TODO: Include logic to maintain stoichiometry/charge neutrality (as desired)
         if not self.__one_parent:
             warnings.warn("Atom removal only occurring based on parent 1.")
         parent = self.__parents[0]
         # We use the array format because numba/jit has issues with strings.
         atoms = Atom.as_array(parent.whole_system)
+        type_map = parent.unit_cell.type_map
+
         if gb_fraction is not None and (gb_fraction <= 0 or gb_fraction > 0.25):
-            raise GBManipulatorValueError("Invalid value for gb_fraction ("
-                                          f"{gb_fraction=}). Must be 0 < gb_fraction "
-                                          "<= 0.25")
+            raise GBManipulatorValueError(
+                f"Invalid value for gb_fraction ({gb_fraction=}). Must be "
+                "0 < gb_fraction <= 0.25"
+            )
         positions = atoms[:, 1:]
         gb_atom_indices = np.where(
             np.logical_and(
@@ -943,41 +968,142 @@ class GBManipulator:
         gb_atoms = positions[gb_atom_indices]
         if num_to_remove is None:
             num_to_remove = int(gb_fraction * len(gb_atoms))
-            if num_to_remove == 0:
-                warnings.warn(
-                    "Calculated fraction of atoms to remove is 0 "
-                    f"(int({gb_fraction}*{len(gb_atoms)} = 0)"
-                )
-                return atoms
 
-        # TODO: use a more robust calculation than "6" for the cutoff distance. Base it
-        # off the crystal structure?
-        neighbor_list = _create_neighbor_list(6, positions)
-        args_list = [
-            (
-                atoms[atom_idx],
-                atoms[neighbor_list[atom_idx]],
-                parent.unit_cell.names(asint=True),
-                parent.unit_cell.a0,
-                len(parent.unit_cell.unit_cell),
-                0.05,
-                15
+        if len(type_map) == 1:
+            num_to_remove_dict = {1: num_to_remove}
+        # determine both the number to remove of each type, and the probability of
+        # removal
+        elif keep_ratio:
+            num_to_remove_dict = _get_stoichiometric_change(
+                num_to_remove, parent.unit_cell.ratio
             )
-            for idx, atom_idx in enumerate(gb_atom_indices)
-        ]
-        order = np.zeros(len(args_list))
-        for (i, args) in enumerate(args_list):
-            order[i] = _calculate_local_order(*args)
+            num_to_remove = sum([val for val in num_to_remove_dict.values()])
+            central_type = min(num_to_remove_dict, key=num_to_remove_dict.get)
+            cutoff = (
+                parent.unit_cell.nn_distance(2) + parent.unit_cell.nn_distance(1)
+            ) / 2
+            neighbor_list = _create_neighbor_list(cutoff, positions)
+            args_list = [
+                (
+                    atoms[atom_idx],
+                    atoms[neighbor_list[atom_idx]],
+                    parent.unit_cell.names(asint=True),
+                    parent.unit_cell.a0,
+                    len(parent.unit_cell.unit_cell),
+                    0.05,
+                    15
+                )
+                for idx, atom_idx in enumerate(gb_atom_indices)
+            ]
+            order = np.zeros(len(args_list))
+            for (i, args) in enumerate(args_list):
+                order[i] = _calculate_local_order(*args)
 
-        # We want the probabilities to be inversely proportional to the order parameter.
-        # Higher order values should be more "stable" against removal than low order
-        # values. We give small probabilities to the higher order values just to allow
-        # for variety in the calculations.
-        probabilities = max(order) - order + min(order)
-        probabilities = probabilities / np.sum(probabilities, dtype=float)
+            # We want the probabilities to be inversely proportional to the order parameter.
+            # Higher order parameters should be more "stable" against removal than low order
+            # parameters. We give small probabilities to the higher order values just to
+            # allow for variety in the calculations.
+            probabilities = max(order) - order + min(order)
+            probabilities = probabilities / np.sum(probabilities, dtype=float)
+        else:
+            # If we aren't worried about keeping the ratio, randomly assign atoms to be
+            # removed to each type, summing up to num_to_remove.
+            breaks = np.sort(
+                np.random.choice(
+                    range(1, num_to_remove), len(type_map) - 1, replace=False
+                )
+            )
+            breaks = np.concatenate(([0], breaks, [num_to_remove]))
+            values = np.diff(breaks)
+            num_to_remove_dict = {
+                i + 1: int(values[i]) for i in range(len(type_map))
+            }
 
-        indices_to_remove = self.__rng.choice(
-            gb_atom_indices, num_to_remove, replace=False, p=probabilities)
+        if num_to_remove == 0:
+            warnings.warn(
+                "Calculated fraction of atoms to remove is 0 "
+                f"(int({gb_fraction}*{len(gb_atoms)} = 0)"
+            )
+            return atoms
+
+        if keep_ratio and len(type_map) > 1:
+            type_mask = atoms[gb_atom_indices][:, 0] == central_type
+            central_indices = gb_atom_indices[type_mask]
+            central_probabilities = probabilities[type_mask]
+            central_probabilities = (
+                central_probabilities / np.sum(central_probabilities)
+            )
+
+            if len(central_indices) == 0:
+                raise GBManipulatorValueError(
+                    f"No atoms found for type {central_type} in the grain boundary."
+                )
+
+            central_num_to_remove = num_to_remove_dict[central_type]
+            selected_central_indices = self.__rng.choice(
+                central_indices, central_num_to_remove, replace=False,
+                p=central_probabilities
+            )
+
+            distances = {
+                idx: np.full(len(neighbor_list[idx]), np.inf)
+                for idx in selected_central_indices
+            }
+            for central_idx in selected_central_indices:
+                neighbors = neighbor_list[central_idx]
+                gb_neighbors = np.intersect1d(neighbors, gb_atom_indices)
+                mask = np.isin(neighbors, gb_neighbors)
+                distances[central_idx][mask] = np.linalg.norm(
+                    positions[gb_neighbors] - positions[central_idx], axis=1
+                )
+
+            indices_to_remove = list(distances.keys())
+            for atom_type, ratio in parent.unit_cell.ratio.items():
+                if atom_type == central_type:
+                    continue
+                # type_mask = atoms[gb_atom_indices][:, 0] == atom_type
+                # type_indices = gb_atom_indices[type_mask]
+                for idx, dists in distances.items():
+                    neighbor_indices = np.asarray(neighbor_list[idx])
+                    gb_neighbor_indices = np.intersect1d(
+                        neighbor_indices, gb_atom_indices)
+                    mask = np.isin(neighbor_indices, gb_neighbor_indices)
+                    type_mask = atoms[gb_neighbor_indices][:, 0] == atom_type
+                    type_indices = neighbor_indices[mask][type_mask]
+                    duplicates = [
+                        i for i, el in enumerate(type_indices)
+                        if el in indices_to_remove
+                    ]
+
+                    type_indices = list(set(type_indices) - set(duplicates))
+                    if len(type_indices) < ratio:
+                        raise GBManipulatorValueError(
+                            f"Not enough neighbor atoms of type {atom_type} to remove."
+                        )
+
+                    # this really shouldn't happen, as this would indicate overlapping
+                    # atoms
+                    dists[dists < 1e-8] = 1e-8
+                    type_probabilities = 1 / dists[mask][type_mask]
+                    type_probabilities = type_probabilities / np.sum(type_probabilities)
+
+                    type_idx_to_remove = self.__rng.choice(
+                        type_indices, ratio, replace=False, p=type_probabilities
+                    )
+
+                    indices_to_remove.extend(type_idx_to_remove)
+
+        else:  # keep_ratio == False or len(type_map) == 1
+            indices_to_remove = []
+            for atom_type, num in num_to_remove_dict.items():
+                type_indices = gb_atom_indices[
+                    atoms[gb_atom_indices][:, 0] == atom_type
+                ]
+                type_idx_to_remove = self.__rng.choice(type_indices, num, replace=False)
+                indices_to_remove.extend(type_idx_to_remove)
+
+        if not len(indices_to_remove) == num_to_remove:
+            raise GBManipulatorValueError("")
         pos = np.delete(parent.whole_system, indices_to_remove, axis=0)
         return pos
 

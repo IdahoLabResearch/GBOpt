@@ -2,6 +2,7 @@ import math
 from typing import Sequence, Tuple, Union
 
 import numpy as np
+from scipy.spatial import KDTree
 
 from GBOpt import Atom
 
@@ -21,14 +22,20 @@ class UnitCellTypeError(UnitCellError):
     pass
 
 
+class UnitCellRuntimeError(UnitCellError):
+    """Exceptions raised when there is an error during runtime in the UnitCell class."""
+    pass
+
+
 class UnitCell:
     """
     Helper class for the managing a unit cell and the types of each atom.
     Atom positions are given as fractional coordinates. Types start at 1
     """
 
-    __slots__ = ['__unit_cell', '__primitive', '__a0',
-                 '__radius', '__reciprocal', '__ideal_bond_lengths']
+    __slots__ = ["__unit_cell", "__primitive", "__a0",
+                 "__radius", "__reciprocal", "__ideal_bond_lengths",
+                 "__ratio", "__type_map"]
 
     # TODO: Basis might be needed for more complicated structures.
     def __init__(self):
@@ -38,8 +45,12 @@ class UnitCell:
         self.__radius = 0.0
         self.__reciprocal = np.zeros((3, 3))
         self.__ideal_bond_lengths = {}
+        self.__ratio = {1: 1}
+        self.__type_map = {}
 
-    def init_by_structure(self, structure: str, a0: float, atoms: Union[str, Tuple[str, ...]]) -> None:
+    def init_by_structure(
+            self, structure: str, a0: float, atoms: Union[str, Tuple[str, ...]],
+            type_map: Union[dict[str, int], dict[int, str]] = None) -> None:
         """
         Initialize the UnitCell by crystal structure.
 
@@ -50,13 +61,30 @@ class UnitCell:
         :param atoms: The types of atoms in the system. A single string assigns the same
             atom type to each atom in the unit cell. A tuple is required for the
             "fluorite", "rocksalt", and "zincblende" structures.
+        :param type_map: Optional. Sets the type mapping for the atoms in the unit cell.
+            Note that the mapping requires sequential values starting from 1. Optional,
+            defaults to setting the atom types based on the order of their appearance in
+            "atoms."
         :raises NotImplementedError: Exception raised if the specified structure has not
             been implemented.
         """
         self.__a0 = a0
+
         if not isinstance(atoms, tuple) and not isinstance(atoms, list):
             atoms = (atoms,)
-        if structure == 'fcc':
+        if type_map is None:
+            unique_atoms = []
+            seen = set()
+            for atom in atoms:
+                if atom not in seen:
+                    seen.add(atom)
+                    unique_atoms.append(atom)
+            self.type_map = {
+                atom_type: i + 1 for i, atom_type in enumerate(unique_atoms)
+            }
+        else:
+            self.type_map = type_map
+        if structure == "fcc":
             unit_cell = [
                 Atom(atoms[0], 0.0, 0.0, 0.0),
                 Atom(atoms[0], 0.0, 0.5, 0.5),
@@ -74,7 +102,7 @@ class UnitCell:
             self.__ideal_bond_lengths = {
                 (1, 1): unit_cell[0].position.distance(unit_cell[1].position)
             }
-        elif structure == 'bcc':
+        elif structure == "bcc":
             unit_cell = [
                 Atom(atoms[0], 0.0, 0.0, 0.0),
                 Atom(atoms[0], 0.5, 0.5, 0.5)
@@ -90,7 +118,7 @@ class UnitCell:
             self.__ideal_bond_lengths = {
                 (1, 1): unit_cell[0].position.distance(unit_cell[1].position)
             }
-        elif structure == 'sc':
+        elif structure == "sc":
             unit_cell = [Atom(atoms[0], 0.0, 0.0, 0.0)]
             self.__radius = 0.5
             # multiply by 2 here since we multiply by half the lattice parameter later
@@ -102,7 +130,7 @@ class UnitCell:
                 ]
             )
             self.__ideal_bond_lengths = {(1, 1): self.__a0}
-        elif structure == 'diamond':
+        elif structure == "diamond":
             unit_cell = [
                 Atom(atoms[0], 0, 0, 0),
                 Atom(atoms[0], 0, 0.5, 0.5),
@@ -124,7 +152,7 @@ class UnitCell:
             self.__ideal_bond_lengths = {
                 (1, 1): unit_cell[0].position.distance(unit_cell[4].position)
             }
-        elif structure == 'fluorite':
+        elif structure == "fluorite":
             if len(atoms) != 2:
                 raise UnitCellValueError(
                     "The specified crystal structure requires 2 atom types.")
@@ -155,7 +183,8 @@ class UnitCell:
                 (1, 2): unit_cell[0].position.distance(unit_cell[4].position),
                 (2, 2): unit_cell[4].position.distance(unit_cell[5].position)
             }
-        elif structure == 'rocksalt':
+            self.__ratio = {1: 1, 2: 2}
+        elif structure == "rocksalt":
             if len(atoms) != 2:
                 raise UnitCellValueError(
                     "The specified crystal structure requires 2 atom types.")
@@ -183,7 +212,8 @@ class UnitCell:
                 (1, 2): unit_cell[0].position.distance(unit_cell[4].position),
                 (2, 2): unit_cell[4].position.distance(unit_cell[5].position)
             }
-        elif structure == 'zincblende':
+            self.__ratio = {1: 1, 2: 1}
+        elif structure == "zincblende":
             if len(atoms) != 2:
                 raise UnitCellValueError(
                     "The specified crystal structure requires 2 atom types.")
@@ -210,11 +240,12 @@ class UnitCell:
                 (1, 2): unit_cell[0].position.distance(unit_cell[4].position),
                 (2, 2): unit_cell[4].position.distance(unit_cell[6].position)
             }
+            self.__ratio = {1: 1, 2: 1}
         else:
             raise NotImplementedError(
                 f"Lattice structure {structure} not recognized/implemented")
         for i in range(len(unit_cell)):
-            unit_cell[i]['position'] *= a0
+            unit_cell[i]["position"] *= a0
         self.__unit_cell = unit_cell
         self.__radius *= self.__a0
         self.__primitive *= self.__a0 / 2.0
@@ -235,7 +266,9 @@ class UnitCell:
 
     def init_by_custom(self, unit_cell: np.ndarray,
                        unit_cell_types: str | Sequence[str], a0: float,
-                       reciprocal: np.ndarray, ideal_bond_lengths: dict) -> None:
+                       reciprocal: np.ndarray, ideal_bond_lengths: dict,
+                       ratio: dict[int, int] = {1: 1},
+                       type_map: Union[dict[int, str], dict[str, int]] = None) -> None:
         """
         Initialize the UnitCell with a custom-built lattice.
 
@@ -250,6 +283,12 @@ class UnitCell:
             (3,3) shape.
         :param ideal_bond_lengths: The ideal bond lengths of the system. One bond length
             for each unique pair of atoms is needed.
+        :param ratio: The ratio of atoms in the system. Must be a dict of ints.
+            Optional, defaults to {1: 1}.
+        :param type_map: Optional. Sets the type mapping for the atoms in the unit cell.
+            Note that the mapping requires sequential values starting from 1. Optional,
+            defaults to setting the atom types based on the order of their appearance in
+            "unit_cell_types."
         :raises UnitCellValueError: Exception raised when the reciprocal shape is not
             (3,3).
         """
@@ -259,6 +298,26 @@ class UnitCell:
                 "Length mismatch between unit cell types and unit cell")
         else:
             cell_types = unit_cell_types
+
+        if not isinstance(ratio, dict):
+            raise UnitCellTypeError(
+                "The 'ratio' dict must be a dict of positive ints."
+            )
+        for key, val in ratio.items():
+            if not isinstance(key, int) or not isinstance(val, int):
+                raise UnitCellTypeError(
+                    "Key and value in the 'ratio' dict must be positive ints"
+                )
+            if key < 1 or val < 1:
+                raise UnitCellValueError(
+                    "Key and value in the 'ratio' duct must be positive ints"
+                )
+        ratio_sum = sum([val for val in ratio.values()])
+        if not len(unit_cell) % ratio_sum == 0:
+            raise UnitCellValueError(
+                f"The number of atoms ({len(unit_cell)}) in the UnitCell must be an "
+                f"integer multiple of the ratio ({ratio_sum})."
+            )
 
         self.__unit_cell = [
             Atom(t, x, y, z)
@@ -273,6 +332,16 @@ class UnitCell:
 
         self.__ideal_bond_lengths = ideal_bond_lengths
 
+        self.__ratio = ratio
+
+        if type_map is None:
+            self.type_map = {
+                name: i + 1
+                for i, name in enumerate(dict.fromkeys(unit_cell_types))
+            }
+        else:
+            self.type_map = type_map
+
     def positions(self) -> np.ndarray:
         """Returns the positions of the atoms in the UnitCell."""
         return self.__a0 * np.vstack([a.position.asarray() for a in self.__unit_cell])
@@ -281,18 +350,18 @@ class UnitCell:
         """Returns an array containing the types of atoms in the UnitCell."""
         if asint:
             names = [a.name for a in self.__unit_cell]
-            name_int_dict = {name: idx + 1 for idx, name in enumerate(set(names))}
-            return np.hstack([name_int_dict[name] for name in names], dtype=int)
+            return np.hstack([self.type_map[name] for name in names], dtype=int)
         else:
             return np.hstack([a.name for a in self.__unit_cell])
 
     def types(self) -> np.ndarray:
         """
-        Returns an array assigning a 'type' number to each unique atom type.
+        Returns an array assigning a "type" number to each unique atom type.
         """
-        names = np.array([a['name'] for a in self.__unit_cell])
-        _, converted_names = np.unique(names, return_inverse=True)
-        return converted_names + 1  # starts the indexing from 1
+        names = np.array([a["name"] for a in self.__unit_cell])
+        converted_names = np.array([self.type_map[name] for name in np.unique(names)])
+
+        return converted_names
 
     @property
     def reciprocal(self) -> np.ndarray:
@@ -350,7 +419,7 @@ class UnitCell:
         :return: Structured numpy array with atom type and position.
         """
         return np.array(
-            [tuple(atom['name', 'x', 'y', 'z']) for atom in self.__unit_cell],
+            [tuple(atom["name", "x", "y", "z"]) for atom in self.__unit_cell],
             dtype=Atom.atom_dtype
         )
 
@@ -359,9 +428,118 @@ class UnitCell:
         """Returns the ideal bond lengths for the defined UnitCell."""
         return self.__ideal_bond_lengths
 
+    @property
+    def ratio(self) -> dict[int, int]:
+        """Returns the ratios of the different atom types in the defined UnitCell."""
+        return self.__ratio
+
+    @property
+    def type_map(self) -> dict[str, int]:
+        """
+        Returns the string-to-int map that is used to assign types/strings to each
+        atom.
+        """
+        return self.__type_map
+
+    @type_map.setter
+    def type_map(self, value: Union[dict[str, int], dict[int, str]]) -> None:
+        """
+        Sets the string-to-int map that is used to assign types/strings to each atom.
+        """
+        if not isinstance(value, dict):
+            raise UnitCellTypeError(
+                "type_map must be a dict with an int or str as the key, and a str or "
+                "int as the value, respectively. Example: {1: 'H', 2: 'He'} or "
+                "{'H': 1, 'He': 2}"
+            )
+        if (
+            all([isinstance(key, str) for key in value.keys()]) and
+            all([isinstance(val, int) for val in value.values()])
+        ):
+            if not min(value.values()) == 1:
+                raise UnitCellValueError(
+                    "The minimum integer value for the type map must be equal to 1.")
+            if not all(
+                [val1 + 1 == val2
+                 for val1, val2 in zip(
+                     sorted(list(value.values()))[:-1], sorted(list(value.values()))[1:]
+                 )
+                 ]
+            ):
+                raise UnitCellValueError(
+                    "Integer values must be sequential starting from 1."
+                )
+            self.__type_map = value
+        elif (
+            all([isinstance(key, int) for key in value.keys()]) and
+            all([isinstance(val, str) for val in value.values()])
+        ):
+            if not min(value.keys()) == 1:
+                raise UnitCellValueError(
+                    "The minimum integer value for the type map must be equal to 1.")
+            if not all(
+                [val1 + 1 == val2
+                 for val1, val2 in zip(
+                     sorted(list(value.keys()))[:-1], sorted(list(value.keys()))[1:]
+                 )
+                 ]
+            ):
+                raise UnitCellValueError(
+                    "Integer values must be sequential starting from 1."
+                )
+            self.__type_map = {val: key for key, val in value.items()}
+        else:
+            raise UnitCellTypeError(
+                "type_map must be a dict with an int or str as the key, and a str or "
+                "int as the value, respectively. Example: {1: 'H', 2: 'He'} or "
+                "{'H': 1, 'He': 2}"
+            )
+
+    def nn_distance(self, nn, atom_type=None, *, max_attempts: int = 10) -> float:
+        def generate_atom_sphere(rcut: float) -> np.ndarray:
+            max_repeats = int(
+                np.ceil(rcut / np.min(np.linalg.norm(self.__primitive, axis=1)))) + 1
+            range_vals = np.arange(-max_repeats, max_repeats + 1)
+            grid = np.array(np.meshgrid(range_vals, range_vals,
+                            range_vals, indexing="ij")).reshape(3, -1).T
+
+            cell_origins = grid @ self.__primitive
+            basis = self.positions()
+            supercell = (cell_origins[:, np.newaxis, :] +
+                         basis[np.newaxis, :, :]).reshape(-1, 3)
+
+            distances = np.linalg.norm(supercell - basis[0], axis=1)
+            mask = (distances > 1e-8) & (distances <= rcut)
+            return supercell[mask]
+
+        rcut = self.__a0
+        step = self.__a0 / 2
+        ref_pos = self.positions()[0]
+        for _ in range(max_attempts):
+            supercell = generate_atom_sphere(rcut)
+            kdtree = KDTree(supercell)
+            distances, indices = kdtree.query(ref_pos, k=len(supercell))
+            distances = np.round(distances, decimals=8)
+
+            if atom_type is not None:
+                if isinstance(atom_type, str):
+                    mask = [self.__unit_cell[idx]["name"]
+                            == atom_type for idx in indices]
+                elif isinstance(atom_type, int):
+                    mask = [self.types()[idx] == atom_type for idx in indices]
+                distances, = distances[mask]
+
+            unique_dists = np.unique(distances)
+            if len(unique_dists) >= nn + 1:
+                return unique_dists[nn - 1]
+
+            rcut += step
+        raise UnitCellRuntimeError(
+            f"Could not find {nn} unique neighbor distances within {rcut=}")
+
     def __repr__(self):
         structure_info = f"UnitCell with {len(self.__unit_cell)} " + \
-            f"atom{'s' if len(self.__unit_cell) != 1 else ''}"
+            f"atom{"s" if len(self.__unit_cell) != 1 else ""}"
         lattice_info = f"Lattice parameter (a0): {self.__a0:.3f} Å"
         radius_info = f"Radius: {self.__radius:.3f} Å"
         atom_info = ", ".join(

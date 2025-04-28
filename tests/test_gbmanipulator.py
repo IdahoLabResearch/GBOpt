@@ -169,6 +169,14 @@ class TestGBManipulator(unittest.TestCase):
         new_system = self.manipulator_tilt.remove_atoms(num_to_remove=1)
         self.assertEqual(len(self.tilt.whole_system)-1, len(new_system))
 
+    def test_remove_atoms_with_stoichiometry(self):
+        theta = math.radians(36.869898)
+        mis = [theta, 0, 0, 0, -theta/2]
+        GB = GBMaker(5.454, "fluorite", 5.454, mis, ["U", "O"], repeat_factor=(2, 6))
+        gbm = GBManipulator(GB)
+        new_system = gbm.remove_atoms(num_to_remove=1, keep_ratio=True)
+        self.assertEqual(len(GB.whole_system)-3, len(new_system))
+
     def test_insert_atoms(self):
         new_system_delaunay = self.manipulator_tilt.insert_atoms(
             fill_fraction=0.10, method='delaunay')

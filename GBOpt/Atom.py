@@ -171,11 +171,15 @@ class Atom:
         return converted
 
     @staticmethod
-    def as_array(atoms: np.ndarray) -> np.ndarray:
+    def as_array(atoms: np.ndarray, *, type_map: dict[str, int] = None) -> np.ndarray:
         """
         Convert the given structured array (of type Atom.atom_dtype) to an unstructured
         array.
 
+        :param atoms: The structured array to convert to a regular array.
+        :param type_map: Optional, default is to assign 1 to the first atom type in the
+            array, and increment from there. Must be a dict that indicates how the
+            mapping of atom name (str) to number (int) should occur.
         :raises AtomTypeError: Error when the array to convert has an incorrect dtype.
 
         :returns np.array: An unstructured np array containing the names (as int) and positions.
@@ -185,8 +189,25 @@ class Atom:
 
         converted = np.empty((len(atoms), 4))
         names = atoms["name"]
-        names_dict = {name: idx + 1 for idx, name in enumerate(set(names))}
-        converted_names = np.array([names_dict[name] for name in names])
+        if type_map is None:
+            type_map = {name: idx + 1 for idx, name in enumerate(set(names))}
+        else:
+            if not isinstance(type_map, dict):
+                return AtomTypeError(
+                    "Invalid type for type_map: must be of type dict[str, int]: "
+                    f"{type_map}"
+                )
+            if not (
+                all(isinstance(key, str) for key in type_map.keys()) and
+                all(isinstance(val, int) for val in type_map.values())
+            ):
+                raise AtomTypeError(
+                    "Invalid type for type_map: must be of type dict[str, int]: "
+                    "f{type_map}"
+                )
+            if not min(type_map.values()) == 1:
+                raise AtomValueError("Minimum type value must be 1 in type_map.")
+        converted_names = np.array([type_map[name] for name in names])
         positions = np.vstack((atoms["x"], atoms["y"], atoms["z"])).T
         converted = np.hstack((converted_names[:, np.newaxis], positions))
 
