@@ -1,6 +1,7 @@
 import math
 import multiprocessing as mp
 import warnings
+from itertools import combinations_with_replacement
 from os.path import isfile
 from typing import Union
 
@@ -668,10 +669,11 @@ def _create_neighbor_list(rcut: float, pos: np.ndarray) -> list:
 
 # @jit(nopython=True, cache=True)
 def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
-    atom_info = {}
     atoms = parent.whole_system
-    types = Atom.as_array(parent.whole_system)[:, 0]
+    types = Atom.as_array(atoms)[:, 0]
     gb_indices = parent.gb_indices
+
+    atom_info = {}
     for idx, atom in enumerate(atoms):
         a = Atom(*atom)  # convert this to an Atom
         if a.name not in atom_info.keys():
@@ -681,9 +683,10 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
                 "valence": a["valence"],
                 "valence_electrons": a["valence_electrons"]
             }
-    atom_types = atom_info.keys()
-    atom_type_to_name = {atom_info[name]["num"]: name for name in atom_types}
+
+    atom_type_to_name = {info["num"]: name for name, info in atom_info.items()}
     atom_name_to_type = {name: num for num, name in atom_type_to_name.items()}
+    atom_types = list(atom_info.keys())
 
     n_of_bond_type = {
         (atom1, atom2): 0
@@ -698,15 +701,14 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
 
     # We precompute half of Delta_k since it is used frequently.
     Delta_k = {}
-    for type1 in sorted(atom_type_to_name):
-        # TODO: make sure I don't double count, e.g. (1,2) and (2,1)
-        for type2 in sorted(atom_type_to_name):
-            name1 = atom_type_to_name[type1]
-            name2 = atom_type_to_name[type2]
-            dk_tuple = (type1, type2) if type1 <= type2 else (type2, type1)
-            Delta_k[dk_tuple] = 0.5 * (ideal_bonds[(type1, type2)] -
-                                       atom_info[name1]["r_cov"] - atom_info[name2]["r_cov"])
-    bond_valence = np.sum(np.exp(-dk / 0.37) for dk in Delta_k.values())
+    sorted_atom_type_to_name = sorted(atom_type_to_name)
+    for type1, type2 in combinations_with_replacement(sorted_atom_type_to_name, 2):
+        name1 = atom_type_to_name[type1]
+        name2 = atom_type_to_name[type2]
+        dk_tuple = (type1, type2)
+        Delta_k[dk_tuple] = 0.5 * (ideal_bonds[(type1, type2)] -
+                                   atom_info[name1]["r_cov"] - atom_info[name2]["r_cov"])
+    bond_valence = np.sum(np.exp(-np.asarray(list(Delta_k.values())) / 0.37))
 
     y_dim = parent.box_dims[1, 1] - parent.box_dims[1, 0]
     z_dim = parent.box_dims[2, 1] - parent.box_dims[2, 0]
@@ -729,9 +731,9 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
                 (atom2["r_cov"] + Delta_k[dk_tuple])
             i2_CN = atom2["valence"] / bond_valence
             Xij = np.sqrt(i1_electronegativity / i1_CN * i2_electronegativity / i2_CN)
-            fi = abs(i1_electronegativity-i2_electronegativity) / \
+            fi = abs(i1_electronegativity - i2_electronegativity) / \
                 (4*np.sqrt(i1_electronegativity * i2_electronegativity))
-            Hij[i1, i2] = Xij / (V/N) * np.exp(-2.7 * fi)
+            Hij[i1, i2] = Xij / (V / N) * np.exp(-2.7 * fi)
             Hij[i2, i1] = Hij[i1, i2]
 
     return Hij
@@ -955,9 +957,9 @@ class GBManipulator:
             )
             for idx, atom_idx in enumerate(gb_atom_indices)
         ]
-        with mp.Pool(self.__num_processes) as pool:
-            order = pool.starmap(_calculate_local_order, args_list)
-        order = np.array(order)
+        order = np.zeros(len(args_list))
+        for (i, args) in enumerate(args_list):
+            order[i] = _calculate_local_order(*args)
 
         # We want the probabilities to be inversely proportional to the order parameter.
         # Higher order values should be more "stable" against removal than low order
@@ -1015,11 +1017,11 @@ class GBManipulator:
                                           "fill_fraction <= 0.25")
 
         if (num_to_insert is not None and
-                    (
+            (
                         num_to_insert < 1 or
                         num_to_insert > int(0.25 * len(gb_atoms))
                     )
-                ):
+            ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region")
