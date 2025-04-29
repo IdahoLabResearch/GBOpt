@@ -147,29 +147,24 @@ class TestGBManipulator(unittest.TestCase):
         with self.assertRaises(GBManipulatorValueError):
             _ = self.manipulator_tilt.slice_and_merge()
 
-    @pytest.mark.slow
     def test_remove_atoms(self):
         new_system = self.manipulator_tilt.remove_atoms(gb_fraction=0.10)
         self.assertGreater(len(self.tilt.whole_system), len(new_system))
 
-    @pytest.mark.slow
     def test_remove_atoms_fraction_error(self):
         with self.assertRaises(GBManipulatorValueError):
             _ = self.manipulator_tilt.remove_atoms(gb_fraction=0.50)
 
-    @pytest.mark.slow
     def test_remove_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
         with self.assertWarns(UserWarning):
             _ = manipulator.remove_atoms(gb_fraction=0.10)
             _ = manipulator.remove_atoms(gb_fraction=0.10)
 
-    @pytest.mark.slow
     def test_remove_atoms_calculated_fraction_warning(self):
         with self.assertWarns(UserWarning):
             _ = self.manipulator_tilt.remove_atoms(gb_fraction=1e-7)
 
-    @pytest.mark.slow
     def test_remove_atoms_with_specific_number(self):
         new_system = self.manipulator_tilt.remove_atoms(num_to_remove=1)
         self.assertEqual(len(self.tilt.whole_system)-1, len(new_system))
@@ -262,7 +257,7 @@ class TestGBManipulator(unittest.TestCase):
         # that configuration was developed using this set of parameters
         GB = GBMaker(
             3.54, 'fcc', 5.0, np.array([0, 0, 0, 0, 0]), atom_types='Cu',
-            repeat_factor=6, x_dim=10, vacuum=10, interaction_distance=5
+            repeat_factor=6, x_dim_min=10, vacuum=10, interaction_distance=5
         )
         manipulator = GBManipulator(
             './tests/inputs/Cu_single_crystal_with_displaced_atom.txt', unit_cell=GB.unit_cell, gb_thickness=5)
