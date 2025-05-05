@@ -33,7 +33,7 @@ class UnitCell:
     Atom positions are given as fractional coordinates. Types start at 1
     """
 
-    __slots__ = ["__unit_cell", "__primitive", "__a0",
+    __slots__ = ["__unit_cell", "__conventional", "__primitive", "__a0",
                  "__radius", "__reciprocal", "__ideal_bond_lengths",
                  "__ratio", "__type_map"]
 
@@ -84,6 +84,13 @@ class UnitCell:
             }
         else:
             self.type_map = type_map
+        self.__conventional = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0]
+            ]
+        )
         if structure == "fcc":
             unit_cell = [
                 Atom(atoms[0], 0.0, 0.0, 0.0),
@@ -249,6 +256,7 @@ class UnitCell:
         self.__unit_cell = unit_cell
         self.__radius *= self.__a0
         self.__primitive *= self.__a0 / 2.0
+        self.__conventional *= self.__a0
         vol = np.dot(self.__primitive[0], np.cross(
             self.__primitive[1], self.__primitive[2]))
         self.__reciprocal = np.array(
@@ -266,8 +274,8 @@ class UnitCell:
 
     def init_by_custom(self, unit_cell: np.ndarray,
                        unit_cell_types: str | Sequence[str], a0: float,
-                       reciprocal: np.ndarray, ideal_bond_lengths: dict,
-                       ratio: dict[int, int] = {1: 1},
+                       conventional: np.ndarray, reciprocal: np.ndarray,
+                       ideal_bond_lengths: dict, ratio: dict[int, int] = {1: 1},
                        type_map: Union[dict[int, str], dict[str, int]] = None) -> None:
         """
         Initialize the UnitCell with a custom-built lattice.
@@ -279,6 +287,8 @@ class UnitCell:
             atom types are assigned to the atoms in the same order given in the unit
             cell.
         :param a0: The lattice parameter in Angstroms.
+        :param conventional: The conventional lattice vectors of the lattice. Requires a
+            (3,3) shape.
         :param reciprocal: The reciprocal lattice vectors of the lattice. Requires a
             (3,3) shape.
         :param ideal_bond_lengths: The ideal bond lengths of the system. One bond length
@@ -323,6 +333,14 @@ class UnitCell:
             Atom(t, x, y, z)
             for (t, (x, y, z)) in zip(cell_types, unit_cell)
         ]
+
+        if not isinstance(conventional, np.ndarray):
+            conventional = np.array(reciprocal)
+        if conventional.shape != (3, 3):
+            raise UnitCellValueError(
+                "Incorrect shape for conventional vectors. Must be (3,3)")
+        self.__conventional = conventional
+
         if not isinstance(reciprocal, np.ndarray):
             reciprocal = np.array(reciprocal)
         if reciprocal.shape != (3, 3):
@@ -378,12 +396,14 @@ class UnitCell:
         if value <= 0:
             raise UnitCellValueError("Invalid value for a0. Must be > 0.")
         self.__primitive /= self.__a0 / 2.0
+        self.__conventional /= self.__a0
         self.__radius /= self.__a0
         self.__ideal_bond_lengths = {
             key: value / self.__a0 for key, value in self.__ideal_bond_lengths.items()
         }
         self.__a0 = value
         self.__primitive *= self.__a0 / 2.0
+        self.__conventional *= self.a0
         self.__radius *= self.__a0
         vol = np.dot(self.__primitive[0], np.cross(
             self.__primitive[1], self.__primitive[2]))
@@ -411,6 +431,10 @@ class UnitCell:
     @property
     def primitive(self) -> np.ndarray:
         return self.__primitive
+
+    @property
+    def conventional(self) -> np.ndarray:
+        return self.__conventional
 
     def asarray(self) -> np.ndarray:
         """
@@ -498,36 +522,42 @@ class UnitCell:
     def nn_distance(self, nn, atom_type=None, *, max_attempts: int = 10) -> float:
         def generate_atom_sphere(rcut: float) -> np.ndarray:
             max_repeats = int(
-                np.ceil(rcut / np.min(np.linalg.norm(self.__primitive, axis=1)))) + 1
+                np.ceil(rcut / np.min(np.linalg.norm(self.__conventional, axis=1)))) + 1
             range_vals = np.arange(-max_repeats, max_repeats + 1)
             grid = np.array(np.meshgrid(range_vals, range_vals,
                             range_vals, indexing="ij")).reshape(3, -1).T
 
-            cell_origins = grid @ self.__primitive
+            cell_origins = grid @ self.__conventional
             basis = self.positions()
+            types = self.names(asint=True)
             supercell = (cell_origins[:, np.newaxis, :] +
                          basis[np.newaxis, :, :]).reshape(-1, 3)
+            types = np.tile(types, cell_origins.shape[0])
 
             distances = np.linalg.norm(supercell - basis[0], axis=1)
-            mask = (distances > 1e-8) & (distances <= rcut)
-            return supercell[mask]
+            mask = distances <= rcut
+            return supercell[mask], types[mask]
 
         rcut = self.__a0
         step = self.__a0 / 2
-        ref_pos = self.positions()[0]
+        if isinstance(atom_type, str):
+            atom_type = self.__type_map[atom_type]
+        if atom_type is None:
+            ref_pos = self.positions()[0]
+        else:
+            ref_pos = self.positions()[np.argmax(self.names(asint=True) == atom_type)]
         for _ in range(max_attempts):
-            supercell = generate_atom_sphere(rcut)
+            # pdb.set_trace()
+            supercell, supercell_types = generate_atom_sphere(rcut)
+            if atom_type is not None:
+                mask = supercell_types == atom_type
+                supercell = supercell[mask]
+                supercell_types = supercell_types[mask]
             kdtree = KDTree(supercell)
             distances, indices = kdtree.query(ref_pos, k=len(supercell))
-            distances = np.round(distances, decimals=8)
-
-            if atom_type is not None:
-                if isinstance(atom_type, str):
-                    mask = [self.__unit_cell[idx]["name"]
-                            == atom_type for idx in indices]
-                elif isinstance(atom_type, int):
-                    mask = [self.types()[idx] == atom_type for idx in indices]
-                distances, = distances[mask]
+            # We round everything to reduce floating point errors, and we only take the
+            # distances that are non-zero (the first one is the self-distance)
+            distances = np.round(distances[1:], decimals=8)
 
             unique_dists = np.unique(distances)
             if len(unique_dists) >= nn + 1:

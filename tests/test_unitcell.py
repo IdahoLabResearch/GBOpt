@@ -328,6 +328,8 @@ class TestUnitCell(unittest.TestCase):
     def test_custom_initialization(self):
         cell = UnitCell()
         custom_unit_cell = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        custom_conventional = np.array([[1.0, 0.0, 0.0],
+                                        [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
         custom_reciprocal = np.array([[1.0, 0.0, 0.0],
                                       [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
         custom_ideal_bonds = {
@@ -341,6 +343,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types='H',
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds
                                 )
@@ -348,6 +351,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types=['H', 'C'],
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds,
                                 ratio={1: 0, 2: 2}
@@ -356,6 +360,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types=['H', 'C'],
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds,
                                 ratio={0: 1, 1: 1}
@@ -364,6 +369,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types=['H', 'C'],
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds,
                                 ratio="Error"
@@ -372,6 +378,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types=['H', 'C'],
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds,
                                 ratio="Error"
@@ -379,6 +386,7 @@ class TestUnitCell(unittest.TestCase):
         cell.init_by_custom(unit_cell=custom_unit_cell,
                             unit_cell_types=['H', 'C'],
                             a0=1.0,
+                            conventional=custom_conventional,
                             reciprocal=custom_reciprocal,
                             ideal_bond_lengths=custom_ideal_bonds,
                             ratio=custom_ratio
@@ -431,6 +439,7 @@ class TestUnitCell(unittest.TestCase):
     def test_reciprocal_shape(self):
         cell = UnitCell()
         custom_unit_cell = np.array([[0.1, 0.2, 0.3]])
+        custom_conventional = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         custom_reciprocal = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
         custom_ideal_bonds = {
             (1, 1): 1,
@@ -441,6 +450,7 @@ class TestUnitCell(unittest.TestCase):
             cell.init_by_custom(unit_cell=custom_unit_cell,
                                 unit_cell_types='H',
                                 a0=1.0,
+                                conventional=custom_conventional,
                                 reciprocal=custom_reciprocal,
                                 ideal_bond_lengths=custom_ideal_bonds
                                 )
@@ -478,6 +488,8 @@ class TestUnitCell(unittest.TestCase):
         cell.init_by_custom(unit_cell=[[0, 0, 0]],
                             unit_cell_types='H',
                             a0=1.0,
+                            conventional=[[1.0, 0.0, 0.0], [
+                                0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                             reciprocal=[[1.0, 0.0, 0.0], [
                                 0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
                             ideal_bond_lengths=custom_ideal_bonds)
@@ -575,6 +587,176 @@ class TestUnitCell(unittest.TestCase):
         self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * np.sqrt(2))
         self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(3))
         self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * 2)
+
+    def test_diamond_nn_calculations(self):
+        cell = UnitCell()
+        cell.init_by_structure("diamond", 1.0, "C")
+        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3) / 4)
+        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11) / 4)
+        self.assertAlmostEqual(cell.nn_distance(4), 1)
+
+        cell.a0 = 3.567
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3) / 4)
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11) / 4)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
+
+    def test_fluorite_nn_calculations(self):
+        cell = UnitCell()
+        cell.init_by_structure("fluorite", 1.0, ["U", "O"])
+        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(4), 1)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), 1/np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), 0.5)
+        self.assertAlmostEqual(cell.nn_distance(2, 2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(3) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), 1)
+
+        cell.a0 = 5.454
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 * 0.5)
+        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(3) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0)
+
+    def test_rocksalt_nn_calculations(self):
+        cell = UnitCell()
+        cell.init_by_structure("rocksalt", 1.0, ["Na", "Cl"])
+        self.assertAlmostEqual(cell.nn_distance(1), 0.5)
+        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(3) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4), 1)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 2), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(2))
+
+        cell.a0 = 5.454
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * 0.5)
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(3) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(2))
+
+    def test_zincblende_nn_calculations(self):
+        cell = UnitCell()
+        cell.init_by_structure("zincblende", 1.0, ["Zn", "S"])
+        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3) / 4)
+        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11) / 4)
+        self.assertAlmostEqual(cell.nn_distance(4), 1)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 2), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(2))
+
+        cell.a0 = 5.454
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3) / 4)
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11) / 4)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(2))
+
+    def notest_custom_nn_calculations(self):
+        cell = UnitCell()
+        custom_unit_cell = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
+        custom_conventional = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        custom_reciprocal = np.array(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+        )
+        custom_ideal_bonds = {
+            (1, 1): 1,
+            (1, 2): 1,
+            (2, 2): 1
+        }
+        custom_ratio = {1: 1, 2: 1}
+        cell.init_by_custom(unit_cell=custom_unit_cell,
+                            unit_cell_types=['H', 'C'],
+                            a0=1.0,
+                            conventional=custom_conventional,
+                            reciprocal=custom_reciprocal,
+                            ideal_bond_lengths=custom_ideal_bonds,
+                            ratio=custom_ratio
+                            )
+        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(4), 1)
+
+        self.assertAlmostEqual(cell.nn_distance(1, 1), 1/np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
+        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
+        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2, 2), np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(19)/4)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(6)/2)
+
+        cell.a0 = 3.3
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * 1 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
+
+        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 / np.sqrt(2))
+        self.assertAlmostEqual(cell.nn_distance(2), cell.a0)
+        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(6) / 2)
+        self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * np.sqrt(2))
+
+        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 * np.sqrt(3)/4)
+        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0 * np.sqrt(11)/4)
+        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(19)/4)
+        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(6)/2)
 
     def test_type_map_property(self):
         cell = UnitCell()
