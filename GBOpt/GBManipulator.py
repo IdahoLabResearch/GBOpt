@@ -1,4 +1,3 @@
-import math
 import multiprocessing as mp
 import warnings
 from itertools import combinations_with_replacement
@@ -10,7 +9,7 @@ import scipy.sparse as sps
 import spglib as spg
 from numba import float64, jit, prange
 from numba.typed import List
-from scipy.spatial import Delaunay, KDTree, cKDTree
+from scipy.spatial import ConvexHull, Delaunay, KDTree, cKDTree
 
 from GBOpt.Atom import Atom
 from GBOpt.GBMaker import GBMaker
@@ -923,6 +922,7 @@ class GBManipulator:
         gb_fraction: float = None,
         num_to_remove: int = None,
         keep_ratio: bool = True,
+        return_positions: bool = False
     ) -> np.ndarray:
         """
         Removes *gb_fraction* of atoms or *num_to_remove* atom(s) in the GB region. Uses
@@ -936,38 +936,47 @@ class GBManipulator:
             Maximum is 25% of the total number of atoms in the GB region.
         :param keep_ratio: Keyword argument. Whether or not to maintain stochiometric
             ratios. Default: True.
+        :param return_positions: Keyword argument, optional, defaults to False. Flag to
+            include the positions of the atoms removed into the array.
         :return: Atom positions after atom removal.
         """
         if not gb_fraction and not num_to_remove:
             raise GBManipulatorValueError(
                 "gb_fraction or num_to_remove must be specified."
             )
-        # TODO: Include logic to maintain stoichiometry/charge neutrality (as desired)
         if not self.__one_parent:
             warnings.warn("Atom removal only occurring based on parent 1.")
         parent = self.__parents[0]
-        # We use the array format because numba/jit has issues with strings.
         atoms = Atom.as_array(parent.whole_system)
+        gb_atoms = Atom.as_array(parent.gb_atoms)
+        gb_atom_indices = parent.gb_indices
         type_map = parent.unit_cell.type_map
+        positions = atoms[:, 1:]
 
         if gb_fraction is not None and (gb_fraction <= 0 or gb_fraction > 0.25):
             raise GBManipulatorValueError(
                 f"Invalid value for gb_fraction ({gb_fraction=}). Must be "
                 "0 < gb_fraction <= 0.25"
             )
-        positions = atoms[:, 1:]
-        gb_atom_indices = np.where(
-            np.logical_and(
-                positions[:, 0] >= (parent.box_dims[0, 1] -
-                                    parent.box_dims[0, 0])/2 - parent.gb_thickness/2,
-                positions[:, 0] <= (parent.box_dims[0, 1] -
-                                    parent.box_dims[0, 0])/2 + parent.gb_thickness/2
-            )
-        )[0]
 
-        gb_atoms = positions[gb_atom_indices]
+        if (num_to_remove is not None and
+                    (
+                        num_to_remove < 1 or num_to_remove > int(0.25 * len(gb_atoms))
+                    )
+                ):
+            raise GBManipulatorValueError(
+                "Invalid num_to_remove value. Must be >= 1, and must be less than or "
+                "equal to 25% of the total number of atoms in the GB region."
+            )
         if num_to_remove is None:
             num_to_remove = int(gb_fraction * len(gb_atoms))
+
+        if num_to_remove == 0:
+            warnings.warn(
+                "Calculated fraction of atoms to remove is 0 "
+                f"(int({gb_fraction}*{len(gb_atoms)}) = 0)"
+            )
+            return atoms
 
         if len(type_map) == 1:
             num_to_remove_dict = {1: num_to_remove}
@@ -977,7 +986,7 @@ class GBManipulator:
             num_to_remove_dict = _get_stoichiometric_change(
                 num_to_remove, parent.unit_cell.ratio
             )
-            num_to_remove = sum([val for val in num_to_remove_dict.values()])
+            num_to_remove = sum(list(num_to_remove_dict.values()))
             central_type = min(num_to_remove_dict, key=num_to_remove_dict.get)
             cutoff = (
                 parent.unit_cell.nn_distance(2) + parent.unit_cell.nn_distance(1)
@@ -1020,13 +1029,6 @@ class GBManipulator:
             num_to_remove_dict = {
                 i + 1: int(values[i]) for i in range(len(type_map))
             }
-
-        if num_to_remove == 0:
-            warnings.warn(
-                "Calculated fraction of atoms to remove is 0 "
-                f"(int({gb_fraction}*{len(gb_atoms)} = 0)"
-            )
-            return atoms
 
         if keep_ratio and len(type_map) > 1:
             type_mask = atoms[gb_atom_indices][:, 0] == central_type
@@ -1107,7 +1109,11 @@ class GBManipulator:
         if not len(indices_to_remove) == num_to_remove:
             raise GBManipulatorValueError("")
         pos = np.delete(parent.whole_system, indices_to_remove, axis=0)
-        return pos
+
+        if return_positions:
+            return (pos, parent.whole_system[indices_to_remove])
+        else:
+            return pos
 
     def insert_atoms(
         self,
@@ -1115,7 +1121,8 @@ class GBManipulator:
         fill_fraction: float = None,
         num_to_insert: int = None,
         method: str = "delaunay",
-        keep_stoichiometry: bool = True
+        keep_ratio: bool = True,
+        return_positions: bool = False
     ) -> np.ndarray:
         """
         Inserts **fraction** atoms in the GB at empty lattice sites. "Empty" sites are
@@ -1128,40 +1135,17 @@ class GBManipulator:
             GB slab.
         :param num_to_insert: Keyword argument. The number of atoms to insert. Must be
             less than or equal to 25% of the total number of atoms in the GB slab.
-
         :param method: Keyword argument, optional, defaults to "delaunay". The method to
             use. Must be either "delaunay" or "grid."
-        :param keep_stoichiometry: Keyword argument, optional, defaults to True. Flag
+        :param keep_ratio: Keyword argument, optional, defaults to True. Flag
             specifying whether or not to keep stoichiometric ratios in the system with
-            the added atoms.
+            the added atoms. If true, atoms are inserted at neighboring.
+        :param return_positions: Keyword argument, optional, defaults to False. Flag to
+            include the positions of the new atoms inserted into the array.
         :raises GBManipulatorValueError: Exception raised if an invalid method is
             specified.
         :return: Atom positions after atom insertion.
         """
-        if not fill_fraction and not num_to_insert:
-            raise GBManipulatorValueError(
-                "fill_fraction or num_to_insert must be specified.")
-
-        if not self.__one_parent:
-            warnings.warn("Atom insertion only occurring based on parent 1.")
-        parent = self.__parents[0]
-        gb_atoms = Atom.as_array(parent.gb_atoms)
-
-        if fill_fraction is not None and (fill_fraction <= 0 or fill_fraction > 0.25):
-            raise GBManipulatorValueError("Invalid value for fill_fraction ("
-                                          f"{fill_fraction=}). Must be 0 < "
-                                          "fill_fraction <= 0.25")
-
-        if (num_to_insert is not None and
-                (
-                    num_to_insert < 1 or
-                    num_to_insert > int(0.25 * len(gb_atoms))
-                )
-            ):
-            raise GBManipulatorValueError(
-                "Invalid num_to_insert value. Must be >= 1, and must be less than or "
-                "equal to 25% of the total number of atoms in the GB region")
-
         def Delaunay_approach(
             gb_atoms: np.ndarray,
             atom_radius: float,
@@ -1177,26 +1161,68 @@ class GBManipulator:
             :param num_to_insert: The number of atoms to insert.
             :return: The sites at which new atoms are inserted.
             """
+            # First we need to duplicate the gb_atoms in the y and z directions to
+            # account for PBCs.
+            min_bounds = np.min(gb_atoms, axis=0)
+            max_bounds = np.max(gb_atoms, axis=0)
+            Lx, Ly, Lz = max_bounds - min_bounds
+            tiles = [(dy, dz) for dy in [-1, 0, 1] for dz in [-1, 0, 1]]
+            replicas = []
+            original_indices = []
+            for dy, dz in tiles:
+                shift = np.zeros_like(gb_atoms)
+                shift[:, 1] = dy * Ly
+                shift[:, 2] = dz * Lz
+                replicas.append(gb_atoms + shift)
+                original_indices.extend(np.arange(len(gb_atoms)))
+            tiled = np.vstack(replicas)
+            original_indices = np.array(original_indices)
+
             # Delaunay triangulation approach
-            triangulation = Delaunay(gb_atoms)
+            tri = Delaunay(tiled)
             # ijk is for the 3x3 transformation matrix triangulation.transform[:, :3, :]
             # ik is for the offset vector triangulation.transform[:, 3, :], and ij is
             # the resulting circumcenter coordinates
             circumcenters = -np.einsum(
                 "ijk,ik->ij",
-                triangulation.transform[:, :3, :],
-                triangulation.transform[:, 3, :]
+                tri.transform[:, :3, :],
+                tri.transform[:, 3, :]
             )
+            # Wrap circumcenters back into the original bounds
+            circumcenters[:, 1] = np.mod(
+                circumcenters[:, 1] - min_bounds[1], Ly) + min_bounds[1]
+            circumcenters[:, 2] = np.mod(
+                circumcenters[:, 2] - min_bounds[2], Lz) + min_bounds[2]
+
+            original_indices_simplices = original_indices[tri.simplices]
+
+            # Bounds check
+            in_bounds = np.all((circumcenters >= min_bounds) & (
+                circumcenters <= max_bounds), axis=1)
+            mask = in_bounds
+
+            # Volume check
             # Calculating the volume may occasionally fail if the points are collinear,
             # so we catch the warning so users are not concerned.
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore", category=RuntimeWarning)
-                volumes = np.abs(np.linalg.det(triangulation.transform[:, :3, :]))
-            volume_threshold = 1e-8
-            valid_mask = (volumes > volume_threshold) & ~np.isnan(
+                simplices = gb_atoms[original_indices_simplices]
+                A, B, C, D = simplices[:, 0], simplices[:,
+                                                        1], simplices[:, 2], simplices[:, 3]
+                volumes = np.abs(
+                    np.einsum("ij,ij->i", np.cross(B - A, C - A), D - A)) / 6.0
+            volume_threshold = 1e-3
+            volume_mask = (volumes > volume_threshold * np.median(volumes)) & ~np.isnan(
                 circumcenters).any(axis=1)
-            valid_circumcenters = circumcenters[valid_mask]
-            valid_simplices = triangulation.simplices[valid_mask, 0]
+            mask &= volume_mask
+
+            # Convex hull check
+            hull_vertices = set(ConvexHull(gb_atoms).vertices)
+            simplex_mask = ~np.any(np.isin(tri.simplices, list(hull_vertices)), axis=1)
+            mask &= simplex_mask
+
+            valid_circumcenters = circumcenters[mask]
+            valid_simplices = original_indices_simplices[mask, 0]
             sphere_radii = np.linalg.norm(
                 gb_atoms[valid_simplices] - valid_circumcenters, axis=1)
             interstitial_radii = sphere_radii - atom_radius
@@ -1213,13 +1239,8 @@ class GBManipulator:
                 warnings.warn("Calculated fraction of atoms to insert is 0: "
                               f"int({fill_fraction}*{len(gb_atoms)}) = 0"
                               )
-            indices = self.__rng.choice(
-                list(range(len(valid_circumcenters))),
-                num_to_insert,
-                replace=False,
-                p=probabilities
-            )
-            return valid_circumcenters[indices]
+
+            return valid_circumcenters, probabilities
 
         def grid_approach(
             gb_atoms: np.ndarray,
@@ -1269,6 +1290,8 @@ class GBManipulator:
                               f"int({fill_fraction}*{len(gb_atoms)}) = 0"
                               )
 
+            return filtered_sites, probabilities
+
             indices = self.__rng.choice(num_sites,
                                         num_to_insert,
                                         replace=False,
@@ -1276,39 +1299,133 @@ class GBManipulator:
                                         )
             return filtered_sites[indices]
 
-        available_types = set(parent.unit_cell.names())
-        type_counts = {}
-        for i in available_types:
-            type_counts[i] = np.sum(parent.unit_cell.names() == i)
-        type_ratios = {key: int(value / math.gcd(*type_counts.values()))
-                       for key, value in type_counts.items()}
-        total_ratio = sum(type_ratios.values())
+            raise GBManipulatorValueError(
+                "fill_fraction or num_to_insert must be specified.")
+
+        if not fill_fraction and not num_to_insert:
+            raise GBManipulatorValueError(
+                "fill_fraction or num_to_insert must be specified."
+            )
+        if not self.__one_parent:
+            warnings.warn("Atom insertion only occurring based on parent 1.")
+        parent = self.__parents[0]
+        atoms = Atom.as_array(parent.whole_system)
+        gb_atoms = Atom.as_array(parent.gb_atoms)
+        type_map = parent.unit_cell.type_map
+        type_map_inverse = {v: k for k, v in type_map.items()}
+
+        if fill_fraction is not None and (fill_fraction <= 0 or fill_fraction > 0.25):
+            raise GBManipulatorValueError
+            (f"Invalid value for fill_fraction ({fill_fraction=}). Must be 0 < "
+             "fill_fraction <= 0.25"
+             )
+
+        if (num_to_insert is not None and
+            (
+                        num_to_insert < 1 or
+                        num_to_insert > int(0.25 * len(gb_atoms))
+                    )
+            ):
+            raise GBManipulatorValueError(
+                "Invalid num_to_insert value. Must be >= 1, and must be less than or "
+                "equal to 25% of the total number of atoms in the GB region.")
+
+        if num_to_insert is None:
+            num_to_insert = int(fill_fraction * len(gb_atoms))
+
+        if num_to_insert == 0:
+            warnings.warn(
+                "Calculated fraction of atoms to insert is 0 "
+                f"(int({fill_fraction}*{len(gb_atoms)}) = 0)"
+            )
+            return atoms
+
+        if len(type_map) == 1:
+            num_to_insert_dict = {1: num_to_insert}
+        elif keep_ratio:
+            num_to_insert_dict = _get_stoichiometric_change(
+                num_to_insert, parent.unit_cell.ratio
+            )
+            num_to_insert = sum(list(num_to_insert_dict.values()))
+            central_type = min(num_to_insert_dict, key=num_to_insert_dict.get)
+        else:  # random insertion of random types
+            breaks = np.sort(
+                np.random.choice(
+                    range(1, num_to_insert), len(type_map) - 1, replace=False
+                )
+            )
+            breaks = np.concatenate([[0], breaks, [num_to_insert]])
+            values = np.diff(breaks)
+            num_to_insert_dict = {
+                i + 1: int(values[i]) for i in range(len(type_map))
+            }
 
         # Calculate the insertion sites using the specified approach.
         if method == "delaunay":
-            new_pos = Delaunay_approach(
+            possible_sites, probabilities = Delaunay_approach(
                 gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
         elif method == "grid":
-            new_pos = grid_approach(
+            possible_sites, probabilities = grid_approach(
                 gb_atoms[:, 1:], parent.unit_cell.radius, num_to_insert)
         else:
             raise GBManipulatorValueError(f"Unrecognized insert_atoms method: {method}")
 
-        # The number of extra atoms needed to maintain stoichiometry.
-        extra = len(new_pos) % total_ratio
-        if extra != 0:
-            new_pos = new_pos[:-extra]
-        num_elements = [int(len(new_pos) * (r / total_ratio))
-                        for r in type_ratios.values()]
-        new_types = np.array([val for val, num in zip(
-            available_types, num_elements) for _ in range(num)])
-        self.__rng.shuffle(new_types)
-        new_atoms = np.empty((len(new_pos),), dtype=Atom.atom_dtype)
-        new_atoms["x"] = new_pos[:, 0]
-        new_atoms["y"] = new_pos[:, 1]
-        new_atoms["z"] = new_pos[:, 2]
-        new_atoms["name"] = new_types
-        return np.hstack((parent.whole_system, new_atoms))
+        if keep_ratio and len(type_map) > 1:
+            central_num_to_insert = num_to_insert_dict[central_type]
+            selected_central_indices = self.__rng.choice(
+                list(range(len(possible_sites))), central_num_to_insert, replace=False,
+                p=probabilities
+            )
+            cutoff = (parent.unit_cell.nn_distance(2) +
+                      parent.unit_cell.nn_distance(1)) / 2.0
+            possible_sites_neighbor_list = _create_neighbor_list(cutoff, possible_sites)
+
+            atoms_to_add = {
+                type_map[i]: [] if type_map[i] is not central_type else selected_central_indices for i in type_map.keys()}
+            for atom_type, ratio in parent.unit_cell.ratio.items():
+                if atom_type == central_type:
+                    continue
+                for idx in selected_central_indices:
+                    neighbors = possible_sites_neighbor_list[idx]
+                    # Only consider the indices that have not already been assigned
+                    available_neighbors = list(
+                        set(neighbors) - set(np.array(atoms_to_add.values()).flatten())
+                    )
+                    if len(available_neighbors) < ratio:
+                        raise GBManipulatorValueError(
+                            "Not enough sites to insert atoms into."
+                        )
+                    partial_probabilities = probabilities[available_neighbors]
+                    partial_probabilities = partial_probabilities / \
+                        np.sum(partial_probabilities)
+                    selected_indices = self.__rng.choice(
+                        list(range(len(available_neighbors))), ratio, replace=False,
+                        p=partial_probabilities
+                    )
+                    atoms_to_add[ratio].extend(selected_indices)
+        else:
+            atoms_to_add = {}
+            site_indices = list(range(len(possible_sites)))
+            for atom_type, num in num_to_insert_dict.items():
+                available_indices = list(
+                    set(site_indices) - set(np.array(atoms_to_add.values()).flatten()))
+                type_idx_to_insert = self.__rng.choice(
+                    available_indices, num, replace=False, p=probabilities
+                )
+                atoms_to_add[atom_type] = type_idx_to_insert
+
+        new_atoms = np.array(
+            [
+                (type_map_inverse[atom_type], *possible_sites[idx])
+                for atom_type in atoms_to_add.keys()
+                for idx in atoms_to_add[atom_type]
+            ], dtype=Atom.atom_dtype
+        )
+
+        if return_positions:
+            return (np.hstack((parent.whole_system, new_atoms)), new_atoms)
+        else:
+            return np.hstack((parent.whole_system, new_atoms))
 
     def displace_along_soft_modes(
         self,
