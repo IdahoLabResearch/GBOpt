@@ -216,6 +216,14 @@ class TestGBManipulator(unittest.TestCase):
             method='grid', num_to_insert=1)
         self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system_grid))
 
+    def test_insert_atoms_with_stoichiometry(self):
+        theta = math.radians(36.869898)
+        mis = [theta, 0, 0, 0, -theta/2]
+        GB = GBMaker(5.454, "fluorite", 5.454, mis, ["U", "O"], repeat_factor=(2, 6))
+        gbm = GBManipulator(GB)
+        new_system = gbm.insert_atoms(num_to_insert=1, keep_ratio=True)
+        self.assertEqual(len(GB.whole_system)+3, len(new_system))
+
     @pytest.mark.slow
     def test_displace_along_soft_modes_base(self):
         # test the base case

@@ -35,9 +35,9 @@ class Atom:
     valence electrons can be generally determined for the main group elements (not
     transition metals or the lanthanides/actinides) with the ones digit of the group
     number. For the transition metals and lanthanides/actinides, values between 2 and 10
-     are allowed. In most cases, 2 is used. Valence electrons for these elements are
-     taken from WolframAlpha, but the general rule for the number of valence electrons
-     can be found at https://www.wikihow.com/Find-Valence-Electrons.
+    are allowed. In most cases, 2 is used. Valence electrons for these elements are
+    taken from WolframAlpha, but the general rule for the number of valence electrons
+    can be found at https://www.wikihow.com/Find-Valence-Electrons.
 
 
     :param atom_name: The name of the Atom (from the periodic table)
@@ -316,10 +316,6 @@ class Atom:
     @property
     def position(self) -> Position:
         return self.__position
-
-    @property
-    def properties(self) -> Dict[str, Any]:
-        return self.__properties
 
     @position.setter
     def position(self, value: Union[Position, Sequence, np.ndarray]) -> None:
