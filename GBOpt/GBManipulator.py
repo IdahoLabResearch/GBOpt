@@ -960,10 +960,10 @@ class GBManipulator:
             )
 
         if (num_to_remove is not None and
-                    (
-                        num_to_remove < 1 or num_to_remove > int(0.25 * len(gb_atoms))
-                    )
-                ):
+                (
+                    num_to_remove < 1 or num_to_remove > int(0.25 * len(gb_atoms))
+                )
+            ):
             raise GBManipulatorValueError(
                 "Invalid num_to_remove value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region."
@@ -1226,6 +1226,7 @@ class GBManipulator:
             sphere_radii = np.linalg.norm(
                 gb_atoms[valid_simplices] - valid_circumcenters, axis=1)
             interstitial_radii = sphere_radii - atom_radius
+            interstitial_radii -= np.min(interstitial_radii)  # make everything >= 0
             probabilities = interstitial_radii / np.sum(interstitial_radii)
             probabilities = probabilities / np.sum(probabilities)  # normalize
             assert abs(1 - np.sum(probabilities)
