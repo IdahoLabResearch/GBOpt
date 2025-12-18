@@ -1435,7 +1435,7 @@ class GBManipulator:
         threshold: float = None,
         *,
         mesh_size: int = 4,
-        num_q: int = 50,
+        num_q: int = 1,
         num_children: int = 1,
         subtract_displacement: bool = False
     ) -> np.ndarray:
@@ -1504,7 +1504,7 @@ class GBManipulator:
                 f"{num_q}. Recommended to increase mesh size.")
 
         n_atoms = len(parent.gb_indices)
-        num_q = len(unique_q_points)
+
         sparse_threshold = 10000
 
         # initialize the arrays to save the eigenvalues (frequencies) and eigenvectors
