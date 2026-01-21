@@ -296,9 +296,9 @@ class Parent:
                 A, origin[0] = (np.array([float(i)
                                 for i in xline[0:3]]), float(xline[3]))
                 B, origin[1] = (np.array([float(i)
-                                for i in xline[0:3]]), float(xline[3]))
+                                for i in yline[0:3]]), float(yline[3]))
                 C, origin[2] = (np.array([float(i)
-                                for i in xline[0:3]]), float(xline[3]))
+                                for i in zline[0:3]]), float(zline[3]))
 
                 a = np.array([np.linalg.norm(A), 0, 0])
                 Ahat = A / a[0]
