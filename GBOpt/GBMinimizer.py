@@ -2,7 +2,6 @@
 
 import math
 import shutil
-import sys
 import uuid
 from collections.abc import Callable
 from time import time
@@ -32,13 +31,16 @@ class Mutator:
         :param GBManipulator: GBManipulator object to perform the mutation on.
         :return: Atom positions after the mutation."""
         choice_key = local_random.choice(self.choices_keys)
+        mutation = None
         match choice_key:
             case "insert_atoms":
                 new_system = manipulator.insert_atoms(
                     method="grid", num_to_insert=1)
+                mutation = "add1"
 
             case "remove_atoms":
                 new_system = manipulator.remove_atoms(num_to_remove=1)
+                mutation = "remove1"
 
             case "translate_right_grain":
                 dz = (GB.z_dim / GB.repeat_factor[1]
@@ -46,7 +48,8 @@ class Mutator:
                 dy = (GB.z_dim / GB.repeat_factor[0]
                       ) * local_random.uniform(0, 1)
                 new_system = manipulator.translate_right_grain(dy=dy, dz=dz)
-        return new_system
+                mutation = f"shift{dy:.8f}dy{dz:.8f}dz"
+        return mutation, new_system
 
 
 class MonteCarloMinimizer:
@@ -66,7 +69,8 @@ class MonteCarloMinimizer:
         self.manipulator = GBManipulator(self.GB)
         self.mutator = Mutator(choices, self.manipulator)
         self.accepted_idx = [0]  # Initial guess is accepted by definition
-        self.__operation_list__ = ["START"]
+        # The list of mutators, and whether or not they were accepted
+        self.operation_list = [["START", True]]
         self.local_random = np.random.default_rng(seed)
         self.manipulator.rng = self.local_random
         self.GBE_vals = []
@@ -109,7 +113,7 @@ class MonteCarloMinimizer:
             prev_gbe = self.GBE_vals[-1]
 
             # Generate a random mutation on the current GB atom structure
-            new_system = self.mutator.mutate(
+            mutation, new_system = self.mutator.mutate(
                 self.local_random, self.GB, self.manipulator)
 
             # Evaluate the energy of this new structure and append it to the GBE values list
@@ -126,6 +130,7 @@ class MonteCarloMinimizer:
                 0, 1) <= math.exp(-(new_gbe - prev_gbe) / T)
 
             if accepted:
+                self.operation_list.append([mutation, True])
                 # Generate a new GB manipulator using the new structure from the dump file
                 self.manipulator = GBManipulator(
                     dump_file_name,
@@ -150,6 +155,7 @@ class MonteCarloMinimizer:
                         break
                     min_gbe = new_gbe
             else:
+                self.operation_list.append([mutation, False])
                 rejection_count += 1
                 # If too many structures are rejected back-to-back, we prematurely stop the MC iterations since we are stuck
                 if rejection_count > max_rejections:
