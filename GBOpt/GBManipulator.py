@@ -106,6 +106,8 @@ class Parent:
     :param unit_cell: Required only if GB is specified using a LAMMPS dump file. Gives
         the nominal unit cell of the system.
     :param gb_thickness: Thickness of the GB region, optional, defaults to 10.
+    :param type_dict: The map from integer to element string. The default mapping is
+        1 -> 'H', 2 -> 'He', etc.
     """
     __num_to_name = {val: key for key, val in Atom._numbers.items()}
 
@@ -115,7 +117,7 @@ class Parent:
         *,
         unit_cell: UnitCell = None,
         gb_thickness: float = 10,
-        type_dict: dict = {}
+        type_dict: dict = {},
     ) -> None:
         if isinstance(system, GBMaker):
             self.__init_by_gbmaker(system)
@@ -139,10 +141,10 @@ class Parent:
         self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
-                    self.__whole_system["x"] >= self.__box_dims[0, 1] /
-                    2 - self.__gb_thickness/2,
-                    self.__whole_system["x"] <= self.__box_dims[0, 1] /
-                    2 + self.__gb_thickness/2
+                    self.__whole_system["x"]
+                    >= self.__box_dims[0, 1] / 2 - self.__gb_thickness/2,
+                    self.__whole_system["x"]
+                    <= self.__box_dims[0, 1] / 2 + self.__gb_thickness/2
                 )
             )
         ]
@@ -171,7 +173,7 @@ class Parent:
         system_file: str,
         unit_cell: UnitCell,
         gb_thickness: float,
-        type_dict: dict
+        type_dict: dict,
     ) -> None:
         """
         Method for initializing the Parent using a file.
@@ -211,7 +213,7 @@ class Parent:
                 "ITEM: TIMESTEP",
                 "ITEM: NUMBER OF ATOMS",
                 "ITEM: BOX BOUNDS",
-                "ITEM: ATOMS"
+                "ITEM: ATOMS",
             ],
             self.__init_from_lammps_input: [
                 "atoms",
@@ -231,7 +233,7 @@ class Parent:
                 "avec",
                 "bvec",
                 "cvec",
-                "abc origin"
+                "abc origin",
             ]
         }
 
@@ -354,7 +356,10 @@ class Parent:
                 if typelabel_in_attrs:
                     return value
                 else:
-                    return self.__num_to_name[int(value)]
+                    if not type_dict:
+                        return self.__num_to_name[int(value)]
+                    else:
+                        return type_dict[int(value)]
             max_rows = 0
             line = f.readline()  # read the next line to move the file pointer ahead.
             while not line.startswith("ITEM"):
@@ -466,7 +471,7 @@ class Parent:
             max_rows=n_atoms,
             converters={1: convert_type},
             usecols=[1, 2, 3, 4],
-            dtype=Atom.atom_dtype
+            dtype=Atom.atom_dtype,
         )
         mask = self.__whole_system["x"] < grain_cutoff
         self.__left_grain = self.__whole_system[mask]
@@ -605,7 +610,7 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
         calculate the fingerprint.
     :return: The vector containing the fingerprint for *atom*.
     """
-    Rs = np.arange(0, Rmax+Delta, Delta)
+    Rs = np.arange(0, Rmax + Delta, Delta)
 
     fingerprint_vector = np.zeros_like(Rs)
     for idx, R in enumerate(Rs):
@@ -615,10 +620,9 @@ def _calculate_fingerprint_vector(atom, neighs, NB, V, Btype, Delta, Rmax):
                 diff = atom[1:] - neigh[1:]
                 # Rij = np.linalg.norm(atom[1:] - neigh[1:])
                 distance = np.sqrt(np.dot(diff, diff))
-                delta = _gaussian(R-distance, 0.02)
+                delta = _gaussian(R - distance, 0.02)
                 local_sum += delta / \
                     (4 * np.pi * distance * distance * (NB / V) * Delta)
-                # pdb.set_trace()
         fingerprint_vector[idx] = local_sum - 1
 
     return fingerprint_vector
@@ -642,8 +646,8 @@ def _calculate_local_order(atom, neighs, unit_cell_types, unit_cell_a0, N, Delta
     """
     local_sum = 0
     atom_types = np.unique(neighs[:, 0])
-    V = unit_cell_a0**3
-    prefactor = Delta / (N * (V/N)**(1/3))
+    V = unit_cell_a0 ** 3
+    prefactor = Delta / (N * (V / N) ** (1 / 3))
     for Btype in atom_types:
         NB = np.sum(unit_cell_types == Btype)
         fingerprint = _calculate_fingerprint_vector(
@@ -793,6 +797,8 @@ class GBManipulator:
     :param gb_thickness: Thickness of the GB region, optional, defaults to 10.
     :param seed: The seed for random number generation, optional, defaults to None
         (automatically seeded).
+    :param type_dict: The mapping of integer to string types. If not specified, the
+        default mapping is 1 -> 'H', 2 -> 'He', etc.
     """
 
     def __init__(
@@ -802,7 +808,8 @@ class GBManipulator:
         *,
         gb_thickness: float = None,
         unit_cell: UnitCell = None,
-        seed: int = None
+        seed: int = None,
+        type_dict: dict = {},
     ) -> None:
         # initialize the random number generator
         if not seed:
@@ -817,21 +824,21 @@ class GBManipulator:
             # not attempt to perform those in the case that only one GB is passed in.
             self.__one_parent = True
             self.__set_parents(system1, unit_cell=unit_cell,
-                               gb_thickness=gb_thickness)
+                               gb_thickness=gb_thickness, type_dict=type_dict)
         else:
             self.__one_parent = False
             self.__set_parents(system1, system2, unit_cell=unit_cell,
-                               gb_thickness=gb_thickness)
+                               gb_thickness=gb_thickness, type_dict=type_dict)
         self.__num_processes = mp.cpu_count() // 2 or 1
 
     def __set_parents(
-        self,
-        system1: Union[GBMaker, str],
-        system2: Union[GBMaker, str] = None,
-        *,
-        unit_cell=None,
-        gb_thickness=None
-    ) -> None:
+            self,
+            system1: Union[GBMaker, str],
+            system2: Union[GBMaker, str] = None,
+            *,
+            unit_cell: UnitCell = None,
+            gb_thickness: float = None,
+            type_dict: dict = {}) -> None:
         """
         Method to assign the parent(s) that will create the child(ren).
 
@@ -842,9 +849,12 @@ class GBManipulator:
         :param gb_thickness: Keyword argument. The thickness of the GB region, optional,
             defaults to None. Note that if None is passed to the Parent class
             constructor, a value of 10 is assigned.
+        :param type_dict: Keyword argument. Optional, defaults to an empty dict. The
+            mapping from integer to elemental string. Default mapping is 1 -> 'H',
+            2 -> 'He', etc.
         """
         self.__parents[0] = Parent(
-            system1, unit_cell=unit_cell, gb_thickness=gb_thickness)
+            system1, unit_cell=unit_cell, gb_thickness=gb_thickness, type_dict=type_dict)
         if system2 is not None:
             # If there are 2 parents, with the first one being of type GBMaker, and
             # unit_cell has not been passed in, we assume that the unit cell from the
@@ -855,7 +865,7 @@ class GBManipulator:
                 if gb_thickness is None:
                     gb_thickness = system1.gb_thickness
             self.__parents[1] = Parent(
-                system2, unit_cell=unit_cell, gb_thickness=gb_thickness)
+                system2, unit_cell=unit_cell, gb_thickness=gb_thickness, type_dict=type_dict)
 
     @property
     def rng(self):
@@ -924,7 +934,7 @@ class GBManipulator:
         gb_fraction: float = None,
         num_to_remove: int = None,
         keep_ratio: bool = True,
-        return_positions: bool = False
+        return_positions: bool = False,
     ) -> np.ndarray:
         """
         Removes *gb_fraction* of atoms or *num_to_remove* atom(s) in the GB region. Uses
@@ -961,11 +971,9 @@ class GBManipulator:
                 "0 < gb_fraction <= 0.25"
             )
 
-        if (num_to_remove is not None and
-                (
-                    num_to_remove < 1 or num_to_remove > int(0.25 * len(gb_atoms))
-                )
-            ):
+        if num_to_remove is not None and (
+            num_to_remove < 1 or num_to_remove > int(0.25 * len(gb_atoms))
+        ):
             raise GBManipulatorValueError(
                 "Invalid num_to_remove value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region."
@@ -1004,12 +1012,12 @@ class GBManipulator:
                     parent.unit_cell.a0,
                     len(parent.unit_cell.unit_cell),
                     Delta,
-                    Rmax
+                    Rmax,
                 )
                 for idx, atom_idx in enumerate(gb_atom_indices)
             ]
             order = np.zeros(len(args_list))
-            for (i, args) in enumerate(args_list):
+            for i, args in enumerate(args_list):
                 order[i] = _calculate_local_order(*args)
 
             # We want the probabilities to be inversely proportional to the order parameter.
@@ -1047,8 +1055,10 @@ class GBManipulator:
 
             central_num_to_remove = num_to_remove_dict[central_type]
             selected_central_indices = self.__rng.choice(
-                central_indices, central_num_to_remove, replace=False,
-                p=central_probabilities
+                central_indices,
+                central_num_to_remove,
+                replace=False,
+                p=central_probabilities,
             )
 
             distances = {
@@ -1124,7 +1134,7 @@ class GBManipulator:
         num_to_insert: int = None,
         method: str = "delaunay",
         keep_ratio: bool = True,
-        return_positions: bool = False
+        return_positions: bool = False,
     ) -> np.ndarray:
         """
         Inserts **fraction** atoms in the GB at empty lattice sites. "Empty" sites are
@@ -1324,11 +1334,11 @@ class GBManipulator:
              )
 
         if (num_to_insert is not None and
-            (
+                    (
                         num_to_insert < 1 or
                         num_to_insert > int(0.25 * len(gb_atoms))
                     )
-            ):
+                ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region.")
@@ -1376,15 +1386,19 @@ class GBManipulator:
         if keep_ratio and len(type_map) > 1:
             central_num_to_insert = num_to_insert_dict[central_type]
             selected_central_indices = self.__rng.choice(
-                list(range(len(possible_sites))), central_num_to_insert, replace=False,
+                list(range(len(possible_sites))),
+                central_num_to_insert,
+                replace=False,
                 p=probabilities
             )
-            cutoff = (parent.unit_cell.nn_distance(2) +
-                      parent.unit_cell.nn_distance(1)) / 2.0
+            cutoff = (
+                parent.unit_cell.nn_distance(2) + parent.unit_cell.nn_distance(1)
+            ) / 2.0
             possible_sites_neighbor_list = _create_neighbor_list(cutoff, possible_sites)
 
             atoms_to_add = {
-                type_map[i]: [] if type_map[i] is not central_type else selected_central_indices for i in type_map.keys()}
+                type_map[i]: []
+                if type_map[i] is not central_type else selected_central_indices for i in type_map.keys()}
             for atom_type, ratio in parent.unit_cell.ratio.items():
                 if atom_type == central_type:
                     continue
@@ -1437,7 +1451,7 @@ class GBManipulator:
         mesh_size: int = 4,
         num_q: int = 1,
         num_children: int = 1,
-        subtract_displacement: bool = False
+        subtract_displacement: bool = False,
     ) -> np.ndarray:
         """
         Displace atoms along soft phonon modes.
