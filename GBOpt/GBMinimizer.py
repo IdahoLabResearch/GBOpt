@@ -71,7 +71,7 @@ class MonteCarloMinimizer:
         self.manipulator.rng = self.local_random
         self.GBE_vals = []
 
-    def run_MC(self, E_accept: float = 1e-1, max_steps: int = 50, E_tol: float = 1e-4, max_rejections: int = 20, cooldown_rate: float = 1.0, unique_id: int = uuid.uuid4()) -> float:
+    def run_MC(self, E_accept: float = 1e-1, max_steps: int = 50, E_tol: float = 1e-4, max_rejections: int = 20, cooldown_rate: float = 1.0, unique_id: int | None = None) -> float:
         # TODO: Add options for changing from linear to logarithmic cooldown
         """
         Runs an MC loop on the grain boundary structure till the set convergence criteria are met.
@@ -86,6 +86,8 @@ class MonteCarloMinimizer:
         """
 
         assert cooldown_rate > 0.0 and cooldown_rate <= 1.0
+        if unique_id is None:
+            unique_id = uuid.uuid4()
 
         # Get initial energy
         init_gbe, _ = self.gb_energy_func(
