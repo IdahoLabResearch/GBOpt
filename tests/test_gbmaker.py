@@ -2,6 +2,7 @@
 
 import filecmp
 import math
+import os
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -396,6 +397,51 @@ class TestGBMakerIntRotationHelpers(unittest.TestCase):
         for ref_row, approx_row in zip(R, approx.astype(float)):
             err = self.gbm._GBMaker__row_angle_error_deg(ref_row, approx_row)
             self.assertLessEqual(err, 0.5)
+
+
+class TestGBMakerTriclinic(unittest.TestCase):
+    def setUp(self):
+        a0 = 3.61
+        theta = math.radians(36.869898)
+        misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
+        self.gbm = GBMaker(a0, "fcc", 10.0, misorientation, "Cu",
+                           repeat_factor=6, x_dim_min=60.0, vacuum=10.0,
+                           interaction_distance=10)
+
+    def test_triclinic_writes_tilt_line(self):
+        with tempfile.NamedTemporaryFile(delete=True) as f:
+            self.gbm.write_lammps(f.name, triclinic=True)
+            with open(f.name) as fread:
+                content = fread.read()
+        self.assertIn("xy xz yz", content)
+
+    def test_non_triclinic_no_tilt_line(self):
+        with tempfile.NamedTemporaryFile(delete=True) as f:
+            self.gbm.write_lammps(f.name)
+            with open(f.name) as fread:
+                content = fread.read()
+        self.assertNotIn("xy xz yz", content)
+
+    def test_csl_boundary_zero_tilt(self):
+        # Sigma5 is a CSL boundary - period vectors lie exactly on axis directions, so
+        # all tilt factors should be negligibly small
+        xy, xz, yz, _ = self.gbm._GBMaker__get_triclinic_params()
+        self.assertAlmostEqual(xy, 0.0, places=3)
+        self.assertAlmostEqual(xz, 0.0, places=3)
+        self.assertAlmostEqual(yz, 0.0, places=3)
+
+    def test_triclinic_gbmanipulator_reads_back(self):
+        from GBOpt.GBManipulator import Parent
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".dat", mode="w") as f:
+            fname = f.name
+        try:
+            self.gbm.write_lammps(fname, triclinic=True)
+            # Should not raise - GBManipulator must parse the xy xz yz line cleanly
+            parent = Parent(fname, unit_cell=self.gbm.unit_cell,
+                            gb_thickness=self.gbm.gb_thickness)
+            self.assertIsNotNone(parent)
+        finally:
+            os.unlink(fname)
 
 
 if __name__ == "__main__":
