@@ -246,7 +246,7 @@ class GBMaker:
 
         # approximate the rotation matrix as integers
         self.__R_left = self.__Rincl
-        self.__R_right = np.dot(self.__Rmis, self.__Rincl)
+        self.__R_right = np.dot(self.__Rincl, self.__Rmis)
         # # We store the approximate matrices as objects to allow for large numbers
         self.__R_left_approx = self.__approximate_rotation_matrix_as_int(
             self.__R_left).astype(object)
