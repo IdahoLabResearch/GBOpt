@@ -59,6 +59,7 @@ class TestGBMaker(unittest.TestCase):
         self.assertIsNotNone(self.gbm.left_grain)
         self.assertIsNotNone(self.gbm.right_grain)
         self.assertEqual(len(self.gbm.whole_system[0]), 4)
+        self.assertEqual(self.gbm.epsilon, 1e-10)
         left_grain = self.gbm.left_grain
         right_grain = self.gbm.right_grain
         system = self.gbm.whole_system
@@ -73,6 +74,17 @@ class TestGBMaker(unittest.TestCase):
     def test_invalid_a0_value(self):
         with self.assertRaises(GBMakerValueError):
             self.gbm.a0 = -5.0
+
+    def test_invalid_epsilon_type(self):
+        with self.assertRaises(GBMakerTypeError):
+            self.gbm.epsilon = "invalid"
+
+    def test_invalid_epsilon_value(self):
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.epsilon = -1e-10
+
+        with self.assertRaises(GBMakerValueError):
+            self.gbm.epsilon = 0.0
 
     def test_invalid_misorientation_length(self):
         with self.assertRaises(GBMakerValueError):
@@ -203,6 +215,15 @@ class TestGBMaker(unittest.TestCase):
         self.gbm.id = 2
         self.assertEqual(self.gbm.id, 2)
 
+    def test_epsilon_custom_init(self):
+        gbm = GBMaker(self.a0, self.structure, self.gb_thickness, self.misorientation,
+                      self.atom_types, epsilon=1e-5)
+        self.assertEqual(gbm.epsilon, 1e-5)
+
+    def test_epsilon_setter(self):
+        self.gbm.epsilon = 1e-8
+        self.assertEqual(self.gbm.epsilon, 1e-8)
+
     def test_thin_thick_box_dimensions(self):
         # Thin box
         self.gbm.x_dim_min = 5.0
@@ -234,7 +255,24 @@ class TestGBMaker(unittest.TestCase):
             self.assertEqual(self.gbm.spacing["y"], 10.0)
             self.assertEqual(self.gbm.spacing["z"], 15.0)
 
+    def test_epsilon_controls_boundary_atom_inclusion(self):
+        # An atom at x=0.0 with x_min=1e-12 straddles the lower boundary. With
+        # epsilon=1e-10: 0.0 >= 1e-12 - 1e-10 =-9.9e-11 -> included. With epsilon=1e-13:
+        # 0.0 <= 1e-12 - 1e-13 = 9e-13 -> excluded. Exercises the setter's effect on
+        # __get_points_inside_box directly.
+        boundary_atom = np.array([("Cu", 0.0, 5.0, 5.0)], dtype=Atom.atom_dtype)
+        box_dim = [1e-12, 0.0, 0.0, 10.0, 10.0, 10.0]
+
+        self.gbm.epsilon = 1e-10
+        result_large = self.gbm._GBMaker__get_points_inside_box(boundary_atom, box_dim)
+        self.assertEqual(len(result_large), 1)
+
+        self.gbm.epsilon = 1e-13  # too narrow; x=0.0 falls velow x_min - epsilon
+        result_small = self.gbm._GBMaker__get_points_inside_box(boundary_atom, box_dim)
+        self.assertEqual(len(result_small), 0)
+
     # Tests for warnings
+
     def test_repeat_factor_warning(self):
         with self.assertWarns(UserWarning):
             gbm = GBMaker(self.a0, self.structure, self.gb_thickness,
