@@ -3,7 +3,6 @@
 
 import math
 import warnings
-from fractions import Fraction
 from numbers import Number
 from typing import Any, Sequence, Tuple, Union
 
@@ -99,7 +98,74 @@ class GBMaker:
         self.__set_gb_region()
         self.__box_dims = self.__calculate_box_dimensions()
 
+    @staticmethod
+    def __reduce_integer_row(row: np.ndarray) -> np.ndarray:
+        """
+        Reduce an integer row by its GCD
+
+        :param row: Integer row vector
+        :return: GCD-reduced integer row vector
+        """
+        reduced = np.asarray(row, dtype=int).copy()
+        non_zero = np.abs(reduced[reduced != 0])
+        if not non_zero.size:
+            return reduced
+        gcd = np.gcd.reduce(non_zero)
+        if gcd > 1:
+            reduced //= gcd
+        return reduced
+
+    @staticmethod
+    def __row_angle_error_deg(reference: np.ndarray, candidate: np.ndarray) -> float:
+        """
+        Compute the angular error in degrees between two vectors.
+
+        :param reference: Reference float vector.
+        :param candidate: Candidate integer vector.
+        :return: Angle between the two vectors in degrees
+        """
+        ref_norm = np.linalg.norm(reference)
+        cand_norm = np.linalg.norm(candidate)
+        if np.isclose(ref_norm, 0) or np.isclose(cand_norm, 0):
+            return 180.0
+        cosine = np.dot(reference, candidate) / (ref_norm * cand_norm)
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
     # Private class methods
+    def __approximate_rotation_row_as_int(
+        self, row: np.ndarray, angle_tol_deg: float = 0.5, max_scale: int = 10000
+    ) -> np.ndarray:
+        """
+        Find the smallest-norm integer vector that points within *angle_tol_deg* of
+        *row*. LLL lattice reduction was considered but not adopted: for CSL boundaries
+        the correct scale factor k equals ‖g‖ ≤ √Σ (typically < 10), so the loop exits
+        in a handful of iterations. The LLL selection step also requires enumerating
+        signed combinations of reduced basis rows — adding ~60 lines for no practical
+        gain.
+
+        :param row: A single float row from a rotation matrix.
+        :param angle_tol_deg: Maximum allowed angular error in degrees.
+        :param max_scale: Upper bound of the scale factor to try.
+        :return: Best-matching integer vector.
+        """
+        row = np.asarray(row, dtype=np.float64)
+        best = None
+        best_err = 180.0
+        batch_size = 1000
+        for k_start in range(1, max_scale + 1, batch_size):
+            k_end = min(k_start + batch_size, max_scale + 1)
+            for k in range(k_start, k_end):
+                candidate = self.__reduce_integer_row(np.round(row * k).astype(int))
+                err = self.__row_angle_error_deg(row, candidate)
+                if err < best_err or (err == best_err and np.linalg.norm(candidate) < np.linalg.norm(best)):
+                    best_err = err
+                    best = candidate
+                if best_err <= angle_tol_deg:
+                    break
+            if best_err <= angle_tol_deg:
+                break
+        return best if best is not None else np.round(row).astype(int)
+
     def __approximate_rotation_matrix_as_int(
         self, m: np.ndarray, precision: float = 5
     ) -> np.ndarray:
@@ -111,109 +177,16 @@ class GBMaker:
         :param precision: Decimal precision to use during calculations, defaults to 5
         :return: Integer approximation of the rotation matrix m
         """
-        # first round the matrix to the desired precision
-        R0 = np.linalg.norm(Rotation.from_matrix(m).as_rotvec(degrees=True))
 
-        def gcd_reduce(matrix):
-            gcds = np.gcd.reduce(matrix, axis=1)
-            return matrix / gcds[:, np.newaxis]
-
-        def get_angle(matrix):
-            return np.linalg.norm(
-                Rotation.from_matrix(
-                    matrix / np.linalg.norm(matrix, axis=1)[:, np.newaxis]
-                ).as_rotvec(degrees=True)
-            )
-
-        def get_magnitude_sum(matrix):
-            abs_m = np.abs(matrix)
-            non_zero_elements = abs_m[abs_m > 0]
-            log_magnitudes = np.log(non_zero_elements)
-            return np.sum(log_magnitudes)
-
-        def calculate_best_approx(metrics1, metrics2, m1, m2):
-            diffs = [metrics1["angle"], metrics2["angle"]]
-            keys = list(metrics1.keys())
-
-            # Normalize each metric. Note that the if statement essentially only catches
-            # when both matrices gives essentially the same rotation as the original
-            # (as calculated by the get_angle function above).
-            metric1_norms = np.array(
-                [
-                    metrics1[key] / max(metrics1[key], metrics2[key])
-                    if not max(metrics1[key], metrics2[key]) == 0
-                    else 0
-                    for key in keys
-                ]
-            )
-            metric2_norms = np.array(
-                [
-                    metrics2[key] / max(metrics1[key], metrics2[key])
-                    if not max(metrics1[key], metrics2[key]) == 0
-                    else 0
-                    for key in keys
-                ]
-            )
-
-            # These weights *seem* to work, but there should be a better way to
-            # determine these (these were determine through trial and error for the
-            # R_right matrix for the misorientation matrix of [0.3, 0.4, 0.5, 0.6, 0.7])
-            # In a general sense, placing most of the weighting on the magnitude, then
-            # most of the rest on the condition, with the rest on the angle should give
-            # a good representation, at least based on the generated matrix mentioned.
-            weights = {"angle": 0.1, "condition": 0.3, "magnitude": 0.6}
-            weights = np.array([weights[key] for key in keys])  # keep order the same
-            metric1_overall = np.sum(metric1_norms * weights) / np.sum(weights)
-            metric2_overall = np.sum(metric2_norms * weights) / np.sum(weights)
-
-            if metric1_overall < metric2_overall:
-                return m1, diffs[0]
-            else:
-                return m2, diffs[1]
-
-        # Approximation with the least common multiple of denominators in their
-        # fraction representation
-        m_as_fractions = np.vectorize(
-            lambda val: Fraction(val).limit_denominator(10**precision)
-        )(m)
-        denominators = np.array(
-            [[f.denominator for f in row] for row in m_as_fractions]
-        )
-        scaling_factors = np.array([np.lcm.reduce(row) for row in denominators])
-        scaled_matrix = m * scaling_factors[:, np.newaxis]
-        approx_m_from_fractions = gcd_reduce(np.round(scaled_matrix).astype(int))
-        approx_m_from_fractions_metrics = {
-            "angle": abs(R0-get_angle(approx_m_from_fractions)),
-            "condition": np.linalg.cond(approx_m_from_fractions),
-            "magnitude": get_magnitude_sum(approx_m_from_fractions)
-        }
-
-        # Approximation by taking the ratio of the row values divided by the smallest
-        # values, scaling these ratios up by 10**precision, truncating the values,
-        # then simplifying.
-        min_by_row_excluding_0 = np.ma.amin(
-            np.ma.masked_less(np.abs(m), 10**-precision), axis=1).data
-        m_ratio = m / min_by_row_excluding_0[:, np.newaxis]  # ratios of values to mins
-        m_rounded = np.round(m_ratio, precision)  # round to the desired precision
-        m_scaled = (10**precision * m_rounded).astype(int)  # scale by 10**precision
-        approx_m_from_scaling = gcd_reduce(m_scaled)
-        approx_m_from_scaling_metrics = {
-            "angle": abs(R0-get_angle(approx_m_from_scaling)),
-            "condition": np.linalg.cond(approx_m_from_scaling),
-            "magnitude": get_magnitude_sum(approx_m_from_scaling)
-        }
-
-        result, diff = calculate_best_approx(
-            approx_m_from_fractions_metrics,
-            approx_m_from_scaling_metrics,
-            approx_m_from_fractions,
-            approx_m_from_scaling
-        )
-
-        if diff > 0.5:
-            warnings.warn(
-                "Approximated rotation matrix error is greater than 0.5 degrees.")
-        return result.astype(int)
+        max_scale = max(1000, 10**max(int(precision)-1, 0))
+        return np.vstack(
+            [
+                self.__approximate_rotation_row_as_int(
+                    row, angle_tol_deg=0.5, max_scale=max_scale
+                )
+                for row in np.asarray(m, dtype=np.float64)
+            ]
+        ).astype(int)
 
     def __assign_orientations(self, misorientation: np.ndarray) -> None:
         """
@@ -631,7 +604,8 @@ class GBMaker:
         # Write LAMMPS data file
         with open(file_name, "w") as fdata:
             # First line is a comment line
-            fdata.write(f"Crystalline {"".join(np.unique(atoms["name"]))} atoms\n\n")
+            atom_names = "".join(np.unique(atoms["name"]))
+            fdata.write(f"Crystalline {atom_names} atoms\n\n")
 
             # --- Header ---#
             # Specify number of atoms and atom types
