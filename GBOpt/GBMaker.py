@@ -108,7 +108,7 @@ class GBMaker:
         """
         reduced = np.asarray(row, dtype=int).copy()
         non_zero = np.abs(reduced[reduced != 0])
-        if non_zero.size == 0:
+        if not non_zero.size:
             return reduced
         gcd = np.gcd.reduce(non_zero)
         if gcd > 1:
@@ -126,7 +126,7 @@ class GBMaker:
         """
         ref_norm = np.linalg.norm(reference)
         cand_norm = np.linalg.norm(candidate)
-        if ref_norm == 0 or cand_norm == 0:
+        if np.isclose(ref_norm, 0) or np.isclose(cand_norm, 0):
             return 180.0
         cosine = np.dot(reference, candidate) / (ref_norm * cand_norm)
         return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
@@ -148,7 +148,7 @@ class GBMaker:
         :param max_scale: Upper bound of the scale factor to try.
         :return: Best-matching integer vector.
         """
-        row = np.asarray(row, dtype=float)
+        row = np.asarray(row, dtype=np.float64)
         best = None
         best_err = 180.0
         batch_size = 1000
@@ -184,7 +184,7 @@ class GBMaker:
                 self.__approximate_rotation_row_as_int(
                     row, angle_tol_deg=0.5, max_scale=max_scale
                 )
-                for row in np.asarray(m, dtype=float)
+                for row in np.asarray(m, dtype=np.float64)
             ]
         ).astype(int)
 
