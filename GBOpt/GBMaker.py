@@ -155,7 +155,8 @@ class GBMaker:
         for k_start in range(1, max_scale + 1, batch_size):
             k_end = min(k_start + batch_size, max_scale + 1)
             for k in range(k_start, k_end):
-                candidate = self.__reduce_integer_row(np.round(row * k).astype(int))
+                candidate = self.__reduce_integer_row(
+                    np.round(row * k).astype(int))
                 err = self.__row_angle_error_deg(row, candidate)
                 if err < best_err or (err == best_err and np.linalg.norm(candidate) < np.linalg.norm(best)):
                     best_err = err
@@ -199,7 +200,8 @@ class GBMaker:
         """
         self.__misorientation = misorientation[:3]
         self.__inclination = misorientation[3:]
-        self.__Rmis = Rotation.from_euler("ZXZ", misorientation[:3]).as_matrix()
+        self.__Rmis = Rotation.from_euler(
+            "ZXZ", misorientation[:3]).as_matrix()
         self.__Rincl = (
             Rotation.from_euler("z", misorientation[4])
             * Rotation.from_euler("y", misorientation[3])
@@ -225,7 +227,8 @@ class GBMaker:
         """
         self.__left_grain = self.__generate_left_grain()
         self.__right_grain = self.__generate_right_grain()
-        self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
+        self.__whole_system = np.hstack(
+            (self.__left_grain, self.__right_grain))
 
     def __calculate_periodic_spacing(self, threshold: float = None) -> dict:
         """
@@ -264,7 +267,8 @@ class GBMaker:
             for axis, vec in zip(["x", "y", "z"], self.__R_right_approx)
         }
 
-        spacing = {"x": {"left": spacing_left["x"], "right": spacing_right["x"]}}
+        spacing = {
+            "x": {"left": spacing_left["x"], "right": spacing_right["x"]}}
         self.__left_x = math.ceil(
             self.__x_dim_min / spacing["x"]["left"]) * spacing["x"]["left"]
         self.__right_x = math.ceil(
@@ -346,7 +350,8 @@ class GBMaker:
         :return: 4xn array containing the atom data (type and position) for the left
             grain.
         """
-        body_diagonal = np.linalg.norm([self.__left_x, self.__y_dim, self.__z_dim])
+        body_diagonal = np.linalg.norm(
+            [self.__left_x, self.__y_dim, self.__z_dim])
         body_diagonal -= body_diagonal % self.__a0
         X = np.arange(-body_diagonal, body_diagonal, self.__a0)
 
@@ -373,7 +378,8 @@ class GBMaker:
         :return: 4xn array containing the atom data (type and position) for the right
             grain.
         """
-        body_diagonal = np.linalg.norm([self.__right_x, self.__y_dim, self.__z_dim])
+        body_diagonal = np.linalg.norm(
+            [self.__right_x, self.__y_dim, self.__z_dim])
         body_diagonal -= body_diagonal % self.__a0
         X = np.arange(-body_diagonal, body_diagonal, self.__a0)
 
@@ -384,7 +390,7 @@ class GBMaker:
         positions = np.vstack((atoms["x"], atoms["y"], atoms["z"])).T
         rotated_positions = np.dot(positions, R.T)
         atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
-        atoms["x"] += np.amax(self.__left_grain["x"]) + self.__vacuum_thickness
+        atoms["x"] += np.amax(self.__left_grain["x"])
         return self.__get_points_inside_box(
             atoms,
             [
@@ -493,7 +499,8 @@ class GBMaker:
             )
 
         if positive and isinstance(value, Number) and value < 0:
-            raise GBMakerValueError(f"{parameter_name} must be a positive value.")
+            raise GBMakerValueError(
+                f"{parameter_name} must be a positive value.")
 
         if (
             isinstance(value, (Sequence, np.ndarray))
@@ -541,7 +548,8 @@ class GBMaker:
                             "repeat_factor must be a sequence of type int."
                         )
                     if val < 2:
-                        warnings.warn("Recommended repeat distance is at least 2.")
+                        warnings.warn(
+                            "Recommended repeat distance is at least 2.")
                 value = list(value)
         return value
 
@@ -626,7 +634,8 @@ class GBMaker:
                 raise GBMakerValueError(
                     "'charges' keys are required to be integers or strings.")
             if not all([isinstance(i, Number) for i in charges.values()]):
-                raise GBMakerValueError("'charges' values are required to be numeric.")
+                raise GBMakerValueError(
+                    "'charges' values are required to be numeric.")
             if type_as_int:
                 if all([isinstance(i, str) for i in charges.keys()]):
                     for name in np.unique(atoms["name"]):
@@ -679,7 +688,8 @@ class GBMaker:
             # Write each position.
             for i, (name, *pos) in enumerate(atoms):
                 if charges is not None:
-                    charge = charges[name_to_int[name]]if type_as_int else charges[name]
+                    charge = charges[name_to_int[name]
+                                     ]if type_as_int else charges[name]
                 else:
                     charge = None
 
@@ -739,7 +749,8 @@ class GBMaker:
         )
         self.__misorientation = misorientation[:3]
         self.__inclination = misorientation[3:]
-        self.__Rmis = Rotation.from_euler("ZXZ", misorientation[:3]).as_matrix()
+        self.__Rmis = Rotation.from_euler(
+            "ZXZ", misorientation[:3]).as_matrix()
         self.__Rincl = (
             Rotation.from_euler("z", misorientation[4])
             * Rotation.from_euler("y", misorientation[3])
@@ -791,7 +802,8 @@ class GBMaker:
 
     @x_dim_min.setter
     def x_dim_min(self, value: Number):
-        self.__x_dim_min = self.__validate(value, Number, "x_dim_min", positive=True)
+        self.__x_dim_min = self.__validate(
+            value, Number, "x_dim_min", positive=True)
         self.update_spacing()
         self.__box_dims = self.__calculate_box_dimensions()
 
@@ -846,4 +858,5 @@ if __name__ == "__main__":
         misorientation=[theta, 0, 0, 0, -theta / 2],
         repeat_factor=[3, 9],
     )
-    G.write_lammps(np.vstack((G.left_grain, G.right_grain)), G.box_dims, "test1.dat")
+    G.write_lammps(np.vstack((G.left_grain, G.right_grain)),
+                   G.box_dims, "test1.dat")
