@@ -58,12 +58,14 @@ class GBMaker:
                  misorientation: np.ndarray, atom_types: str | Tuple[str, ...], *,
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim_min: float = 50,
                  vacuum: float = 10, interaction_distance: float = 15.0,
-                 gb_id: int = 1):
+                 gb_id: int = 1, epsilon: float = 1e-10):
         self.__a0 = self.__validate(a0, Number, "a0", positive=True)
         self.__structure = self.__validate(structure, str, "structure")
         self.__gb_thickness = self.__validate(
             gb_thickness, Number, "gb_thickness", positive=True
         )
+        self.__epsilon = self.__validate(
+            epsilon, Number, "epsilon", strictly_positive=True)
         self.__assign_orientations(
             self.__validate(
                 np.asarray(misorientation),
@@ -244,7 +246,7 @@ class GBMaker:
 
         # approximate the rotation matrix as integers
         self.__R_left = self.__Rincl
-        self.__R_right = np.dot(self.__Rmis, self.__Rincl)
+        self.__R_right = np.dot(self.__Rincl, self.__Rmis)
         # # We store the approximate matrices as objects to allow for large numbers
         self.__R_left_approx = self.__approximate_rotation_matrix_as_int(
             self.__R_left).astype(object)
@@ -426,9 +428,9 @@ class GBMaker:
         # do not have periodic boundaries in this direction, but '<=' causes more atoms
         # to be placed.
         inside_box = (
-            (atoms["x"] >= x_min) & (atoms["x"] < x_max) &
-            (atoms["y"] >= y_min) & (atoms["y"] < y_max) &
-            (atoms["z"] >= z_min) & (atoms["z"] < z_max)
+            (atoms["x"] >= x_min - self.__epsilon) & (atoms["x"] < x_max) &
+            (atoms["y"] >= y_min - self.__epsilon) & (atoms["y"] < y_max) &
+            (atoms["z"] >= z_min - self.__epsilon) & (atoms["z"] < z_max)
         )
         return atoms[inside_box]
 
@@ -469,7 +471,8 @@ class GBMaker:
         parameter_name: str,
         *,
         positive: bool = False,
-        expected_length: int = None,
+        expected_length: int | None = None,
+        strictly_positive: bool = False
     ):
         """
         Private method for validating the values passed in using the setters.
@@ -482,6 +485,8 @@ class GBMaker:
             defaults to False.
         :param expected_length: Specific to sequences or arrays. The expected length of
             the sequence or array, optional, defaults to None.
+        :param strictly_positive: Supercedes `positive` by enforcing value > 0. Optional,
+            defaults to False.
         :raises GBMakerTypeError: Exception raised if the type of the value does not
             match the expected type(s).
         :raises GBMakerValueError: Exception raised when invalid values are given for
@@ -498,7 +503,16 @@ class GBMaker:
                 f"{parameter_name} must be of type {expected_type_names}."
             )
 
-        if positive and isinstance(value, Number) and value < 0:
+        if strictly_positive and isinstance(value, Number):
+            if value <= 0:
+                raise GBMakerValueError(f"{parameter_name} must be strictly positive")
+            if value < np.finfo(np.float64).eps:
+                warnings.warn(
+                    f"{parameter_name} ({value}) is below machine epsilon "
+                    f"({np.finfo(np.float64).eps:.2e}) and may not have any "
+                    "practical effect."
+                )
+        elif positive and isinstance(value, Number) and value < 0:
             raise GBMakerValueError(
                 f"{parameter_name} must be a positive value.")
 
@@ -709,6 +723,15 @@ class GBMaker:
         self.__a0 = self.__validate(value, float, "a0", positive=True)
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.update_spacing()
+
+    @property
+    def epsilon(self) -> float:
+        return self.__epsilon
+
+    @epsilon.setter
+    def epsilon(self, value: Number) -> None:
+        self.__epsilon = self.__validate(
+            value, Number, "epsilon", strictly_positive=True)
 
     @property
     def gb_thickness(self) -> float:

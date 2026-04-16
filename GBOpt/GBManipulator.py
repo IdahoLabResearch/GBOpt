@@ -1448,10 +1448,9 @@ class GBManipulator:
                     continue
                 for idx in selected_central_indices:
                     neighbors = possible_sites_neighbor_list[idx]
+                    already_assigned = {idx for v in atoms_to_add.values() for idx in v}
                     # Only consider the indices that have not already been assigned
-                    available_neighbors = list(
-                        set(neighbors) - set(np.array(atoms_to_add.values()).flatten())
-                    )
+                    available_neighbors = list(set(neighbors) - already_assigned)
                     if len(available_neighbors) < ratio:
                         raise GBManipulatorValueError(
                             "Not enough sites to insert atoms into."
