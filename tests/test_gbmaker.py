@@ -10,6 +10,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
+from scipy.spatial import KDTree
 
 from GBOpt.Atom import Atom, AtomValueError
 from GBOpt.GBMaker import GBMaker, GBMakerTypeError, GBMakerValueError
@@ -190,8 +191,7 @@ class TestGBMaker(unittest.TestCase):
         theta = math.radians(90-36.869898)
         new_misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
         self.gbm.misorientation = new_misorientation
-        np.testing.assert_array_equal(
-            self.gbm.misorientation, new_misorientation)
+        np.testing.assert_array_equal(self.gbm.misorientation, new_misorientation)
 
         with self.assertRaises(GBMakerValueError):
             self.gbm.repeat_factor = [-2, -1]
@@ -217,7 +217,7 @@ class TestGBMaker(unittest.TestCase):
 
     def test_epsilon_custom_init(self):
         gbm = GBMaker(self.a0, self.structure, self.gb_thickness, self.misorientation,
-                      self.atom_types, epsilon=1e-5)
+                      self.atom_types, epsilon=1e-5, interaction_distance=3)
         self.assertEqual(gbm.epsilon, 1e-5)
 
     def test_epsilon_setter(self):
@@ -260,7 +260,8 @@ class TestGBMaker(unittest.TestCase):
         # epsilon=1e-10: 0.0 >= 1e-12 - 1e-10 =-9.9e-11 -> included. With epsilon=1e-13:
         # 0.0 <= 1e-12 - 1e-13 = 9e-13 -> excluded. Exercises the setter's effect on
         # __get_points_inside_box directly.
-        boundary_atom = np.array([("Cu", 0.0, 5.0, 5.0)], dtype=Atom.atom_dtype)
+        boundary_atom = np.array(
+            [("Cu", 0.0, 5.0, 5.0)], dtype=Atom.atom_dtype)
         box_dim = [1e-12, 0.0, 0.0, 10.0, 10.0, 10.0]
 
         self.gbm.epsilon = 1e-10
@@ -298,7 +299,8 @@ class TestGBMaker(unittest.TestCase):
             self.assertEqual(content[3].strip(), "2 atom types")
 
         with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.gbm.write_lammps(temp_file.name, atoms, box_sizes, type_as_int=False)
+            self.gbm.write_lammps(temp_file.name, atoms,
+                                  box_sizes, type_as_int=False)
             with open(temp_file.name, "r") as f:
                 content = f.readlines()
 
@@ -375,7 +377,8 @@ class TestGBMakerIntRotationHelpers(unittest.TestCase):
         a0 = 3.61
         theta = math.radians(36.868698)
         misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
-        self.gbm = GBMaker(a0, "fcc", 10.0, misorientation, "Cu")
+        self.gbm = GBMaker(a0, "fcc", 10.0, misorientation,
+                           "Cu", interaction_distance=3)
 
     # __reduce_integer_row
     def test_reduce_integer_row_basic(self):
@@ -557,324 +560,61 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         )
 
     # ------------------------------------------------------------------
-    # Sigma3 (111) -- 180 deg misorientation representation
-    # ------------------------------------------------------------------
-
-    def test_sigma3_111_construction_succeeds(self):
-        """Regression: Sigma3 (111) must not raise ValueError during construction."""
-        gbm = self._make_gb(self.sigma3_111_180deg)
-        self.assertGreater(gbm.left_grain.shape[0], 0)
-        self.assertGreater(gbm.right_grain.shape[0], 0)
-        self.assertEqual(
-            gbm.left_grain.shape[0] + gbm.right_grain.shape[0],
-            gbm.whole_system.shape[0],
-        )
-
-    def test_sigma3_111_no_non_periodic_warning(self):
-        """Sigma3 (111) is a well-defined CSL: no non-periodic boundary warning."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self._make_gb(self.sigma3_111_180deg)
-        non_periodic = [
-            w
-            for w in caught
-            if issubclass(w.category, UserWarning)
-            and "non-periodic" in w.message.args[0].lower()
-        ]
-        self.assertEqual(
-            len(non_periodic), 0, f"Unexpected non-periodic warning(s): {non_periodic}"
-        )
-
-    def test_sigma3_111_spacing(self):
-        """Sigma3 (111) spacings must match the expected (111) CSL periodicities."""
-        gbm = self._make_gb(self.sigma3_111_180deg)
-        s = gbm.spacing
-        # Boundary normal [1,1,1]:            period = a0*sqrt(3)
-        # In-plane direction [-1,2,-1]/[1,-2,1]: period = a0*sqrt(6)
-        # In-plane direction [-1,0,1]/[1,0,-1]:  period = a0*sqrt(2)
-        self.assertAlmostEqual(s["x"]["left"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["x"]["right"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["y"], self.a0 * np.sqrt(6), places=5)
-        self.assertAlmostEqual(s["z"], self.a0 * np.sqrt(2), places=5)
-
-    def test_sigma3_111_x_dim_reasonable(self):
-        """x_dim must follow from the CSL x-spacing, not be thousands of Angstroms."""
-        gbm = self._make_gb(self.sigma3_111_180deg, x_dim_min=50)
-        # With spacing_x = a0*sqrt(3) ~ 6.25 A and x_dim_min=50,
-        # each grain is ceil(50/6.25)*6.25 ~ 50 A, so x_dim ~ 100 A.
-        # Before the fix, right_x was thousands of Angstroms.
-        x_spacing = self.a0 * np.sqrt(3)
-        expected_grain_x = math.ceil(50 / x_spacing) * x_spacing
-        self.assertAlmostEqual(gbm.x_dim, 2 * expected_grain_x, places=5)
-
-    def test_sigma3_111_via_setter(self):
-        """Same regression applies when misorientation is changed via the setter."""
-        theta = math.radians(36.869898)
-        gbm = self._make_gb(
-            np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0]), repeat_factor=(2, 3))
-        gbm.misorientation = self.sigma3_111_180deg
-        # Confirm the grain was actually rebuilt, not just the spacing dict updated.
-        self.assertGreater(gbm.left_grain.shape[0], 0)
-        self.assertGreater(gbm.right_grain.shape[0], 0)
-        s = gbm.spacing
-        self.assertAlmostEqual(s["x"]["left"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["x"]["right"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["y"], self.a0 * np.sqrt(6), places=5)
-        self.assertAlmostEqual(s["z"], self.a0 * np.sqrt(2), places=5)
-
-    # ------------------------------------------------------------------
-    # Sigma3 (111) -- 60 deg misorientation representation
-    # ------------------------------------------------------------------
-
-    def test_sigma3_111_60deg_construction_succeeds(self):
-        """Sigma3 (111) described as 60 deg about [111] must also construct cleanly."""
-        gbm = self._make_gb(self.sigma3_111_60deg)
-        self.assertGreater(gbm.left_grain.shape[0], 0)
-        self.assertGreater(gbm.right_grain.shape[0], 0)
-
-    def test_sigma3_111_60deg_no_non_periodic_warning(self):
-        """60 deg Sigma3 (111) representation: no non-periodic boundary warning."""
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self._make_gb(self.sigma3_111_60deg)
-        non_periodic = [
-            w
-            for w in caught
-            if issubclass(w.category, UserWarning)
-            and "non-periodic" in w.message.args[0].lower()
-        ]
-        self.assertEqual(
-            len(non_periodic), 0, f"Unexpected non-periodic warning(s): {non_periodic}"
-        )
-
-    def test_sigma3_111_60deg_spacing(self):
-        """60 deg Sigma3 (111): spacings must match the same (111) CSL periodicities."""
-        gbm = self._make_gb(self.sigma3_111_60deg)
-        s = gbm.spacing
-        self.assertAlmostEqual(s["x"]["left"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["x"]["right"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["y"], self.a0 * np.sqrt(6), places=5)
-        self.assertAlmostEqual(s["z"], self.a0 * np.sqrt(2), places=5)
-
-    # ------------------------------------------------------------------
-    # Self-validating guards (Gap 1 & 2)
+    # Stacking-test helpers
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _Rz(a):
-        c, s = np.cos(a), np.sin(a)
-        return np.array([[c, -s, 0], [s, c, 0], [0, 0, 1]], dtype=float)
+    def _layer_xs(atoms, atol=1e-2):
+        xs = np.sort(atoms["x"])
+        layers = [xs[0]]
+        for x in xs[1:]:
+            if abs(x - layers[-1]) > atol:
+                layers.append(x)
+        return np.array(layers)
 
     @staticmethod
-    def _Rx(a):
-        c, s = np.cos(a), np.sin(a)
-        return np.array([[1, 0, 0], [0, c, -s], [0, s, c]], dtype=float)
+    def _yz_points(atoms, x0, atol=1e-2):
+        pts = atoms[np.isclose(atoms["x"], x0, atol=atol)]
+        return np.column_stack([pts["y"], pts["z"]])
 
     @staticmethod
-    def _Ry(a):
-        c, s = np.cos(a), np.sin(a)
-        return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]], dtype=float)
-
-    def _decompose(self, mis):
-        """Return (R_mis, R_incl) from a 5-element misorientation array."""
-        alpha, beta, gamma, theta, phi = mis
-        R_mis = self._Rz(alpha) @ self._Rx(beta) @ self._Rz(gamma)
-        R_incl = self._Rz(phi) @ self._Ry(theta)
-        return R_mis, R_incl
-
-    def test_matrices_do_not_commute(self):
-        """Guard: sigma3_111_180deg must produce genuinely non-commuting R_mis and R_incl.
-
-        If the two matrices happened to commute, the spacing tests would pass even
-        with the wrong multiplication order, defeating their value as regressions.
+    def _planes_coincide(ref, cand, ydim, zdim, tol=0.1):
         """
-        R_mis, R_incl = self._decompose(self.sigma3_111_180deg)
-        self.assertFalse(
-            np.allclose(R_mis @ R_incl, R_incl @ R_mis),
-            "sigma3_111_180deg R_mis and R_incl must not commute; "
-            "if they did, the wrong multiplication order would not be detected.",
-        )
-
-    def test_spacing_uses_correct_matrix_order(self):
-        """The right-grain periodic spacing must come from R_incl @ R_mis, not R_mis @ R_incl.
-
-        For Sigma3 (111), row 0 of R_incl @ R_mis is [1,1,1]/sqrt(3), giving
-        x-spacing a0*sqrt(3).  The reversed product R_mis @ R_incl has a different
-        row 0 with irrational mixing of sqrt(2)/sqrt(3)/sqrt(6), so it does NOT
-        simplify to [1,1,1]/sqrt(3).  This test documents the invariant directly,
-        independent of GBMaker internals.
+        Return True if candidate and reference share the same y,z positions (same
+        stacking type). KDTree boxsize applies the minimum-image convention so atoms
+        straddling a periodic boundary are correctly identified as coincident.
+        tol=0.1 Å is well above FP noise (~1e-10 Å) and well below the minimum DSC shift
+        between different plane types (~0.85 Å for Cu).
         """
-        R_mis, R_incl = self._decompose(self.sigma3_111_180deg)
-        correct_row0 = (R_incl @ R_mis)[0]
-        self.assertTrue(
-            np.allclose(correct_row0, np.array([1, 1, 1]) / np.sqrt(3)),
-            f"Row 0 of R_incl @ R_mis should be [1,1,1]/sqrt(3), got {correct_row0}",
-        )
-        wrong_row0 = (R_mis @ R_incl)[0]
-        self.assertFalse(
-            np.allclose(wrong_row0, np.array([1, 1, 1]) / np.sqrt(3)),
-            "Row 0 of R_mis @ R_incl must NOT equal [1,1,1]/sqrt(3); "
-            "if it did, the wrong order would be indistinguishable from the correct one.",
-        )
+        if len(ref) != len(cand):
+            return False
+        ref_w = np.column_stack([ref[:, 0] % ydim, ref[:, 1] % zdim])
+        cand_w = np.column_stack([cand[:, 0] % ydim, cand[:, 1] % zdim])
+        tree = KDTree(ref_w, boxsize=[ydim, zdim])
+        dists, _ = tree.query(cand_w, k=1)
+        return np.all(dists < tol)
 
-    def test_decompose_matches_gbmaker(self):
-        """_decompose must mirror GBMaker's internal rotation construction.
+    def _assert_interface_stacking(self, gbm, d_spacing):
+        left_layers = self._layer_xs(gbm.left_grain)
+        right_layers = self._layer_xs(gbm.right_grain)
+        interface_gap = right_layers[0] - left_layers[-1]
+        terminal = self._yz_points(gbm.left_grain, left_layers[-1])
+        right_1 = self._yz_points(gbm.right_grain, right_layers[0])
 
-        Two independent checks, one per matrix:
-
-        R_incl: for (111) inclination, Rz(phi) @ Ry(theta) must place [1,1,1]/sqrt(3)
-        in row 0.  A wrong R_incl order (e.g. Ry @ Rz) would produce a different row.
-
-        R_mis: for 180-deg rotation about [111], ZXZ Euler [3pi/4, arccos(-1/3), pi/4]
-        must yield [[-1/3, 2/3, 2/3], ...].  A wrong Euler series (e.g. ZYZ) would
-        produce a different matrix and R_mis[0,0] would not equal -1/3.
-        """
-        R_mis, R_incl = self._decompose(self.sigma3_111_180deg)
-        # R_incl check: row 0 must be [1,1,1]/sqrt(3).
-        expected_row0 = np.array([1.0, 1.0, 1.0]) / np.sqrt(3)
-        self.assertTrue(
-            np.allclose(R_incl[0], expected_row0, atol=1e-10),
-            f"_decompose R_incl[0] = {R_incl[0]}; expected [1,1,1]/sqrt(3). "
-            "Wrong R_incl construction order would produce a different row.",
-        )
-        # R_mis check: R_mis[0,0] must be -1/3 for 180-deg rotation about [111].
         self.assertAlmostEqual(
-            R_mis[0, 0],
-            -1 / 3,
-            places=5,
-            msg=f"R_mis[0,0]={R_mis[0, 0]}; expected -1/3. "
-            "Wrong Euler series in _decompose (e.g. ZYZ vs ZXZ) would produce a different value.",
+            interface_gap,
+            d_spacing,
+            delta=d_spacing * 0.05,
+            msg=f"Interface x-gap {interface_gap:.4f} Å should equal "
+            f"d_spacing = {d_spacing:.4f} Å.  A gap of ~0 means both grains "
+            f"placed a plane at the same x-coordinate.",
         )
-
-    # ------------------------------------------------------------------
-    # Sigma7 (111) -- different R_mis, same inclination (Gap 3)
-    # ------------------------------------------------------------------
-
-    def test_sigma7_111_construction_succeeds(self):
-        """Regression: Sigma7 (111) must construct without ValueError."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            gbm = self._make_gb(self.sigma7_111)
-        self.assertGreater(gbm.left_grain.shape[0], 0)
-        self.assertGreater(gbm.right_grain.shape[0], 0)
-
-    def test_sigma7_111_x_spacing_correct(self):
-        """Sigma7 (111): x-spacing (boundary normal [111]) must be a0*sqrt(3) for both grains."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
-            gbm = self._make_gb(self.sigma7_111)
-        s = gbm.spacing
-        self.assertAlmostEqual(s["x"]["left"], self.a0 * np.sqrt(3), places=5)
-        self.assertAlmostEqual(s["x"]["right"], self.a0 * np.sqrt(3), places=5)
-
-    def test_sigma7_111_non_periodic_warning_expected(self):
-        """Sigma7 (111) right-grain y-period (~17.15*a0) exceeds the default 15*a0 threshold.
-
-        The right-grain y-direction row is [2,11,-13] with norm 7*sqrt(6)~17.15*a0,
-        which exceeds the 15*a0 threshold.  The z-direction row [-3,-5,8] has norm
-        7*sqrt(2)~9.90*a0, which does not.  Exactly one non-periodic warning is expected.
-        A non-periodic UserWarning is therefore correct behaviour, not an error.
-        """
-        # GBMaker.__calculate_periodic_spacing calls warnings.simplefilter("once", ...)
-        # without a catch_warnings guard, which populates the per-module
-        # __warningregistry__.  catch_warnings restores warnings.filters on exit but
-        # does NOT clear __warningregistry__, so if another Sigma7 test ran first the
-        # "once" filter would suppress the warning here.  Clear it explicitly.
-        mod = sys.modules.get("GBOpt.GBMaker")
-        if mod is not None and hasattr(mod, "__warningregistry__"):
-            mod.__warningregistry__.clear()
-
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            self._make_gb(self.sigma7_111)
-        non_periodic = [
-            w
-            for w in caught
-            if issubclass(w.category, UserWarning)
-            and "non-periodic" in w.message.args[0].lower()
-        ]
-        self.assertEqual(
-            len(non_periodic),
-            1,
-            f"Expected exactly 1 non-periodic UserWarning for Sigma7 (111), "
-            f"got {len(non_periodic)}: {non_periodic}",
-        )
-
-
-class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
-    """Regression tests for boundaries where R_incl and R_mis do not commute.
-
-    When R_incl = Rz(phi) @ Ry(theta) is a pure z-rotation (theta=0, as for [001]
-    or [110] boundary normals) and R_mis is also a z-rotation (e.g. symmetric tilt
-    about [001]), the two matrices commute and the order R_mis @ R_incl vs R_incl @
-    R_mis is irrelevant.  For boundaries whose normal has a nonzero z-component (e.g.
-    [111] or [112]), theta != 0 and the matrices generally do NOT commute.
-    """
-
-    def setUp(self):
-        self.a0 = 3.61
-        self.structure = "fcc"
-        self.atom_types = "Cu"
-        self.gb_thickness = self.a0
-
-        # Sigma3 (111) coherent twin boundary.
-        # Derived from orientation matrices (rows = crystal directions for lab x,y,z)
-        # as given by Olmsted et al. doi: 10.1016/j.actamat.2009.04.007.
-        #   P = [[2,2,2], [1,-1,0], [1,1,-2]]
-        #   Q = [[2,2,2], [-1,1,0], [-1,-1,2]]
-        # Misorientation: 180 deg rotation about [1,1,1] -> ZXZ = [3pi/4, arccos(-1/3), pi/4]
-        # Inclination: boundary normal [1,1,1]           -> theta=pi/4, phi=-arctan(1/sqrt(2))
-        self.sigma3_111_180deg = np.array(
-            [
-                3 * np.pi / 4,
-                np.arccos(-1 / 3),
-                np.pi / 4,
-                np.pi / 4,
-                -np.arctan(1 / np.sqrt(2)),
-            ]
-        )
-
-        # Same physical boundary, alternative representation: 60 deg about [1,1,1].
-        # ZXZ Euler angles for 60 deg rotation about [1,1,1]:
-        #   alpha=arctan(2), beta=arccos(2/3), gamma=arctan(-1/2)
-        self.sigma3_111_60deg = np.array(
-            [
-                np.arctan(2),
-                np.arccos(2 / 3),
-                np.arctan(-1 / 2),
-                np.pi / 4,
-                -np.arctan(1 / np.sqrt(2)),
-            ]
-        )
-
-        # Sigma7 (111) twist boundary.
-        # Rotation angle theta = 2*arctan(sqrt(3)/5); exact: cos(theta)=11/14, sin(theta)=5*sqrt(3)/14.
-        # R_mis = [[6/7,-2/7,3/7],[3/7,6/7,-2/7],[-2/7,3/7,6/7]]
-        # ZXZ Euler angles: alpha=arctan(3/2), beta=arccos(6/7), gamma=arctan(-2/3)
-        # Same boundary-plane inclination as Sigma3 (111): theta=pi/4, phi=-arctan(1/sqrt(2)).
-        # Note: the right-grain y-direction period (row [2,11,-13], norm=7*sqrt(6)~17.15*a0)
-        # exceeds the default 15*a0 threshold, so a non-periodic warning is expected.
-        self.sigma7_111 = np.array(
-            [
-                np.arctan(3 / 2),
-                np.arccos(6 / 7),
-                np.arctan(-2 / 3),
-                np.pi / 4,
-                -np.arctan(1 / np.sqrt(2)),
-            ]
-        )
-
-    def _make_gb(self, misorientation, **kwargs):
-        """Construct a small GB with fast defaults."""
-        defaults = dict(repeat_factor=2, x_dim_min=50, interaction_distance=5)
-        defaults.update(kwargs)
-        return GBMaker(
-            self.a0,
-            self.structure,
-            self.gb_thickness,
-            misorientation,
-            self.atom_types,
-            **defaults,
+        self.assertFalse(
+            self._planes_coincide(terminal, right_1, gbm.y_dim, gbm.z_dim),
+            "Terminal left-grain plane and first right-grain plane share the "
+            "same in-plane y,z positions (same stacking type). The interface "
+            "should have adjacent planes of different types (e.g. C then A), "
+            "not duplicate same-type planes (e.g. C then C).",
         )
 
     # ------------------------------------------------------------------
@@ -1120,6 +860,28 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
             f"Expected exactly 1 non-periodic UserWarning for Sigma7 (111), "
             f"got {len(non_periodic)}: {non_periodic}",
         )
+
+    # ------------------------------------------------------------------
+    # Sigma3 (111) -- interfacial stacking regression
+    # ------------------------------------------------------------------
+
+    def test_sigma3_111_no_duplicate_plane_at_interface(self):
+        """
+        Sigma3 (111) coherent twin (180 deg representation): terminal left-grain plane
+        and first right-grain plane must be separated by exactly one d_111 spacing and
+        be of different stacking type.
+        """
+
+        gbm = self._make_gb(self.sigma3_111_180deg, repeat_factor=(2, 3))
+        self._assert_interface_stacking(gbm, d_spacing=self.a0 / np.sqrt(3))
+
+    def test_sigma3_111_60deg_no_duplicate_plane_at_interface(self):
+        """
+        Sigma3 (111) coherent twin (60 deg representation): same interface stacking
+        invariant as the 180 deg representation
+        """
+        gbm = self._make_gb(self.sigma3_111_60deg, repeat_factor=(2, 3))
+        self._assert_interface_stacking(gbm, d_spacing=self.a0 / np.sqrt(3))
 
 
 if __name__ == "__main__":

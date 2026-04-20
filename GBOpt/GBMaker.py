@@ -377,8 +377,13 @@ class GBMaker:
         """
         Generates the right grain of the GB system.
 
-        :return: 4xn array containing the atom data (type and position) for the right
-            grain.
+        The right grain is registered to the nominal interface plane (``left_x +
+        vacuum``), not to the rightmost surviving atom of the clipped left grain. The
+        resulting interfacial phase is one valid DSC configuration; further
+        exploration of admissible phases is left to the optimization workflow.
+
+        :return: 4xn array containing the atom data (type and position)
+            for the right grain.
         """
         body_diagonal = np.linalg.norm(
             [self.__right_x, self.__y_dim, self.__z_dim])
@@ -392,11 +397,13 @@ class GBMaker:
         positions = np.vstack((atoms["x"], atoms["y"], atoms["z"])).T
         rotated_positions = np.dot(positions, R.T)
         atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
-        atoms["x"] += np.amax(self.__left_grain["x"])
+
+        interface_x = self.__left_x + self.__vacuum_thickness
+        atoms["x"] += interface_x
         return self.__get_points_inside_box(
             atoms,
             [
-                self.__left_x + self.__vacuum_thickness, 0, 0,
+                interface_x, 0, 0,
                 self.__x_dim + self.__vacuum_thickness, self.__y_dim, self.__z_dim
             ]
         )
@@ -423,14 +430,23 @@ class GBMaker:
         """
         x_min, y_min, z_min, x_max, y_max, z_max = box_dim
 
-        # We use '<' for the y and z directions to not duplicate atoms across the
-        # periodic boundary. For the x direction this doesn't matter as much because we
-        # do not have periodic boundaries in this direction, but '<=' causes more atoms
-        # to be placed.
+        # Epsilon is applied symmetrically to all three directions.
+        # The inclusion window is [dim_min - eps, dim_max - eps) for each axis.
+        #
+        # Lower bounds (all axes): epsilon catches atoms that float just below a box
+        #   face due to rotation-matrix floating-point noise.
+        #
+        # x upper bound: the same noise can place a left-grain terminal plane just
+        # below x_max; without this inward shift it coincides with the first right-grain
+        # plane registered at x_max by __generate_right_grain.
+        # y/z upper bounds: standard strict-less-than for periodic-image exclusion
         inside_box = (
-            (atoms["x"] >= x_min - self.__epsilon) & (atoms["x"] < x_max) &
-            (atoms["y"] >= y_min - self.__epsilon) & (atoms["y"] < y_max) &
-            (atoms["z"] >= z_min - self.__epsilon) & (atoms["z"] < z_max)
+            (atoms["x"] >= x_min - self.__epsilon) &
+            (atoms["x"] < x_max - self.__epsilon) &
+            (atoms["y"] >= y_min - self.__epsilon) &
+            (atoms["y"] < y_max) &
+            (atoms["z"] >= z_min - self.__epsilon) &
+            (atoms["z"] < z_max)
         )
         return atoms[inside_box]
 
