@@ -111,6 +111,7 @@ class GBMaker:
             interaction_distance, Number, "interaction_distance", positive=True
         )
         self.__id = self.__validate(gb_id, int, "id", positive=True)
+        self.__inplane_periodic = (True, True)
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
@@ -569,6 +570,40 @@ class GBMaker:
         if not np.all(np.isfinite(scaled_vector)):
             raise GBMakerValueError("Scaled periodic basis vector must be finite.")
         return scaled_vector
+
+    def __box_periodic_basis(self, primitive_periods: np.ndarray) -> np.ndarray:
+        """
+        Build the in-plane box basis from primitive periodic vectors.
+
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :return: 2x3 array containing the box basis vectors for y and z.
+        """
+        primitive_periods = np.asarray(primitive_periods, dtype=np.float64)
+        if primitive_periods.shape != (2, 3):
+            raise GBMakerValueError("primitive_periods must be a 2x3 array.")
+
+        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        box_lengths = (self.__y_dim, self.__z_dim)
+        box_basis = np.zeros((2, 3), dtype=np.float64)
+
+        for row_index, (is_periodic, box_length) in enumerate(
+            zip(inplane_periodic, box_lengths)
+        ):
+            if not is_periodic:
+                continue
+
+            axis_index = row_index + 1
+            axis_projection = primitive_periods[row_index, axis_index]
+            if np.isclose(axis_projection, 0.0, atol=self.__epsilon, rtol=0.0):
+                raise GBMakerValueError(
+                    "primitive_periods must have a non-zero projection on the "
+                    "selected box axis."
+                )
+            box_basis[row_index] = self.__scaled_periodic_basis_vector(
+                primitive_periods[row_index], box_length, axis_index
+            )
+
+        return box_basis
 
     def __update_dims(self) -> None:
         """
