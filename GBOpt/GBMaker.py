@@ -625,6 +625,110 @@ class GBMaker:
 
         return selection_basis
 
+    def __x_index_range(
+        self,
+        primitive_periods: np.ndarray,
+        rotated_unit_cell_basis: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Build a conservative contiguous lattice-index range along the x-period vector.
+
+        The x-period direction is derived in lattice space as the cross product of the
+        two in-plane primitive periods expressed in the rotated unit-cell basis. The
+        returned integer range is padded conservatively so translated unit cells cover
+        the requested x slab after in-plane box tilts and unit-cell extent are applied.
+
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :param rotated_unit_cell_basis: 3x3 array containing the rotated unit-cell
+            basis vectors as rows.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Contiguous integer array of lattice indices along the x-period
+            direction.
+        """
+        primitive_periods = np.asarray(primitive_periods, dtype=np.float64)
+        rotated_unit_cell_basis = np.asarray(
+            rotated_unit_cell_basis, dtype=np.float64
+        )
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        if primitive_periods.shape != (2, 3):
+            raise GBMakerValueError("primitive_periods must be a 2x3 array.")
+        if rotated_unit_cell_basis.shape != (3, 3):
+            raise GBMakerValueError("rotated_unit_cell_basis must be a 3x3 array.")
+        if x_bounds.shape != (2,):
+            raise GBMakerValueError("x_bounds must be a length-2 array.")
+        if not np.all(np.isfinite(primitive_periods)):
+            raise GBMakerValueError("primitive_periods must contain only finite values.")
+        if not np.all(np.isfinite(rotated_unit_cell_basis)):
+            raise GBMakerValueError(
+                "rotated_unit_cell_basis must contain only finite values."
+            )
+        if not np.all(np.isfinite(x_bounds)):
+            raise GBMakerValueError("x_bounds must contain only finite values.")
+        if x_bounds[1] <= x_bounds[0]:
+            raise GBMakerValueError("x_bounds must satisfy x_max > x_min.")
+
+        determinant = np.linalg.det(rotated_unit_cell_basis)
+        if np.isclose(determinant, 0.0, atol=self.__epsilon, rtol=0.0):
+            raise GBMakerValueError(
+                "rotated_unit_cell_basis must form an invertible 3x3 basis."
+            )
+
+        reduced_periods = np.linalg.solve(
+            rotated_unit_cell_basis.T, primitive_periods.T
+        ).T
+        x_direction_lattice = np.cross(reduced_periods[0], reduced_periods[1])
+        if np.linalg.norm(x_direction_lattice) <= self.__epsilon:
+            raise GBMakerValueError(
+                "primitive_periods must define distinct in-plane directions."
+            )
+
+        rounded_direction = np.rint(x_direction_lattice)
+        if np.allclose(
+            x_direction_lattice, rounded_direction, atol=self.__epsilon, rtol=0.0
+        ) and np.any(rounded_direction):
+            x_direction_lattice = self.__reduce_integer_row(
+                rounded_direction.astype(int)
+            ).astype(np.float64)
+
+        x_period_vector = x_direction_lattice @ rotated_unit_cell_basis
+        x_projection = float(x_period_vector[0])
+        if np.isclose(x_projection, 0.0, atol=self.__epsilon, rtol=0.0):
+            raise GBMakerValueError(
+                "x-period direction must have a non-zero projection on x."
+            )
+        if x_projection < 0.0:
+            x_projection = -x_projection
+
+        box_basis = self.__box_periodic_basis(primitive_periods)
+        box_corners_x = np.array(
+            [
+                0.0,
+                box_basis[0, 0],
+                box_basis[1, 0],
+                box_basis[0, 0] + box_basis[1, 0],
+            ],
+            dtype=np.float64,
+        )
+        cell_corners_x = np.array(
+            [
+                np.sum(
+                    rotated_unit_cell_basis[np.array(mask, dtype=bool), 0],
+                    dtype=np.float64,
+                )
+                for mask in np.ndindex((2, 2, 2))
+            ],
+            dtype=np.float64,
+        )
+
+        x_offset_min = float(np.min(box_corners_x) + np.min(cell_corners_x))
+        x_offset_max = float(np.max(box_corners_x) + np.max(cell_corners_x))
+
+        n_min = math.floor((x_bounds[0] - x_offset_max) / x_projection) - 1
+        n_max = math.ceil((x_bounds[1] - x_offset_min) / x_projection) + 1
+        return np.arange(n_min, n_max + 1, dtype=int)
+
     def __assert_unique_positions(self, positions: np.ndarray) -> None:
         """
         Assert that no two positions occupy the same epsilon-quantized cell.

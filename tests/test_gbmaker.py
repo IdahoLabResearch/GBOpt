@@ -846,6 +846,60 @@ class TestGBMakerBoxCoordinateConversions(unittest.TestCase):
         np.testing.assert_allclose(reconstructed, cartesian, atol=1e-12, rtol=0.0)
 
 
+class TestGBMakerXIndexRange(unittest.TestCase):
+    def setUp(self):
+        self.gbm = object.__new__(GBMaker)
+        self.gbm._GBMaker__epsilon = 1e-10
+        self.gbm._GBMaker__y_dim = 12.0
+        self.gbm._GBMaker__z_dim = 15.0
+        self.gbm._GBMaker__inplane_periodic = (True, True)
+
+    def test_x_index_range_orthogonal_configuration_covers_slab(self):
+        primitive_periods = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        rotated_unit_cell_basis = np.eye(3)
+        x_bounds = np.array([0.0, 3.5])
+
+        nx_range = self.gbm._GBMaker__x_index_range(
+            primitive_periods, rotated_unit_cell_basis, x_bounds
+        )
+
+        self.assertTrue(np.all(np.diff(nx_range) == 1))
+        self.assertIn(0, nx_range)
+        self.assertIn(3, nx_range)
+        covered_min = nx_range[0]
+        covered_max = nx_range[-1] + 1.0
+        self.assertLessEqual(covered_min, x_bounds[0])
+        self.assertGreaterEqual(covered_max, x_bounds[1])
+
+    def test_x_index_range_is_contiguous_and_includes_expected_indices_for_tilted_box(self):
+        primitive_periods = np.array([[1.0, 2.0, 0.0], [-1.0, 0.0, 2.0]])
+        rotated_unit_cell_basis = np.eye(3)
+        x_bounds = np.array([0.0, 8.0])
+
+        nx_range = self.gbm._GBMaker__x_index_range(
+            primitive_periods, rotated_unit_cell_basis, x_bounds
+        )
+
+        np.testing.assert_array_equal(
+            nx_range,
+            np.arange(nx_range[0], nx_range[-1] + 1, dtype=int),
+        )
+        for expected_index in (0, 1, 2):
+            with self.subTest(expected_index=expected_index):
+                self.assertIn(expected_index, nx_range)
+
+    def test_x_index_range_raises_when_x_period_direction_has_zero_x_projection(self):
+        primitive_periods = np.array([[1.0, 1.0, 1.0], [2.0, 1.0, 1.0]])
+        rotated_unit_cell_basis = np.eye(3)
+
+        with self.assertRaises(GBMakerValueError):
+            self.gbm._GBMaker__x_index_range(
+                primitive_periods,
+                rotated_unit_cell_basis,
+                np.array([0.0, 5.0]),
+            )
+
+
 class TestGBMakerAssertUniquePositions(unittest.TestCase):
     def setUp(self):
         self.gbm = object.__new__(GBMaker)
