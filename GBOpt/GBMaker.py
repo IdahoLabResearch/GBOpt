@@ -598,8 +598,11 @@ class GBMaker:
                 "period_vector must have a non-zero projection on the selected axis."
             )
 
-        scale = box_length / axis_projection
-        scaled_vector = period_vector * scale
+        # We ignore overflow/invalid values because the check immediately after catches
+        # those states and raises a GBMakerValueError
+        with np.errstate(over='ignore', invalid='ignore'):
+            scale = box_length / axis_projection
+            scaled_vector = period_vector * scale
         if not np.all(np.isfinite(scaled_vector)):
             raise GBMakerValueError("Scaled periodic basis vector must be finite.")
         return scaled_vector

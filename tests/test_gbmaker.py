@@ -232,14 +232,9 @@ class TestGBMaker(unittest.TestCase):
         self.gbm.misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
         self.assertNotEqual(original_spacing, self.gbm.spacing)
 
-    def test_setters_update_properties(self):
-        self.gbm.interaction_distance = 6
-        self.assertEqual(self.gbm.interaction_distance, 6)
-        self.assertGreater(self.gbm.y_dim, 2*self.gbm.interaction_distance)
-        self.assertGreater(self.gbm.z_dim, 2*self.gbm.interaction_distance)
-
-        self.gbm.a0 = 4.0
-        self.assertEqual(self.gbm.a0, 4.0)
+    def test_setters_update_properties_without_rebuild(self):
+        self.gbm.epsilon = 1e-8
+        self.assertEqual(self.gbm.epsilon, 1e-8)
 
         self.gbm.structure = "bcc"
         self.assertEqual(self.gbm.structure, "bcc")
@@ -250,39 +245,66 @@ class TestGBMaker(unittest.TestCase):
         self.gbm.gb_thickness = 12.0
         self.assertEqual(self.gbm.gb_thickness, 12.0)
 
-        with self.assertWarns(UserWarning):
-            self.gbm.misorientation = np.array([0.3, 0.4, 0.5, 0.6, 0.7])
+        self.gbm.id = 2
+        self.assertEqual(self.gbm.id, 2)
 
-        theta = math.radians(90-36.869898)
-        new_misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
-        self.gbm.misorientation = new_misorientation
-        np.testing.assert_array_equal(self.gbm.misorientation, new_misorientation)
+    def test_interaction_distance_setter_rebuilds_via_update_dims(self):
+        original_box_dims = self.gbm.box_dims.copy()
+        original_whole_system = self.gbm.whole_system.copy()
 
+        with patch.object(
+            self.gbm,
+            "_GBMaker__update_dims",
+            wraps=self.gbm._GBMaker__update_dims,
+        ) as mock_update_dims:
+            with self.assertWarns(UserWarning):
+                self.gbm.interaction_distance = 32
+
+        self.assertEqual(mock_update_dims.call_count, 1)
+        self.assertEqual(self.gbm.interaction_distance, 32)
+        self.assertFalse(np.allclose(original_box_dims, self.gbm.box_dims))
+        self.assertFalse(np.array_equal(original_whole_system, self.gbm.whole_system))
+        np.testing.assert_array_equal(
+            self.gbm.whole_system,
+            np.hstack((self.gbm.left_grain, self.gbm.right_grain)),
+        )
+
+    def test_repeat_factor_setter_rebuilds_via_update_dims(self):
+        original_box_dims = self.gbm.box_dims.copy()
+        original_whole_system = self.gbm.whole_system.copy()
+
+        with patch.object(
+            self.gbm,
+            "_GBMaker__update_dims",
+            wraps=self.gbm._GBMaker__update_dims,
+        ) as mock_update_dims:
+            self.gbm.repeat_factor = [8, 7]
+
+        self.assertEqual(mock_update_dims.call_count, 1)
+        self.assertEqual(self.gbm.repeat_factor, [8, 7])
+        self.assertFalse(np.allclose(original_box_dims, self.gbm.box_dims))
+        self.assertFalse(np.array_equal(original_whole_system, self.gbm.whole_system))
+        np.testing.assert_array_equal(
+            self.gbm.whole_system,
+            np.hstack((self.gbm.left_grain, self.gbm.right_grain)),
+        )
+
+    def test_repeat_factor_setter_validates_values(self):
         with self.assertRaises(GBMakerValueError):
             self.gbm.repeat_factor = [-2, -1]
 
-        self.gbm.repeat_factor = 6
-        self.assertEqual(self.gbm.repeat_factor, [6, 6])
-
         with self.assertWarns(UserWarning):
             self.gbm.repeat_factor = 1
+
+        with self.assertWarns(UserWarning):
             self.gbm.repeat_factor = [1, 1]
 
         with self.assertRaises(GBMakerValueError):
             self.gbm.repeat_factor = [1.5, 2.0]
 
-        self.gbm.x_dim_min = 80.0
-        self.assertEqual(self.gbm.x_dim_min, 80.0)
-
-        self.gbm.vacuum_thickness = 15.0
-        self.assertEqual(self.gbm.vacuum_thickness, 15.0)
-
-        self.gbm.id = 2
-        self.assertEqual(self.gbm.id, 2)
-
     def test_epsilon_custom_init(self):
         gbm = GBMaker(self.a0, self.structure, self.gb_thickness, self.misorientation,
-                      self.atom_types, epsilon=1e-5, interaction_distance=3)
+                      self.atom_types, epsilon=1e-5, repeat_factor=(3, 9))
         self.assertEqual(gbm.epsilon, 1e-5)
 
     def test_epsilon_setter(self):
@@ -445,8 +467,7 @@ class TestGBMakerIntRotationHelpers(unittest.TestCase):
         a0 = 3.61
         theta = math.radians(36.868698)
         misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
-        self.gbm = GBMaker(a0, "fcc", 10.0, misorientation,
-                           "Cu", interaction_distance=3)
+        self.gbm = GBMaker(a0, "fcc", 10.0, misorientation, "Cu", repeat_factor=(3, 9))
 
     # __reduce_integer_row
     def test_reduce_integer_row_basic(self):

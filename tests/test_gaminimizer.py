@@ -22,7 +22,7 @@ class TestGeneticAlgorithmMinimizer(unittest.TestCase):
             10.0,
             misorientation,
             "Ni",
-            repeat_factor=2,
+            repeat_factor=(2, 5),
             x_dim_min=30.0,
             vacuum=8.0,
             interaction_distance=8.0,
