@@ -377,20 +377,24 @@ class GBMaker:
         :return: (xy, xz, yz, theta) - the three tilt scalars and the rotation angle to
                                        apply to atom coordinates
         """
+        if not all(getattr(self, "_GBMaker__inplane_periodic", (True, True))):
+            raise GBMakerValueError(
+                "Triclinic output requires periodic y and z directions."
+            )
 
         # Use grain with larger y-period, consistent with how spacing["y"] is chosen
         if np.linalg.norm(self.__R_left_approx[1]) >= np.linalg.norm(self.__R_right_approx[1]):
             R_grain = self.__R_left
-            g_y = self.__R_left_approx[1].astype(float)
-            g_z = self.__R_left_approx[2].astype(float)
+            R_grain_approx = self.__R_left_approx
         else:
             R_grain = self.__R_right
-            g_y = self.__R_right_approx[1].astype(float)
-            g_z = self.__R_right_approx[2].astype(float)
+            R_grain_approx = self.__R_right_approx
 
-        # Lab-frame period vectors
-        A2_lab = R_grain @ (g_y * self.__a0)
-        A3_lab = R_grain @ (g_z * self.__a0)
+        rotated_unit_cell_basis = self.__unit_cell.conventional @ R_grain.T
+        primitive_periods = (
+            np.asarray(R_grain_approx[1:], dtype=np.float64) @ rotated_unit_cell_basis
+        )
+        A2_lab, A3_lab = self.__box_periodic_basis(primitive_periods)
 
         # Rotate about x to bring A2 into the xy-plane (LAMMPS restricted-triclinic
         # requires b-vector in the xy-plane). x-components are unaffected by this

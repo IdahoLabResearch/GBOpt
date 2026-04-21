@@ -1454,10 +1454,11 @@ class TestGBMakerTriclinic(unittest.TestCase):
         ]
 
         def expected_tilt(R_grain, approx):
-            g_y = approx[1].astype(float)
-            g_z = approx[2].astype(float)
-            A2_lab = R_grain @ (g_y * self.gbm.a0)
-            A3_lab = R_grain @ (g_z * self.gbm.a0)
+            rotated_unit_cell_basis = self.gbm.unit_cell.conventional @ R_grain.T
+            primitive_periods = np.asarray(
+                approx[1:], dtype=np.float64
+            ) @ rotated_unit_cell_basis
+            A2_lab, A3_lab = self.gbm._GBMaker__box_periodic_basis(primitive_periods)
             theta = -math.atan2(float(A2_lab[2]), float(A2_lab[1]))
             ct, st = math.cos(theta), math.sin(theta)
             return np.array(
@@ -1483,10 +1484,16 @@ class TestGBMakerTriclinic(unittest.TestCase):
 
                 with patch.object(
                     GBMaker, "_GBMaker__orient_period_rows", autospec=True
-                ) as mock_orient:
+                ) as mock_orient, patch.object(
+                    GBMaker, "_GBMaker__generate_gb", autospec=True
+                ) as mock_generate_gb, patch.object(
+                    GBMaker, "_GBMaker__set_gb_region", autospec=True
+                ) as mock_set_gb_region:
                     mock_orient.side_effect = fake_orient
                     self.gbm.update_spacing(threshold=1e6)
                     self.assertEqual(mock_orient.call_count, 2)
+                    mock_generate_gb.assert_called_once_with(self.gbm)
+                    mock_set_gb_region.assert_called_once_with(self.gbm)
 
                 np.testing.assert_array_equal(
                     self.gbm._GBMaker__R_left_approx, fake_left
@@ -1532,6 +1539,14 @@ class TestGBMakerTriclinic(unittest.TestCase):
                     f"{expected_selected[0]:.6f} {expected_selected[1]:.6f} "
                     f"{expected_selected[2]:.6f} xy xz yz",
                 )
+
+    def test_nonperiodic_inplane_axis_rejects_triclinic_output(self):
+        with self.assertWarns(UserWarning):
+            self.gbm.update_spacing(threshold=self.gbm.a0)
+
+        self.assertIn(False, self.gbm._GBMaker__inplane_periodic)
+        with self.assertRaises(GBMakerValueError):
+            self.gbm._GBMaker__get_triclinic_params()
 
 
 class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
