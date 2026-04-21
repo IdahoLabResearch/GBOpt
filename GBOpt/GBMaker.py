@@ -507,22 +507,7 @@ class GBMaker:
         rotated_positions[:, 0] += x_bounds[0]
         atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
 
-        if np.array_equal(
-            np.asarray(R_grain_approx[1:], dtype=int),
-            np.array([[0, 1, 0], [0, 0, 1]], dtype=int),
-        ) and np.allclose(R_grain, np.eye(3), atol=self.__epsilon, rtol=0.0):
-            atoms = self.__get_points_inside_box(
-                atoms,
-                [
-                    x_bounds[0],
-                    0.0,
-                    0.0,
-                    x_bounds[1],
-                    self.__y_dim,
-                    self.__z_dim,
-                ],
-            )
-        elif any(inplane_periodic):
+        if any(inplane_periodic):
             atoms = self.__select_atoms_in_box_basis(atoms, primitive_periods, x_bounds)
             atoms = self.__clip_atoms_to_cartesian_box(atoms, x_bounds)
         else:
@@ -531,49 +516,6 @@ class GBMaker:
             np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         )
         return atoms
-
-    def __generate_left_grain(self) -> np.ndarray:
-        """
-        Generates the left grain of the GB system.
-
-        :return: 4xn array containing the atom data (type and position) for the left
-            grain.
-        """
-        return self.__generate_grain(
-            self.__R_left,
-            self.__R_left_approx,
-            np.array(
-                [
-                    self.__vacuum_thickness,
-                    self.__left_x + self.__vacuum_thickness,
-                ],
-                dtype=np.float64,
-            ),
-        )
-
-    def __generate_right_grain(self) -> np.ndarray:
-        """
-        Generates the right grain of the GB system.
-
-        The right grain is registered to the nominal interface plane (``left_x +
-        vacuum``), not to the rightmost surviving atom of the clipped left grain. The
-        resulting interfacial phase is one valid DSC configuration; further
-        exploration of admissible phases is left to the optimization workflow.
-
-        :return: 4xn array containing the atom data (type and position)
-            for the right grain.
-        """
-        return self.__generate_grain(
-            self.__R_right,
-            self.__R_right_approx,
-            np.array(
-                [
-                    self.__left_x + self.__vacuum_thickness,
-                    self.__x_dim + self.__vacuum_thickness,
-                ],
-                dtype=np.float64,
-            ),
-        )
 
     def __set_gb_region(self):
         """
@@ -586,36 +528,6 @@ class GBMaker:
         left_gb = self.__left_grain[self.__left_grain['x'] > left_cut]
         right_gb = self.__right_grain[self.__right_grain['x'] < right_cut]
         self.__gb_region = np.hstack((left_gb, right_gb))
-
-    def __get_points_inside_box(self, atoms: np.ndarray, box_dim: np.ndarray) -> np.ndarray:
-        """
-        Selects the lattice points that are inside the given box dimensions.
-
-        :param atoms: Atoms to check. 4xm array containing types and positions.
-        :param box_dim: Dimensions of box (x_min, y_min, z_min, x_max, y_max, z_max).
-        :return: 4xn array containing the Atom positions inside the given box.
-        """
-        x_min, y_min, z_min, x_max, y_max, z_max = box_dim
-
-        # Epsilon is applied symmetrically to all three directions.
-        # The inclusion window is [dim_min - eps, dim_max - eps) for each axis.
-        #
-        # Lower bounds (all axes): epsilon catches atoms that float just below a box
-        #   face due to rotation-matrix floating-point noise.
-        #
-        # x upper bound: the same noise can place a left-grain terminal plane just
-        # below x_max; without this inward shift it coincides with the first right-grain
-        # plane registered at x_max by __generate_right_grain.
-        # y/z upper bounds: standard strict-less-than for periodic-image exclusion
-        inside_box = (
-            (atoms["x"] >= x_min - self.__epsilon) &
-            (atoms["x"] < x_max - self.__epsilon) &
-            (atoms["y"] >= y_min - self.__epsilon) &
-            (atoms["y"] < y_max) &
-            (atoms["z"] >= z_min - self.__epsilon) &
-            (atoms["z"] < z_max)
-        )
-        return atoms[inside_box]
 
     def __reduced_coordinate_tolerance(self, basis_vector: np.ndarray) -> float:
         """

@@ -321,20 +321,23 @@ class TestGBMaker(unittest.TestCase):
             self.assertEqual(self.gbm.spacing["z"], 15.0)
 
     def test_epsilon_controls_boundary_atom_inclusion(self):
-        # An atom at x=0.0 with x_min=1e-12 straddles the lower boundary. With
-        # epsilon=1e-10: 0.0 >= 1e-12 - 1e-10 =-9.9e-11 -> included. With epsilon=1e-13:
-        # 0.0 <= 1e-12 - 1e-13 = 9e-13 -> excluded. Exercises the setter's effect on
-        # __get_points_inside_box directly.
-        boundary_atom = np.array(
-            [("Cu", 0.0, 5.0, 5.0)], dtype=Atom.atom_dtype)
-        box_dim = [1e-12, 0.0, 0.0, 10.0, 10.0, 10.0]
+        # An atom at x=0.0 with x_min=1e-12 straddles the lower slab boundary. With
+        # epsilon=1e-10: 0.0 >= 1e-12 - 1e-10 = -9.9e-11 -> included. With
+        # epsilon=1e-13: 0.0 < 1e-12 - 1e-13 = 9e-13 -> excluded. Exercises the
+        # setter's effect on the active Cartesian clipping path.
+        boundary_atom = np.array([("Cu", 0.0, 5.0, 5.0)], dtype=Atom.atom_dtype)
+        x_bounds = np.array([1e-12, 10.0])
 
         self.gbm.epsilon = 1e-10
-        result_large = self.gbm._GBMaker__get_points_inside_box(boundary_atom, box_dim)
+        result_large = self.gbm._GBMaker__clip_atoms_to_cartesian_box(
+            boundary_atom, x_bounds
+        )
         self.assertEqual(len(result_large), 1)
 
         self.gbm.epsilon = 1e-13  # too narrow; x=0.0 falls velow x_min - epsilon
-        result_small = self.gbm._GBMaker__get_points_inside_box(boundary_atom, box_dim)
+        result_small = self.gbm._GBMaker__clip_atoms_to_cartesian_box(
+            boundary_atom, x_bounds
+        )
         self.assertEqual(len(result_small), 0)
 
     # Tests for warnings
@@ -767,7 +770,9 @@ class TestGBMakerPeriodicSpacing(unittest.TestCase):
         non_periodic_messages = [
             str(w.message) for w in caught if "non-periodic" in str(w.message).lower()
         ]
-        self.assertEqual(non_periodic_messages, ["Resulting boundary is non-periodic along y."])
+        self.assertEqual(non_periodic_messages, [
+                         "Resulting boundary is non-periodic along y."])
+
 
 class TestGBMakerBoxPeriodicBasis(unittest.TestCase):
     def setUp(self):
@@ -1013,7 +1018,8 @@ class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
             dtype=Atom.atom_dtype,
         )
 
-        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(
+            atoms, np.array([0.0, 5.0]))
 
         self.assertEqual(len(clipped), 1)
         self.assertAlmostEqual(clipped["x"][0], -5e-11, delta=1e-15)
@@ -1024,7 +1030,8 @@ class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
             dtype=Atom.atom_dtype,
         )
 
-        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(
+            atoms, np.array([0.0, 5.0]))
 
         self.assertEqual(len(clipped), 1)
         np.testing.assert_allclose(
@@ -1044,7 +1051,8 @@ class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
             dtype=Atom.atom_dtype,
         )
 
-        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(
+            atoms, np.array([0.0, 5.0]))
 
         self.assertEqual(len(clipped), 1)
         np.testing.assert_allclose(
@@ -1284,7 +1292,8 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
             with self.subTest(x_bounds=x_bounds):
                 positions = self._positions(atoms)
                 self.gbm._GBMaker__assert_unique_positions(positions)
-                self.assertTrue(np.all(positions[:, 0] >= x_bounds[0] - self.gbm.epsilon))
+                self.assertTrue(
+                    np.all(positions[:, 0] >= x_bounds[0] - self.gbm.epsilon))
                 self.assertTrue(np.all(positions[:, 0] < x_bounds[1]))
                 self.assertTrue(np.all(positions[:, 1] >= -self.gbm.epsilon))
                 self.assertTrue(np.all(positions[:, 1] < self.gbm.y_dim))
@@ -1294,18 +1303,21 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
     def test_generate_grain_places_right_grain_at_or_beyond_interface(self):
         interface = self.gbm._GBMaker__left_x + self.gbm.vacuum_thickness
 
-        self.assertGreaterEqual(np.min(self.gbm.right_grain["x"]), interface - self.gbm.epsilon)
+        self.assertGreaterEqual(
+            np.min(self.gbm.right_grain["x"]), interface - self.gbm.epsilon)
 
     def test_generate_grain_removes_periodic_duplicates_in_sigma5_csl_cell(self):
         grains = (
             (self.gbm.left_grain, self.gbm._GBMaker__R_left, self.gbm._GBMaker__R_left_approx),
-            (self.gbm.right_grain, self.gbm._GBMaker__R_right, self.gbm._GBMaker__R_right_approx),
+            (self.gbm.right_grain, self.gbm._GBMaker__R_right,
+             self.gbm._GBMaker__R_right_approx),
         )
 
         for atoms, R_grain, R_grain_approx in grains:
             with self.subTest(grain=R_grain_approx.tolist()):
                 primitive_periods = self._primitive_periods(R_grain, R_grain_approx)
-                selection_basis = self.gbm._GBMaker__selection_basis_vectors(primitive_periods)
+                selection_basis = self.gbm._GBMaker__selection_basis_vectors(
+                    primitive_periods)
                 canonical_box = self.gbm._GBMaker__reduced_box_coordinates(
                     self._positions(atoms), selection_basis
                 )
