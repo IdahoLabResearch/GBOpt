@@ -723,6 +723,49 @@ class GBMaker:
         )
         return cartesian_coordinates
 
+    def __clip_atoms_to_cartesian_box(
+        self, atoms: np.ndarray, x_bounds: np.ndarray
+    ) -> np.ndarray:
+        """
+        Clip atoms to Cartesian box bounds on non-periodic axes.
+
+        X is always clipped to the slab bounds. Y and Z are only clipped when the
+        corresponding in-plane axis is non-periodic. Small negative y/z values within
+        epsilon are snapped to zero after filtering.
+
+        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Filtered atom array, with lower-face y/z values clamped to zero on
+            non-periodic axes.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+        if x_bounds.shape != (2,):
+            raise GBMakerValueError("x_bounds must be a length-2 array.")
+
+        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inside_box = (atoms["x"] >= x_bounds[0] - self.__epsilon) & (atoms["x"] < x_bounds[1])
+
+        axis_names = ("y", "z")
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for axis_name, axis_dim, is_periodic in zip(axis_names, axis_dims, inplane_periodic):
+            if is_periodic:
+                continue
+            inside_box &= (
+                (atoms[axis_name] >= -self.__epsilon) & (atoms[axis_name] < axis_dim)
+            )
+
+        clipped_atoms = atoms[inside_box].copy()
+        for axis_name, is_periodic in zip(axis_names, inplane_periodic):
+            if is_periodic:
+                continue
+            clipped_atoms[axis_name] = np.where(
+                (clipped_atoms[axis_name] < 0.0) & (clipped_atoms[axis_name] >= -self.__epsilon),
+                0.0,
+                clipped_atoms[axis_name],
+            )
+
+        return clipped_atoms
+
     def __update_dims(self) -> None:
         """
         Updates the y_dim and z_dim parameters after a relevant parameter has been

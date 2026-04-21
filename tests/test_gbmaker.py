@@ -867,6 +867,65 @@ class TestGBMakerAssertUniquePositions(unittest.TestCase):
             self.gbm._GBMaker__assert_unique_positions(positions)
 
 
+class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
+    def setUp(self):
+        self.gbm = object.__new__(GBMaker)
+        self.gbm._GBMaker__epsilon = 1e-10
+        self.gbm._GBMaker__y_dim = 12.0
+        self.gbm._GBMaker__z_dim = 15.0
+        self.gbm._GBMaker__inplane_periodic = (False, False)
+
+    def test_clip_atoms_to_cartesian_box_respects_lower_bound_epsilon_on_x(self):
+        atoms = np.array(
+            [
+                ("Cu", -5e-11, 1.0, 1.0),
+                ("Cu", -2e-10, 1.0, 1.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+
+        self.assertEqual(len(clipped), 1)
+        self.assertAlmostEqual(clipped["x"][0], -5e-11, delta=1e-15)
+
+    def test_clip_atoms_to_cartesian_box_clamps_small_negative_nonperiodic_coordinates(self):
+        atoms = np.array(
+            [("Cu", 1.0, -5e-11, -2e-11)],
+            dtype=Atom.atom_dtype,
+        )
+
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+
+        self.assertEqual(len(clipped), 1)
+        np.testing.assert_allclose(
+            np.array([clipped["y"][0], clipped["z"][0]]),
+            np.array([0.0, 0.0]),
+            atol=1e-15,
+            rtol=0.0,
+        )
+
+    def test_clip_atoms_to_cartesian_box_excludes_values_above_nonperiodic_dims(self):
+        atoms = np.array(
+            [
+                ("Cu", 1.0, 12.0, 1.0),
+                ("Cu", 1.0, 1.0, 15.0),
+                ("Cu", 1.0, 11.999, 14.999),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        clipped = self.gbm._GBMaker__clip_atoms_to_cartesian_box(atoms, np.array([0.0, 5.0]))
+
+        self.assertEqual(len(clipped), 1)
+        np.testing.assert_allclose(
+            np.array([clipped["y"][0], clipped["z"][0]]),
+            np.array([11.999, 14.999]),
+            atol=1e-15,
+            rtol=0.0,
+        )
+
+
 class TestGBMakerTriclinic(unittest.TestCase):
     def setUp(self):
         a0 = 3.61
