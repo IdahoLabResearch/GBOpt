@@ -508,6 +508,68 @@ class GBMaker:
             raise GBMakerValueError("basis_vector must have non-zero length.")
         return self.__epsilon / basis_length
 
+    def __scaled_periodic_basis_vector(
+        self, period_vector: np.ndarray, box_length: float, axis_index: int
+    ) -> np.ndarray:
+        """
+        Scale a periodic basis vector so one axis projection matches the box length.
+
+        :param period_vector: Cartesian periodic basis vector.
+        :param box_length: Desired box length along the selected axis.
+        :param axis_index: Axis whose projection should match ``box_length``.
+        :return: Scaled periodic basis vector.
+        """
+        raw_period_vector = np.asarray(period_vector)
+        if np.issubdtype(raw_period_vector.dtype, np.bool_):
+            raise GBMakerTypeError("period_vector must be a real length-3 vector.")
+        if np.iscomplexobj(raw_period_vector):
+            raise GBMakerTypeError("period_vector must be a real length-3 vector.")
+        if raw_period_vector.shape != (3,):
+            raise GBMakerValueError("period_vector must be a length-3 vector.")
+        if isinstance(box_length, (bool, np.bool_)):
+            raise GBMakerTypeError("box_length must be of type Number.")
+
+        try:
+            period_vector = np.asarray(period_vector, dtype=float)
+        except TypeError as exc:
+            raise GBMakerTypeError(
+                "period_vector must be a real length-3 vector."
+            ) from exc
+        except ValueError as exc:
+            raise GBMakerTypeError(
+                "period_vector must be a real length-3 vector."
+            ) from exc
+        if not np.all(np.isfinite(period_vector)):
+            raise GBMakerValueError("period_vector must contain only finite values.")
+
+        if not isinstance(axis_index, (int, np.integer)) or isinstance(axis_index, bool):
+            raise GBMakerValueError("axis_index must be 0, 1, or 2.")
+        try:
+            box_length = float(box_length)
+        except TypeError as exc:
+            raise GBMakerTypeError("box_length must be a real number.") from exc
+        except ValueError as exc:
+            raise GBMakerValueError("box_length must be of type Number.") from exc
+        if not np.isfinite(box_length):
+            raise GBMakerValueError("box_length must be finite.")
+        if box_length <= 0.0:
+            raise GBMakerValueError("box_length must be strictly positive.")
+        axis_index = int(axis_index)
+        if axis_index not in (0, 1, 2):
+            raise GBMakerValueError("axis_index must be 0, 1, or 2.")
+
+        axis_projection = period_vector[axis_index]
+        if not np.isfinite(axis_projection) or axis_projection == 0.0:
+            raise GBMakerValueError(
+                "period_vector must have a non-zero projection on the selected axis."
+            )
+
+        scale = box_length / axis_projection
+        scaled_vector = period_vector * scale
+        if not np.all(np.isfinite(scaled_vector)):
+            raise GBMakerValueError("Scaled periodic basis vector must be finite.")
+        return scaled_vector
+
     def __update_dims(self) -> None:
         """
         Updates the y_dim and z_dim parameters after a relevant parameter has been
