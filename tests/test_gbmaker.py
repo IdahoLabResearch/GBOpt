@@ -926,6 +926,193 @@ class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
         )
 
 
+class TestGBMakerDeduplicatePositions(unittest.TestCase):
+    def setUp(self):
+        self.gbm = object.__new__(GBMaker)
+        self.gbm._GBMaker__epsilon = 1e-10
+
+    def test_deduplicate_positions_preserves_first_occurrence_order(self):
+        atoms = np.array(
+            [
+                ("Cu", 0.0, 0.0, 0.0),
+                ("Cu", 1.0, 0.0, 0.0),
+                ("Cu", 0.0, 0.0, 0.0),
+                ("Cu", 2.0, 0.0, 0.0),
+                ("Cu", 1.0, 0.0, 0.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        deduplicated = self.gbm._GBMaker__deduplicate_positions(atoms)
+
+        self.assertEqual(len(deduplicated), 3)
+        np.testing.assert_allclose(
+            np.column_stack((deduplicated["x"], deduplicated["y"], deduplicated["z"])),
+            np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]]),
+            atol=1e-15,
+            rtol=0.0,
+        )
+
+    def test_deduplicate_positions_collapses_positions_within_epsilon(self):
+        eps = self.gbm._GBMaker__epsilon
+        atoms = np.array(
+            [
+                ("Cu", 0.0, 0.0, 0.0),
+                ("Cu", 0.4 * eps, 0.0, 0.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        deduplicated = self.gbm._GBMaker__deduplicate_positions(atoms)
+
+        self.assertEqual(len(deduplicated), 1)
+        np.testing.assert_allclose(
+            np.array([deduplicated["x"][0], deduplicated["y"][0], deduplicated["z"][0]]),
+            np.array([0.0, 0.0, 0.0]),
+            atol=1e-15,
+            rtol=0.0,
+        )
+
+    def test_deduplicate_positions_preserves_positions_above_epsilon(self):
+        eps = self.gbm._GBMaker__epsilon
+        atoms = np.array(
+            [
+                ("Cu", 0.0, 0.0, 0.0),
+                ("Cu", 1.6 * eps, 0.0, 0.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        deduplicated = self.gbm._GBMaker__deduplicate_positions(atoms)
+
+        self.assertEqual(len(deduplicated), 2)
+        np.testing.assert_allclose(
+            np.column_stack((deduplicated["x"], deduplicated["y"], deduplicated["z"])),
+            np.array([[0.0, 0.0, 0.0], [1.6 * eps, 0.0, 0.0]]),
+            atol=1e-15,
+            rtol=0.0,
+        )
+
+
+class TestGBMakerSelectAtomsInBoxBasis(unittest.TestCase):
+    def setUp(self):
+        self.gbm = object.__new__(GBMaker)
+        self.gbm._GBMaker__epsilon = 1e-10
+        self.gbm._GBMaker__y_dim = 12.0
+        self.gbm._GBMaker__z_dim = 15.0
+        self.x_bounds = np.array([0.0, 5.0])
+
+    def test_select_atoms_in_box_basis_removes_duplicate_periodic_faces_in_orthorhombic_box(self):
+        self.gbm._GBMaker__inplane_periodic = (True, True)
+        primitive_periods = np.array([[0.0, 3.0, 0.0], [0.0, 0.0, 5.0]])
+        atoms = np.array(
+            [
+                ("Cu", 1.0, 0.0, 7.5),
+                ("Cu", 1.0, 12.0, 7.5),
+                ("Cu", 1.0, 6.0, 0.0),
+                ("Cu", 1.0, 6.0, 15.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        selected = self.gbm._GBMaker__select_atoms_in_box_basis(
+            atoms, primitive_periods, self.x_bounds
+        )
+
+        self.assertEqual(len(selected), 2)
+        positions = np.column_stack((selected["x"], selected["y"], selected["z"]))
+        self.gbm._GBMaker__assert_unique_positions(positions)
+        np.testing.assert_allclose(
+            positions,
+            np.array([[1.0, 0.0, 7.5], [1.0, 6.0, 0.0]]),
+            atol=1e-12,
+            rtol=0.0,
+        )
+
+    def test_select_atoms_in_box_basis_keeps_one_tilted_periodic_representative_and_wraps_x(self):
+        self.gbm._GBMaker__inplane_periodic = (True, True)
+        primitive_periods = np.array([[2.0, 4.0, -1.0], [-3.0, 1.5, 5.0]])
+        box_basis = self.gbm._GBMaker__selection_basis_vectors(primitive_periods)
+        box_coordinates = np.array(
+            [
+                [4.0, 0.25, 0.5],
+                [-2.0, 1.25, 0.5],
+                [1.0, 0.5, 1.0],
+                [4.0, 1.25, 0.5],
+            ]
+        )
+        atoms = np.array(
+            [
+                ("Cu", *position)
+                for position in self.gbm._GBMaker__cartesian_from_box_coordinates(
+                    box_coordinates, box_basis
+                )
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        selected = self.gbm._GBMaker__select_atoms_in_box_basis(
+            atoms, primitive_periods, self.x_bounds
+        )
+
+        self.assertEqual(len(selected), 2)
+        positions = np.column_stack((selected["x"], selected["y"], selected["z"]))
+        self.gbm._GBMaker__assert_unique_positions(positions)
+        self.assertTrue(np.all(positions[:, 0] >= self.x_bounds[0] - self.gbm.epsilon))
+        self.assertTrue(np.all(positions[:, 0] < self.x_bounds[1]))
+        np.testing.assert_allclose(
+            np.sort(positions[:, 0]),
+            np.array([1.0, 4.0]),
+            atol=1e-12,
+            rtol=0.0,
+        )
+        reduced = self.gbm._GBMaker__reduced_box_coordinates(positions, box_basis)
+        y_tol = self.gbm._GBMaker__reduced_coordinate_tolerance(box_basis[0])
+        z_tol = self.gbm._GBMaker__reduced_coordinate_tolerance(box_basis[1])
+        self.assertTrue(np.all(reduced[:, 1] >= -y_tol))
+        self.assertTrue(np.all(reduced[:, 1] < 1.0 + y_tol))
+        self.assertTrue(np.all(reduced[:, 2] >= -z_tol))
+        self.assertTrue(np.all(reduced[:, 2] < 1.0 + z_tol))
+
+    def test_select_atoms_in_box_basis_handles_mixed_periodic_and_nonperiodic_axes(self):
+        self.gbm._GBMaker__inplane_periodic = (True, False)
+        primitive_periods = np.array([[2.0, 4.0, -1.0], [0.0, 0.0, 5.0]])
+        box_basis = self.gbm._GBMaker__selection_basis_vectors(primitive_periods)
+        box_coordinates = np.array(
+            [
+                [1.0, 0.0, -5e-11],
+                [4.0, 1.0, 0.0],
+                [1.0, 0.5, 15.0],
+                [5.5, 0.5, 0.0],
+            ]
+        )
+        atoms = np.array(
+            [
+                ("Cu", *position)
+                for position in self.gbm._GBMaker__cartesian_from_box_coordinates(
+                    box_coordinates, box_basis
+                )
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        selected = self.gbm._GBMaker__select_atoms_in_box_basis(
+            atoms, primitive_periods, self.x_bounds
+        )
+
+        self.assertEqual(len(selected), 2)
+        positions = np.column_stack((selected["x"], selected["y"], selected["z"]))
+        self.gbm._GBMaker__assert_unique_positions(positions)
+        self.assertTrue(np.all(positions[:, 0] >= self.x_bounds[0] - self.gbm.epsilon))
+        self.assertTrue(np.all(positions[:, 0] < self.x_bounds[1]))
+        reduced = self.gbm._GBMaker__reduced_box_coordinates(positions, box_basis)
+        self.assertTrue(np.all(reduced[:, 2] >= 0.0))
+        self.assertTrue(np.all(reduced[:, 2] < self.gbm._GBMaker__z_dim))
+        y_tol = self.gbm._GBMaker__reduced_coordinate_tolerance(box_basis[0])
+        self.assertTrue(np.all(reduced[:, 1] >= -y_tol))
+        self.assertTrue(np.all(reduced[:, 1] < 1.0 + y_tol))
+
+
 class TestGBMakerTriclinic(unittest.TestCase):
     def setUp(self):
         a0 = 3.61

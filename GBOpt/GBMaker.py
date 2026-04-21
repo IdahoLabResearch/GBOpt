@@ -743,7 +743,8 @@ class GBMaker:
             raise GBMakerValueError("x_bounds must be a length-2 array.")
 
         inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
-        inside_box = (atoms["x"] >= x_bounds[0] - self.__epsilon) & (atoms["x"] < x_bounds[1])
+        inside_box = (atoms["x"] >= x_bounds[0] -
+                      self.__epsilon) & (atoms["x"] < x_bounds[1])
 
         axis_names = ("y", "z")
         axis_dims = (self.__y_dim, self.__z_dim)
@@ -759,12 +760,112 @@ class GBMaker:
             if is_periodic:
                 continue
             clipped_atoms[axis_name] = np.where(
-                (clipped_atoms[axis_name] < 0.0) & (clipped_atoms[axis_name] >= -self.__epsilon),
+                (clipped_atoms[axis_name] < 0.0) & (
+                    clipped_atoms[axis_name] >= -self.__epsilon),
                 0.0,
                 clipped_atoms[axis_name],
             )
 
         return clipped_atoms
+
+    def __deduplicate_positions(self, atoms: np.ndarray) -> np.ndarray:
+        """
+        Reive duplicate atoms using epsilon-quantized Cartesian positions.
+        Keeps the first occurrence of each position.
+        """
+        if len(atoms) == 0:
+            return atoms
+
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        quantized = np.round(positions / self.__epsilon).astype(np.int64)
+        _, unique_indices = np.unique(quantized, axis=0, return_index=True)
+        deduplicated = atoms[np.sort(unique_indices)]
+        self.__assert_unique_positions(np.column_stack(
+            (deduplicated["x"], deduplicated["y"], deduplicated["z"])))
+        return deduplicated
+
+    def __select_atoms_in_box_basis(
+        self,
+        atoms: np.ndarray,
+        primitive_periods: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Select atoms using mixed box coordinates for in-plane boundary handling.
+
+        Periodic in-plane axes are filtered in reduced coordinates on the half-open
+        interval ``[0, 1)`` up to tolerance, wrapped back into the canonical cell, then
+        mapped back to Cartesian coordinates. Non-periodic axes remain Cartesian in the
+        mixed basis and are clipped against the box dimensions directly.
+
+        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Filtered structured atom array with wrapped in-plane coordinates.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+        if x_bounds.shape != (2,):
+            raise GBMakerValueError("x_bounds must be a length-2 array.")
+
+        selection_basis = self.__selection_basis_vectors(primitive_periods)
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        box_coordinates = self.__reduced_box_coordinates(positions, selection_basis)
+        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+
+        inside_box = np.ones(len(atoms), dtype=bool)
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for row_index, (axis_dim, is_periodic) in enumerate(
+            zip(axis_dims, inplane_periodic)
+        ):
+            reduced_axis = box_coordinates[:, row_index + 1]
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                inside_box &= (
+                    (reduced_axis >= -tol) & (reduced_axis < 1.0 + tol)
+                )
+            else:
+                inside_box &= (
+                    (reduced_axis >= -self.__epsilon) & (reduced_axis < axis_dim)
+                )
+
+        selected_atoms = atoms[inside_box].copy()
+        if len(selected_atoms) == 0:
+            return selected_atoms
+
+        selected_box_coordinates = box_coordinates[inside_box].copy()
+        for row_index, is_periodic in enumerate(inplane_periodic):
+            coordinate_index = row_index + 1
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                selected_box_coordinates[:, coordinate_index] = wrap_reduced_coordinate(
+                    selected_box_coordinates[:, coordinate_index],
+                    tol,
+                )
+                continue
+
+            selected_box_coordinates[:, coordinate_index] = np.where(
+                (
+                    (selected_box_coordinates[:, coordinate_index] < 0.0)
+                    & (selected_box_coordinates[:, coordinate_index] >= -self.__epsilon)
+                ),
+                0.0,
+                selected_box_coordinates[:, coordinate_index],
+            )
+
+        wrapped_positions = self.__cartesian_from_box_coordinates(
+            selected_box_coordinates, selection_basis
+        )
+        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = wrapped_positions.T
+
+        inside_x = (
+            (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
+            & (selected_atoms["x"] < x_bounds[1])
+        )
+        selected_atoms = selected_atoms[inside_x]
+        if len(selected_atoms) == 0:
+            return selected_atoms
+
+        return self.__deduplicate_positions(selected_atoms)
 
     def __update_dims(self) -> None:
         """
