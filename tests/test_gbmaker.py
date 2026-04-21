@@ -479,6 +479,35 @@ class TestGBMakerIntRotationHelpers(unittest.TestCase):
             self.assertLessEqual(err, 0.5)
 
 
+class TestGBMakerPeriodRowOrientationHelpers(unittest.TestCase):
+    def setUp(self):
+        a0 = 3.61
+        theta = math.radians(36.868698)
+        misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
+        self.gbm = GBMaker(
+            a0, "fcc", 10.0, misorientation, "Cu", interaction_distance=3.0
+        )
+
+    def test_orient_period_rows_preserves_aligned_rows(self):
+        R_grain = self.gbm._GBMaker__R_left
+        approx = self.gbm._GBMaker__approximate_rotation_matrix_as_int(R_grain)
+        oriented = self.gbm._GBMaker__orient_period_rows(R_grain, approx)
+
+        np.testing.assert_array_equal(oriented, approx)
+        self.assertFalse(np.shares_memory(approx, oriented))
+
+    def test_orient_period_rows_flips_antiparallel_rows(self):
+        R_grain = np.eye(3)
+        approx = np.array([[2, 0, 0], [0, -3, 0], [0, 0, -4]])
+
+        oriented = self.gbm._GBMaker__orient_period_rows(R_grain, approx)
+
+        np.testing.assert_array_equal(
+            oriented, np.array([[2, 0, 0], [0, 3, 0], [0, 0, 4]])
+        )
+        np.testing.assert_array_equal(approx, np.array([[2, 0, 0], [0, -3, 0], [0, 0, -4]]))
+
+
 class TestGBMakerTriclinic(unittest.TestCase):
     def setUp(self):
         a0 = 3.61
@@ -522,6 +551,98 @@ class TestGBMakerTriclinic(unittest.TestCase):
             self.assertIsNotNone(parent)
         finally:
             os.unlink(fname)
+
+    def test_orient_period_rows_wiring_feeds_triclinic_output(self):
+        cases = [
+            (
+                "left",
+                np.array([[2, 0, 0], [1, 3, 0], [4, 0, 5]], dtype=object),
+                np.array([[2, 0, 0], [1, 1, 0], [9, 0, 2]], dtype=object),
+            ),
+            (
+                "right",
+                np.array([[2, 0, 0], [1, 1, 0], [9, 0, 2]], dtype=object),
+                np.array([[2, 0, 0], [1, 3, 0], [4, 0, 5]], dtype=object),
+            ),
+        ]
+
+        def expected_tilt(R_grain, approx):
+            g_y = approx[1].astype(float)
+            g_z = approx[2].astype(float)
+            A2_lab = R_grain @ (g_y * self.gbm.a0)
+            A3_lab = R_grain @ (g_z * self.gbm.a0)
+            theta = -math.atan2(float(A2_lab[2]), float(A2_lab[1]))
+            ct, st = math.cos(theta), math.sin(theta)
+            return np.array(
+                [
+                    float(A2_lab[0]),
+                    float(A3_lab[0]),
+                    float(ct * A3_lab[1] - st * A3_lab[2]),
+                    theta,
+                ],
+                dtype=float,
+            )
+
+        for selected_branch, fake_left, fake_right in cases:
+            with self.subTest(selected_branch=selected_branch):
+                def fake_orient(_self, R_grain, approx):
+                    if np.allclose(R_grain, self.gbm._GBMaker__R_left):
+                        return fake_left.copy()
+                    if np.allclose(R_grain, self.gbm._GBMaker__R_right):
+                        return fake_right.copy()
+                    raise AssertionError(
+                        "Unexpected grain matrix passed to __orient_period_rows"
+                    )
+
+                with patch.object(
+                    GBMaker, "_GBMaker__orient_period_rows", autospec=True
+                ) as mock_orient:
+                    mock_orient.side_effect = fake_orient
+                    self.gbm.update_spacing(threshold=1e6)
+                    self.assertEqual(mock_orient.call_count, 2)
+
+                np.testing.assert_array_equal(
+                    self.gbm._GBMaker__R_left_approx, fake_left
+                )
+                np.testing.assert_array_equal(
+                    self.gbm._GBMaker__R_right_approx, fake_right
+                )
+
+                selected_R = (
+                    self.gbm._GBMaker__R_left
+                    if selected_branch == "left"
+                    else self.gbm._GBMaker__R_right
+                )
+                selected_approx = fake_left if selected_branch == "left" else fake_right
+                other_R = (
+                    self.gbm._GBMaker__R_right
+                    if selected_branch == "left"
+                    else self.gbm._GBMaker__R_left
+                )
+                other_approx = fake_right if selected_branch == "left" else fake_left
+
+                actual = np.array(self.gbm._GBMaker__get_triclinic_params(), dtype=float)
+                expected_selected = expected_tilt(selected_R, selected_approx)
+                expected_other = expected_tilt(other_R, other_approx)
+
+                np.testing.assert_allclose(
+                    actual, expected_selected, atol=1e-12, rtol=0.0
+                )
+                self.assertFalse(np.allclose(actual, expected_other, atol=1e-12, rtol=0.0))
+
+                with tempfile.NamedTemporaryFile(delete=True) as f:
+                    self.gbm.write_lammps(f.name, triclinic=True)
+                    with open(f.name) as fread:
+                        content = fread.readlines()
+
+                tilt_line = next(
+                    line.strip() for line in content if line.endswith("xy xz yz\n")
+                )
+                self.assertEqual(
+                    tilt_line,
+                    f"{expected_selected[0]:.6f} {expected_selected[1]:.6f} "
+                    f"{expected_selected[2]:.6f} xy xz yz",
+                )
 
 
 class TestGBMakerNonCommutingBoundaries(unittest.TestCase):

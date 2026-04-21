@@ -154,6 +154,26 @@ class GBMaker:
         cosine = np.dot(reference, candidate) / (ref_norm * cand_norm)
         return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
+    def __orient_period_rows(self, R_grain: np.ndarray, approx: np.ndarray) -> np.ndarray:
+        """
+        Orient approximate periodic rows to match the corresponding grain rows.
+
+        The integer approximation preserves row norms, but the sign of each row is
+        arbitrary. Flip any row whose direction is antiparallel to the matching float
+        row so the periodic basis remains consistently oriented.
+
+        :param R_grain: The grain rotation matrix in floating-point form.
+        :param approx: Integer approximation of the same matrix.
+        :return: A copy of ``approx`` with row signs oriented to ``R_grain``.
+        """
+        R_grain = np.asarray(R_grain, dtype=np.float64)
+        oriented = np.array(approx, copy=True)
+        for i, grain_row in enumerate(R_grain):
+            approx_row = np.asarray(oriented[i], dtype=np.float64)
+            if np.dot(grain_row, approx_row) < 0:
+                oriented[i] = -oriented[i]
+        return oriented
+
     # Private class methods
     def __approximate_rotation_row_as_int(
         self, row: np.ndarray, angle_tol_deg: float = 0.5, max_scale: int = 10000
@@ -273,6 +293,10 @@ class GBMaker:
             self.__R_left).astype(object)
         self.__R_right_approx = self.__approximate_rotation_matrix_as_int(
             self.__R_right).astype(object)
+        self.__R_left_approx = self.__orient_period_rows(
+            self.__R_left, self.__R_left_approx).astype(object)
+        self.__R_right_approx = self.__orient_period_rows(
+            self.__R_right, self.__R_right_approx).astype(object)
 
         # The periodic distance in each direction is the lattice parameter multiplied by
         # norm of the Miller indices in that direction. This is determined using the
