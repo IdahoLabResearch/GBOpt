@@ -310,6 +310,26 @@ class GBMaker:
             self.__right_grain = self.__right_grain[
                 self.__right_grain["x"] < right_bounds[1] - x_tol
             ]
+            # The two grains may have different interplanar x-spacings (asymmetric tilt,
+            # mixed tilt/twist, etc.), causing the periodic-edge gap to differ from the
+            # central GB gap. When the periodic gap is smaller, close-contact atom pairs
+            # form across the x boundary. Extend the trim to equalize the two gaps.
+            left_max_x = np.max(self.__left_grain["x"])
+            right_min_x = np.min(self.__right_grain["x"])
+            central_gap = right_min_x - left_max_x
+            left_min_x = np.min(self.__left_grain["x"])
+            right_max_x = np.max(self.__right_grain["x"])
+            periodic_gap = ((right_bounds[1] - right_max_x) +
+                            (left_min_x - left_bounds[0]))
+            if periodic_gap < central_gap - self.__epsilon:
+                self.__right_grain = self.__right_grain[
+                    self.__right_grain["x"] < right_bounds[1] - central_gap
+                ]
+            # When d_L < d_R (left grain denser in x), the periodic-edge gap equals d_R
+            # which exceeds central_gap, so the fix above does not fire. This leaves
+            # extra interfacial volume at the x periodic boundary. NPT simulations will
+            # relax it away; NVT or static calculations will have structurally
+            # inequivalent interfaces on the two sides of the bicrystal.
 
         self.__whole_system = np.hstack(
             (self.__left_grain, self.__right_grain))

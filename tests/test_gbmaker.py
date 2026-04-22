@@ -1398,6 +1398,60 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             gbm_no_vacuum.right_grain.shape[0],
         )
 
+    def test_asymmetric_trim_equalizes_periodic_and_central_gap(self):
+        """When d_R < d_L, the periodic-edge gap should be trimmed to match
+        the central GB gap, preventing close-contact atom pairs."""
+        a0 = 5.431
+        theta5 = 2 * np.arctan(1 / 3)
+        misorientation = np.array([theta5, 0, 0, 0, -np.arctan(1 / 2)])
+        kwargs = dict(atom_types="Si", interaction_distance=6.0,
+                      vacuum=0, repeat_factor=(2, 3))
+        gbm = GBMaker(a0, "diamond", 5.431, misorientation, **kwargs)
+        gb_thickness = 2 * max(gbm.spacing["x"]["left"], gbm.spacing["x"]["right"])
+        gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
+
+        central_gap = np.min(gbm.right_grain["x"]) - np.max(gbm.left_grain["x"])
+        periodic_gap = (
+            gbm.x_dim
+            - np.max(gbm.right_grain["x"])
+            + np.min(gbm.left_grain["x"])
+        )
+        self.assertAlmostEqual(
+            periodic_gap, central_gap, places=4,
+            msg=(
+                f"Periodic gap {periodic_gap:.6f} Å should equal central gap "
+                f"{central_gap:.6f} Å after asymmetric trim"
+            ),
+        )
+
+    def test_left_denser_grain_periodic_gap_exceeds_central(self):
+        """When d_L < d_R (left grain finer in x), the trim does not fire and
+        the periodic-edge gap is larger than the central GB gap (warning case)."""
+        a0 = 5.431
+        theta5 = 2 * np.arctan(1 / 3)
+        # Swapping orientations: phi = arctan(2/11) makes left grain (11,-2,0)
+        # and right grain (2,1,0), reversing the spacing ratio.
+        misorientation = np.array([-theta5, 0, 0, 0, np.arctan(2 / 11)])
+        kwargs = dict(atom_types="Si", interaction_distance=6.0,
+                      vacuum=0, repeat_factor=(2, 3))
+        gbm = GBMaker(a0, "diamond", 5.431, misorientation, **kwargs)
+        gb_thickness = 2 * max(gbm.spacing["x"]["left"], gbm.spacing["x"]["right"])
+        gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
+
+        central_gap = np.min(gbm.right_grain["x"]) - np.max(gbm.left_grain["x"])
+        periodic_gap = (
+            gbm.x_dim
+            - np.max(gbm.right_grain["x"])
+            + np.min(gbm.left_grain["x"])
+        )
+        self.assertGreater(
+            periodic_gap, central_gap,
+            msg=(
+                f"Periodic gap {periodic_gap:.6f} Å should exceed central gap "
+                f"{central_gap:.6f} Å when left grain is denser in x"
+            ),
+        )
+
 
 class TestGBMakerTriclinic(unittest.TestCase):
     def setUp(self):
