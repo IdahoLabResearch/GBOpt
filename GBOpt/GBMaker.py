@@ -790,7 +790,7 @@ class GBMaker:
 
         inplane_periodic = self.__inplane_periodic
         inside_box = (atoms["x"] >= x_bounds[0] -
-                      self.__epsilon) & (atoms["x"] < x_bounds[1])
+                      self.__epsilon) & (atoms["x"] < x_bounds[1] - self.__epsilon)
 
         axis_names = ("y", "z")
         axis_dims = (self.__y_dim, self.__z_dim)
@@ -903,7 +903,7 @@ class GBMaker:
 
         inside_x = (
             (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
-            & (selected_atoms["x"] < x_bounds[1])
+            & (selected_atoms["x"] < x_bounds[1] - self.epsilon)
         )
         selected_atoms = selected_atoms[inside_x]
         if len(selected_atoms) == 0:
