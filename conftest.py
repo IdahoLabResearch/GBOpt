@@ -11,3 +11,8 @@ def pytest_runtest_makereport(item, call):
         elif call.excinfo.typename != "AssertionError":
             warnings.warn(
                 f"Test {item.name} failed due to an unexpected error: {call.excinfo.value}", UserWarning)
+
+
+def pytest_warning_recorded(warning_message, when, nodeid, location):
+    print(
+        f"\n[WARNING in {nodeid}] {warning_message.category.__name__}: {warning_message.message}")
