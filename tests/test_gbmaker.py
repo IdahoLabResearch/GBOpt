@@ -1350,6 +1350,54 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             np.hstack((self.gbm.left_grain, self.gbm.right_grain)),
         )
 
+    def test_pbc_bicrystal_has_no_right_grain_atoms_at_x_boundary(self):
+        """Right-grain atoms within FP noise of x_dim are removed for vacuum=0,
+        preventing PBC overlap with left-grain atoms at x=0."""
+        a0 = 5.431
+        theta = np.radians(36.869898)
+        misorientation = np.array([theta, 0, 0, 0, -theta / 2])
+        kwargs = dict(
+            atom_types="Si",
+            interaction_distance=6.0,
+            vacuum=0,
+            repeat_factor=(2, 3),
+        )
+        gbm = GBMaker(a0, "diamond", 5.431, misorientation, **kwargs)
+        gb_thickness = 2 * max(gbm.spacing["x"]["left"], gbm.spacing["x"]["right"])
+        gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
+
+        x_span = gbm.spacing["x"]["right"]
+        n_planes = len(np.unique(np.round(gbm.right_grain["x"] / gbm.epsilon)))
+        d_hkl = x_span / n_planes
+
+        pbc_gap = gbm.x_dim - np.max(gbm.right_grain["x"])
+        self.assertGreater(
+            pbc_gap, d_hkl * 0.1,
+            f"Rightmost right-grain atom is {pbc_gap:.2e} Å from x_dim; "
+            f"expected gap > {d_hkl * 0.1:.4f} Å (0.1 * d_hkl = {d_hkl:.4f} Å)",
+        )
+
+    def test_pbc_boundary_filter_not_applied_with_nonzero_vacuum(self):
+        """Filter is skipped when vacuum exceeds first NN distance."""
+        a0 = 5.431
+        theta = np.radians(36.869898)
+        misorientation = np.array([theta, 0, 0, 0, -theta / 2])
+        kwargs = dict(
+            atom_types="Si",
+            interaction_distance=6.0,
+            repeat_factor=(2, 3),
+        )
+        gbm_vacuum = GBMaker(a0, "diamond", 5.431, misorientation,
+                             vacuum=10.0, **kwargs)
+        gbm_no_vacuum = GBMaker(a0, "diamond", 5.431,
+                                misorientation, vacuum=0, **kwargs)
+
+        # Vacuum boundary should have more atoms (the PBC filter is not applied)
+        self.assertGreater(
+            gbm_vacuum.right_grain.shape[0],
+            gbm_no_vacuum.right_grain.shape[0],
+        )
+
 
 class TestGBMakerTriclinic(unittest.TestCase):
     def setUp(self):

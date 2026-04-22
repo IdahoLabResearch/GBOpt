@@ -291,6 +291,26 @@ class GBMaker:
             self.__R_right_approx,
             right_bounds,
         )
+
+        # For PBC bicrystals (vacuum ~= 0), exclude right-grain atoms that are within
+        # floating-point noise of x_dim and would overlap with left-grain atoms at x=0
+        # in the periodic image.
+        first_nn = min(self.__unit_cell.ideal_bond_lengths.values())
+        if self.__vacuum_thickness < first_nn:
+            # x_tol must sit between floating point noise (~1e-8 angstroms) and the
+            # interplanar spacing d_hkl (the thinnest crystal layer, ~0.1-1 angstroms
+            # for common boundaries). Using 1e-3 * d_hkl places it three orders of
+            # magnitude below the thinnest interplanar spacing, well clear of machine
+            # noise.
+            x_span = right_bounds[1] - right_bounds[0]
+            n_planes = len(
+                np.unique(np.round(self.__right_grain["x"] / self.__epsilon)))
+            d_hkl = x_span / n_planes
+            x_tol = d_hkl * 1e-3
+            self.__right_grain = self.__right_grain[
+                self.__right_grain["x"] < right_bounds[1] - x_tol
+            ]
+
         self.__whole_system = np.hstack(
             (self.__left_grain, self.__right_grain))
 
@@ -903,7 +923,7 @@ class GBMaker:
 
         inside_x = (
             (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
-            & (selected_atoms["x"] < x_bounds[1] - self.epsilon)
+            & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
         )
         selected_atoms = selected_atoms[inside_x]
         if len(selected_atoms) == 0:
