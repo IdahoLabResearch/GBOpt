@@ -169,22 +169,6 @@ class TestGBMaker(unittest.TestCase):
 
         self.assertAlmostEqual(tol, 4e-9, delta=1e-18)
 
-    def test_reduced_coordinate_tolerance_rejects_zero_length_basis_vector(self):
-        with self.assertRaises(GBMakerValueError):
-            self.gbm._GBMaker__reduced_coordinate_tolerance(np.zeros(3))
-
-    def test_reduced_coordinate_tolerance_rejects_non_finite_basis_vectors(self):
-        for basis_vector in (
-            np.array([np.nan, 0.0, 0.0]),
-            np.array([np.inf, 0.0, 0.0]),
-            np.array([-np.inf, 0.0, 0.0]),
-            np.array([1.0, np.nan, 2.0]),
-            np.array([1.0, np.inf, 2.0]),
-        ):
-            with self.subTest(basis_vector=basis_vector):
-                with self.assertRaises(GBMakerValueError):
-                    self.gbm._GBMaker__reduced_coordinate_tolerance(basis_vector)
-
     # Tests for additional getters
     def test_additional_getters(self):
         self.assertGreater(self.gbm.y_dim, 0)
@@ -619,20 +603,6 @@ class TestGBMakerScaledPeriodicBasisVector(unittest.TestCase):
                 np.array([1.0, 2.0, 0.0]), 10.0, 2
             )
 
-    def test_scaled_periodic_basis_vector_rejects_invalid_axis_index(self):
-        with self.assertRaises(GBMakerValueError):
-            self.gbm._GBMaker__scaled_periodic_basis_vector(
-                np.array([1.0, 2.0, 3.0]), 10.0, 3
-            )
-
-    def test_scaled_periodic_basis_vector_rejects_non_integral_axis_index_types(self):
-        for axis_index in (np.float64(1.0), True):
-            with self.subTest(axis_index=axis_index):
-                with self.assertRaises(GBMakerValueError):
-                    self.gbm._GBMaker__scaled_periodic_basis_vector(
-                        np.array([1.0, 2.0, 3.0]), 10.0, axis_index
-                    )
-
     def test_scaled_periodic_basis_vector_accepts_numpy_integer_axis_index(self):
         scaled = self.gbm._GBMaker__scaled_periodic_basis_vector(
             np.array([1.0, 2.0, 3.0]), 10.0, np.int64(1)
@@ -658,63 +628,16 @@ class TestGBMakerScaledPeriodicBasisVector(unittest.TestCase):
                         np.array([1.0, 2.0, 3.0]), box_length, 0
                     )
 
-    def test_scaled_periodic_basis_vector_rejects_boolean_box_length(self):
-        for box_length in (True, np.bool_(True)):
-            with self.subTest(box_length=box_length):
-                with self.assertRaises(GBMakerTypeError):
-                    self.gbm._GBMaker__scaled_periodic_basis_vector(
-                        np.array([1.0, 2.0, 3.0]), box_length, 0
-                    )
-
-    def test_scaled_periodic_basis_vector_rejects_complex_box_length(self):
-        with self.assertRaises(GBMakerTypeError):
+    def test_scaled_periodic_basis_vector_rejects_nan_in_period_vector(self):
+        with self.assertRaises(GBMakerValueError):
             self.gbm._GBMaker__scaled_periodic_basis_vector(
-                np.array([1.0, 2.0, 3.0]), 10.0 + 0.0j, 0
-            )
-
-    def test_scaled_periodic_basis_vector_rejects_invalid_vectors(self):
-        invalid_vectors = (
-            np.array([np.nan, 1.0, 1.0]),
-            np.array([1.0, 2.0]),
-        )
-
-        for period_vector in invalid_vectors:
-            with self.subTest(period_vector=period_vector):
-                with self.assertRaises(GBMakerValueError):
-                    self.gbm._GBMaker__scaled_periodic_basis_vector(
-                        period_vector, 10.0, 0
-                    )
-
-    def test_scaled_periodic_basis_vector_rejects_non_numeric_period_vector(self):
-        with self.assertRaises(GBMakerTypeError):
-            self.gbm._GBMaker__scaled_periodic_basis_vector(
-                np.array(["a", "b", "c"]), 10.0, 0
+                np.array([np.nan, 1.0, 1.0]), 10.0, 0
             )
 
     def test_scaled_periodic_basis_vector_rejects_non_finite_scaled_vector(self):
         with self.assertRaises(GBMakerValueError):
             self.gbm._GBMaker__scaled_periodic_basis_vector(
                 np.array([1e-308, 1e308, 0.0]), 1e308, 0
-            )
-
-    def test_scaled_periodic_basis_vector_rejects_boolean_period_vector(self):
-        for period_vector in (True, np.bool_(True)):
-            with self.subTest(period_vector=period_vector):
-                with self.assertRaises(GBMakerTypeError):
-                    self.gbm._GBMaker__scaled_periodic_basis_vector(
-                        period_vector, 10.0, 0
-                    )
-
-    def test_scaled_periodic_basis_vector_rejects_complex_array_like_period_vector(self):
-        with self.assertRaises(GBMakerTypeError):
-            self.gbm._GBMaker__scaled_periodic_basis_vector(
-                np.array([1.0 + 0.0j, 2.0, 3.0]), 10.0, 0
-            )
-
-    def test_scaled_periodic_basis_vector_rejects_boolean_array_like_period_vector(self):
-        with self.assertRaises(GBMakerTypeError):
-            self.gbm._GBMaker__scaled_periodic_basis_vector(
-                np.array([True, False, True]), 10.0, 0
             )
 
 

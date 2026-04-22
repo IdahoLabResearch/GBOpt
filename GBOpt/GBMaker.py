@@ -118,8 +118,6 @@ class GBMaker:
         self.__update_dims()
 
         self.__radius = a0 * self.__unit_cell.radius  # atom radius
-        self.__generate_gb()
-        self.__set_gb_region()
         self.__box_dims = self.__calculate_box_dimensions()
 
     @staticmethod
@@ -168,7 +166,7 @@ class GBMaker:
         :return: A copy of ``approx`` with row signs oriented to ``R_grain``.
         """
         R_grain = np.asarray(R_grain, dtype=np.float64)
-        oriented = np.array(approx, copy=True)
+        oriented = np.array(approx)
         for i, grain_row in enumerate(R_grain):
             approx_row = np.asarray(oriented[i], dtype=np.float64)
             if np.dot(grain_row, approx_row) < 0:
@@ -352,7 +350,6 @@ class GBMaker:
         )
 
         inplane_periodic = []
-        warnings.simplefilter("once", UserWarning)
         for key, val in spacing.items():
             if key == 'x':
                 continue
@@ -361,7 +358,6 @@ class GBMaker:
             if not is_periodic:
                 spacing[key] = threshold
                 warnings.warn(f"Resulting boundary is non-periodic along {key}.")
-        warnings.simplefilter("default", UserWarning)
         self.__inplane_periodic = tuple(inplane_periodic)
 
         return spacing
@@ -377,7 +373,7 @@ class GBMaker:
         :return: (xy, xz, yz, theta) - the three tilt scalars and the rotation angle to
                                        apply to atom coordinates
         """
-        if not all(getattr(self, "_GBMaker__inplane_periodic", (True, True))):
+        if not all(self.__inplane_periodic):
             raise GBMakerValueError(
                 "Triclinic output requires periodic y and z directions."
             )
@@ -436,10 +432,6 @@ class GBMaker:
         :return: Structured atom array for the selected grain.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
-        if x_bounds.shape != (2,):
-            raise GBMakerValueError("x_bounds must be a length-2 array.")
-        if x_bounds[1] <= x_bounds[0]:
-            raise GBMakerValueError("x_bounds must satisfy x_max > x_min.")
 
         rotated_unit_cell_basis = self.__unit_cell.conventional @ R_grain.T
         primitive_periods = np.asarray(R_grain_approx[1:], dtype=np.float64)
@@ -459,7 +451,7 @@ class GBMaker:
 
         selection_box_basis = self.__selection_basis_vectors(primitive_periods).copy()
         axis_dims = (self.__y_dim, self.__z_dim)
-        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inplane_periodic = self.__inplane_periodic
         for row_index, (is_periodic, axis_dim) in enumerate(
             zip(inplane_periodic, axis_dims)
         ):
@@ -538,8 +530,7 @@ class GBMaker:
         """
         basis_vector = np.asarray(basis_vector, dtype=np.float64)
         basis_length = np.linalg.norm(basis_vector)
-        if basis_length <= 0.0 or not np.isfinite(basis_length):
-            raise GBMakerValueError("basis_vector must have non-zero length.")
+
         return self.__epsilon / basis_length
 
     def __scaled_periodic_basis_vector(
@@ -553,55 +544,17 @@ class GBMaker:
         :param axis_index: Axis whose projection should match ``box_length``.
         :return: Scaled periodic basis vector.
         """
-        raw_period_vector = np.asarray(period_vector)
-        if np.issubdtype(raw_period_vector.dtype, np.bool_):
-            raise GBMakerTypeError("period_vector must be a real length-3 vector.")
-        if np.iscomplexobj(raw_period_vector):
-            raise GBMakerTypeError("period_vector must be a real length-3 vector.")
-        if raw_period_vector.shape != (3,):
-            raise GBMakerValueError("period_vector must be a length-3 vector.")
-        if isinstance(box_length, (bool, np.bool_)):
-            raise GBMakerTypeError("box_length must be of type Number.")
 
-        try:
-            period_vector = np.asarray(period_vector, dtype=float)
-        except TypeError as exc:
-            raise GBMakerTypeError(
-                "period_vector must be a real length-3 vector."
-            ) from exc
-        except ValueError as exc:
-            raise GBMakerTypeError(
-                "period_vector must be a real length-3 vector."
-            ) from exc
-        if not np.all(np.isfinite(period_vector)):
-            raise GBMakerValueError("period_vector must contain only finite values.")
-
-        if not isinstance(axis_index, (int, np.integer)) or isinstance(axis_index, bool):
-            raise GBMakerValueError("axis_index must be 0, 1, or 2.")
-        try:
-            box_length = float(box_length)
-        except TypeError as exc:
-            raise GBMakerTypeError("box_length must be a real number.") from exc
-        except ValueError as exc:
-            raise GBMakerValueError("box_length must be of type Number.") from exc
-        if not np.isfinite(box_length):
-            raise GBMakerValueError("box_length must be finite.")
+        period_vector = np.asarray(period_vector, dtype=np.float64)
+        box_length = float(box_length)
         if box_length <= 0.0:
             raise GBMakerValueError("box_length must be strictly positive.")
         axis_index = int(axis_index)
-        if axis_index not in (0, 1, 2):
-            raise GBMakerValueError("axis_index must be 0, 1, or 2.")
-
-        axis_projection = period_vector[axis_index]
-        if not np.isfinite(axis_projection) or axis_projection == 0.0:
-            raise GBMakerValueError(
-                "period_vector must have a non-zero projection on the selected axis."
-            )
 
         # We ignore overflow/invalid values because the check immediately after catches
         # those states and raises a GBMakerValueError
-        with np.errstate(over='ignore', invalid='ignore'):
-            scale = box_length / axis_projection
+        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+            scale = box_length / period_vector[axis_index]
             scaled_vector = period_vector * scale
         if not np.all(np.isfinite(scaled_vector)):
             raise GBMakerValueError("Scaled periodic basis vector must be finite.")
@@ -615,10 +568,8 @@ class GBMaker:
         :return: 2x3 array containing the box basis vectors for y and z.
         """
         primitive_periods = np.asarray(primitive_periods, dtype=np.float64)
-        if primitive_periods.shape != (2, 3):
-            raise GBMakerValueError("primitive_periods must be a 2x3 array.")
 
-        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inplane_periodic = self.__inplane_periodic
         box_lengths = (self.__y_dim, self.__z_dim)
         box_basis = np.zeros((2, 3), dtype=np.float64)
 
@@ -652,7 +603,7 @@ class GBMaker:
         :return: 2x3 array containing the y/z selection basis vectors.
         """
         selection_basis = self.__box_periodic_basis(primitive_periods)
-        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inplane_periodic = self.__inplane_periodic
 
         for row_index, is_periodic in enumerate(inplane_periodic):
             if is_periodic:
@@ -687,24 +638,6 @@ class GBMaker:
             rotated_unit_cell_basis, dtype=np.float64
         )
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
-
-        if primitive_periods.shape != (2, 3):
-            raise GBMakerValueError("primitive_periods must be a 2x3 array.")
-        if rotated_unit_cell_basis.shape != (3, 3):
-            raise GBMakerValueError("rotated_unit_cell_basis must be a 3x3 array.")
-        if x_bounds.shape != (2,):
-            raise GBMakerValueError("x_bounds must be a length-2 array.")
-        if not np.all(np.isfinite(primitive_periods)):
-            raise GBMakerValueError(
-                "primitive_periods must contain only finite values.")
-        if not np.all(np.isfinite(rotated_unit_cell_basis)):
-            raise GBMakerValueError(
-                "rotated_unit_cell_basis must contain only finite values."
-            )
-        if not np.all(np.isfinite(x_bounds)):
-            raise GBMakerValueError("x_bounds must contain only finite values.")
-        if x_bounds[1] <= x_bounds[0]:
-            raise GBMakerValueError("x_bounds must satisfy x_max > x_min.")
 
         determinant = np.linalg.det(rotated_unit_cell_basis)
         if np.isclose(determinant, 0.0, atol=self.__epsilon, rtol=0.0):
@@ -774,8 +707,6 @@ class GBMaker:
         :raises GBMakerValueError: If any two positions map to the same quantized cell.
         """
         positions = np.asarray(positions, dtype=np.float64)
-        if positions.ndim != 2 or positions.shape[1] != 3:
-            raise GBMakerValueError("positions must be an Nx3 array.")
         if len(positions) == 0:
             return
         quantized = np.round(positions / self.__epsilon).astype(np.int64)
@@ -799,19 +730,6 @@ class GBMaker:
         """
         cartesian_coordinates = np.asarray(cartesian_coordinates, dtype=np.float64)
         box_basis = np.asarray(box_basis, dtype=np.float64)
-
-        if cartesian_coordinates.shape[-1] != 3:
-            raise GBMakerValueError(
-                "cartesian_coordinates must have a trailing dimension of length 3."
-            )
-        if box_basis.shape != (2, 3):
-            raise GBMakerValueError("box_basis must be a 2x3 array.")
-        if not np.all(np.isfinite(cartesian_coordinates)):
-            raise GBMakerValueError(
-                "cartesian_coordinates must contain only finite values."
-            )
-        if not np.all(np.isfinite(box_basis)):
-            raise GBMakerValueError("box_basis must contain only finite values.")
 
         yz_basis = box_basis[:, 1:].T
         determinant = np.linalg.det(yz_basis)
@@ -844,17 +762,6 @@ class GBMaker:
         box_coordinates = np.asarray(box_coordinates, dtype=np.float64)
         box_basis = np.asarray(box_basis, dtype=np.float64)
 
-        if box_coordinates.shape[-1] != 3:
-            raise GBMakerValueError(
-                "box_coordinates must have a trailing dimension of length 3."
-            )
-        if box_basis.shape != (2, 3):
-            raise GBMakerValueError("box_basis must be a 2x3 array.")
-        if not np.all(np.isfinite(box_coordinates)):
-            raise GBMakerValueError("box_coordinates must contain only finite values.")
-        if not np.all(np.isfinite(box_basis)):
-            raise GBMakerValueError("box_basis must contain only finite values.")
-
         cartesian_coordinates = np.array(box_coordinates, copy=True)
         cartesian_coordinates[..., 0] += np.tensordot(
             box_coordinates[..., 1:], box_basis[:, 0], axes=([-1], [0])
@@ -880,10 +787,8 @@ class GBMaker:
             non-periodic axes.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
-        if x_bounds.shape != (2,):
-            raise GBMakerValueError("x_bounds must be a length-2 array.")
 
-        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inplane_periodic = self.__inplane_periodic
         inside_box = (atoms["x"] >= x_bounds[0] -
                       self.__epsilon) & (atoms["x"] < x_bounds[1])
 
@@ -945,13 +850,11 @@ class GBMaker:
         :return: Filtered structured atom array with wrapped in-plane coordinates.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
-        if x_bounds.shape != (2,):
-            raise GBMakerValueError("x_bounds must be a length-2 array.")
 
         selection_basis = self.__selection_basis_vectors(primitive_periods)
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         box_coordinates = self.__reduced_box_coordinates(positions, selection_basis)
-        inplane_periodic = getattr(self, "_GBMaker__inplane_periodic", (True, True))
+        inplane_periodic = self.__inplane_periodic
 
         inside_box = np.ones(len(atoms), dtype=bool)
         axis_dims = (self.__y_dim, self.__z_dim)
@@ -1392,11 +1295,15 @@ class GBMaker:
 
     @vacuum_thickness.setter
     def vacuum_thickness(self, value: Number):
+        old_vacuum = self.__vacuum_thickness
         self.__vacuum_thickness = self.__validate(
             value, Number, "vacuum_thickness", positive=True
         )
-        self.__generate_gb()
-        self.__set_gb_region()
+        delta = self.__vacuum_thickness - old_vacuum
+        self.__left_grain["x"] += delta
+        self.__right_grain["x"] += delta
+        self.__whole_system["x"] += delta
+        self.__gb_region["x"] += delta
         self.__box_dims = self.__calculate_box_dimensions()
 
     @property
@@ -1450,16 +1357,3 @@ class GBMaker:
     @property
     def z_dim(self) -> float:
         return self.__z_dim
-
-
-if __name__ == "__main__":
-    theta = math.radians(36.869898)
-    G = GBMaker(
-        a0=3.61,
-        structure="fcc",
-        gb_thickness=10.0,
-        misorientation=[theta, 0, 0, 0, -theta / 2],
-        repeat_factor=[3, 9],
-    )
-    G.write_lammps(np.vstack((G.left_grain, G.right_grain)),
-                   G.box_dims, "test1.dat")

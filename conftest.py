@@ -2,8 +2,6 @@
 
 import warnings
 
-import pytest
-
 
 def pytest_runtest_makereport(item, call):
     if "known_bug" in item.keywords:
@@ -15,10 +13,6 @@ def pytest_runtest_makereport(item, call):
                 f"Test {item.name} failed due to an unexpected error: {call.excinfo.value}", UserWarning)
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_call(item):
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        yield
-    for w in caught:
-        print(f"\n[WARNING in {item.nodeid}] {w.category.__name__}: {w.message}")
+def pytest_warning_recorded(warning_message, when, nodeid, location):
+    print(
+        f"\n[WARNING in {nodeid}] {warning_message.category.__name__}: {warning_message.message}")
