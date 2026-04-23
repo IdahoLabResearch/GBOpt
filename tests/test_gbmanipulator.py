@@ -2,6 +2,7 @@
 
 import filecmp
 import math
+import os
 import tempfile
 import unittest
 import warnings
@@ -462,18 +463,15 @@ class TestParent(unittest.TestCase):
         self.assertEqual(parent.y_dim, self.GB.y_dim)
         self.assertEqual(parent.z_dim, self.GB.z_dim)
 
-        left_x_max = max(parent.left_grain['x'])
-        right_x_min = min(parent.right_grain['x'])
-        left_cut = left_x_max - parent.gb_thickness / 2.0
-        right_cut = right_x_min + parent.gb_thickness / 2.0
-        left_gb_indices = parent.left_grain['x'] > left_cut
-        right_gb_indices = parent.right_grain['x'] < right_cut
-        left_gb = parent.left_grain[left_gb_indices]
-        right_gb = parent.right_grain[right_gb_indices]
-        self.assertTrue(all(parent.gb_atoms == np.hstack((left_gb, right_gb))))
-        self.assertTrue(all(parent.left_grain == self.GB.left_grain))
-        self.assertTrue(all(parent.right_grain == self.GB.right_grain))
-        self.assertTrue(all(parent.whole_system == self.GB.whole_system))
+        x_gb = parent._Parent__gb_plane_x
+        left_cut = x_gb - parent.gb_thickness / 2.0
+        right_cut = x_gb + parent.gb_thickness / 2.0
+        left_gb = parent.left_grain[parent.left_grain["x"] > left_cut]
+        right_gb = parent.right_grain[parent.right_grain["x"] < right_cut]
+        np.testing.assert_array_equal(parent.gb_atoms, np.hstack((left_gb, right_gb)))
+        np.testing.assert_array_equal(parent.left_grain, self.GB.left_grain)
+        np.testing.assert_array_equal(parent.right_grain, self.GB.right_grain)
+        np.testing.assert_array_equal(parent.whole_system, self.GB.whole_system)
         self.assertEqual(parent.unit_cell, self.GB.unit_cell)
 
     def test_parent_snapshot_init_errors(self):
@@ -556,6 +554,58 @@ class TestParent(unittest.TestCase):
         with self.assertRaises(ParentValueError):
             _ = Parent("tests/inputs/file_too_short.txt",
                        unit_cell=self.unit_cell, gb_thickness=20)
+
+
+class TestParentGBRegion(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        theta = 2 * np.arctan(1 / 3)
+        mis = np.array([theta, 0, 0, np.pi / 4, -np.arctan(1 / np.sqrt(2))])
+        kwargs = dict(atom_types="Si", interaction_distance=6.0,
+                      vacuum=0, repeat_factor=(2, 3))
+        probe = GBMaker(5.431, "diamond", 5.431, mis, **kwargs)
+        gb_thickness = 2 * max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
+        cls.gbm = GBMaker(5.431, "diamond", gb_thickness, mis, **kwargs)
+        cls.parent = Parent(cls.gbm)
+        cls.d_hkl = max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
+
+    def test_gb_indices_lie_within_symmetric_window(self):
+        parent = self.parent
+        x_gb = parent._Parent__gb_plane_x
+        half = parent.gb_thickness / 2.0
+        xs = parent.whole_system["x"][parent.gb_indices]
+        self.assertGreater(len(xs), 0)
+        self.assertTrue(np.all(xs > x_gb - half))
+        self.assertTrue(np.all(xs < x_gb + half))
+
+    def test_gb_plane_x_from_gbmaker_matches_source(self):
+        self.assertAlmostEqual(self.parent._Parent__gb_plane_x,
+                               self.gbm.gb_plane_x, places=10)
+
+    def test_file_path_gb_plane_x_near_gbmaker_value(self):
+        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as f:
+            path = f.name
+        try:
+            self.gbm.write_lammps(path, type_as_int=True)
+            unit_cell = UnitCell()
+            unit_cell.init_by_structure("diamond", 5.431, "Si")
+            parent_file = Parent(path, unit_cell=unit_cell,
+                                 gb_thickness=self.gbm.gb_thickness)
+            self.assertAlmostEqual(
+                parent_file._Parent__gb_plane_x, self.gbm.gb_plane_x,
+                delta=self.d_hkl,
+                msg="File-path gb_plane_x should be within one d_hkl of GBMaker value"
+            )
+        finally:
+            os.remove(path)
+
+    def test_gbpos_atoms_lie_within_gb_indices_window(self):
+        parent = self.parent
+        x_gb = parent._Parent__gb_plane_x
+        half = parent.gb_thickness / 2.0
+        gbpos_xs = parent._Parent__GBpos["x"]
+        self.assertTrue(np.all(gbpos_xs >= x_gb - half))
+        self.assertTrue(np.all(gbpos_xs <= x_gb + half))
 
 
 class TestParentProxy(unittest.TestCase):

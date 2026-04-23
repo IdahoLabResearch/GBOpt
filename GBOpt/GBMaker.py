@@ -27,6 +27,27 @@ class GBMakerValueError(GBMakerError):
     pass
 
 
+def wrap_reduced_coordinate(reduced_coord: np.ndarray, tol: float) -> np.ndarray:
+    """
+    Wrap reduced coordinates into [0, 1) and snap both periodic faces to 0.
+
+    :param reduced_coord: Reduced coordinates to wrap.
+    :param tol: Tolerance in reduced-coordinate units.
+    :return: Wrapped reduced coordinates in [0, 1).
+    """
+    if not math.isfinite(tol):
+        raise GBMakerValueError("Reduced-coordinate tolerance must be finite.")
+    if tol < 0:
+        raise GBMakerValueError("Reduced-coordinate tolerance must be non-negative.")
+
+    wrapped = np.mod(np.asarray(reduced_coord, dtype=np.float64), 1.0)
+    return np.where(
+        (wrapped < tol) | ((1.0 - wrapped) < tol),
+        0.0,
+        wrapped,
+    )
+
+
 class GBMaker:
     """
     Class to create a GB structure based on user defined parameters. The GB normal is
@@ -90,14 +111,13 @@ class GBMaker:
             interaction_distance, Number, "interaction_distance", positive=True
         )
         self.__id = self.__validate(gb_id, int, "id", positive=True)
+        self.__inplane_periodic = (True, True)
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
         self.__update_dims()
 
         self.__radius = a0 * self.__unit_cell.radius  # atom radius
-        self.__generate_gb()
-        self.__set_gb_region()
         self.__box_dims = self.__calculate_box_dimensions()
 
     @staticmethod
@@ -132,6 +152,26 @@ class GBMaker:
             return 180.0
         cosine = np.dot(reference, candidate) / (ref_norm * cand_norm)
         return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+    def __orient_period_rows(self, R_grain: np.ndarray, approx: np.ndarray) -> np.ndarray:
+        """
+        Orient approximate periodic rows to match the corresponding grain rows.
+
+        The integer approximation preserves row norms, but the sign of each row is
+        arbitrary. Flip any row whose direction is antiparallel to the matching float
+        row so the periodic basis remains consistently oriented.
+
+        :param R_grain: The grain rotation matrix in floating-point form.
+        :param approx: Integer approximation of the same matrix.
+        :return: A copy of ``approx`` with row signs oriented to ``R_grain``.
+        """
+        R_grain = np.asarray(R_grain, dtype=np.float64)
+        oriented = np.array(approx)
+        for i, grain_row in enumerate(R_grain):
+            approx_row = np.asarray(oriented[i], dtype=np.float64)
+            if np.dot(grain_row, approx_row) < 0:
+                oriented[i] = -oriented[i]
+        return oriented
 
     # Private class methods
     def __approximate_rotation_row_as_int(
@@ -227,8 +267,70 @@ class GBMaker:
         """
         Private method to calculate the left grain, right grain, and whole GB system
         """
-        self.__left_grain = self.__generate_left_grain()
-        self.__right_grain = self.__generate_right_grain()
+        left_bounds = np.array(
+            [
+                self.__vacuum_thickness,
+                self.__left_x + self.__vacuum_thickness,
+            ],
+            dtype=np.float64,
+        )
+        right_bounds = np.array(
+            [
+                self.__left_x + self.__vacuum_thickness,
+                self.__x_dim + self.__vacuum_thickness,
+            ],
+            dtype=np.float64,
+        )
+        self.__left_grain = self.__generate_grain(
+            self.__R_left,
+            self.__R_left_approx,
+            left_bounds,
+        )
+        self.__right_grain = self.__generate_grain(
+            self.__R_right,
+            self.__R_right_approx,
+            right_bounds,
+        )
+
+        # For PBC bicrystals (vacuum ~= 0), exclude right-grain atoms that are within
+        # floating-point noise of x_dim and would overlap with left-grain atoms at x=0
+        # in the periodic image.
+        first_nn = min(self.__unit_cell.ideal_bond_lengths.values())
+        if self.__vacuum_thickness < first_nn:
+            # x_tol must sit between floating point noise (~1e-8 angstroms) and the
+            # interplanar spacing d_hkl (the thinnest crystal layer, ~0.1-1 angstroms
+            # for common boundaries). Using 1e-3 * d_hkl places it three orders of
+            # magnitude below the thinnest interplanar spacing, well clear of machine
+            # noise.
+            x_span = right_bounds[1] - right_bounds[0]
+            n_planes = len(
+                np.unique(np.round(self.__right_grain["x"] / self.__epsilon)))
+            d_hkl = x_span / n_planes
+            x_tol = d_hkl * 1e-3
+            self.__right_grain = self.__right_grain[
+                self.__right_grain["x"] < right_bounds[1] - x_tol
+            ]
+            # The two grains may have different interplanar x-spacings (asymmetric tilt,
+            # mixed tilt/twist, etc.), causing the periodic-edge gap to differ from the
+            # central GB gap. When the periodic gap is smaller, close-contact atom pairs
+            # form across the x boundary. Extend the trim to equalize the two gaps.
+            left_max_x = np.max(self.__left_grain["x"])
+            right_min_x = np.min(self.__right_grain["x"])
+            central_gap = right_min_x - left_max_x
+            left_min_x = np.min(self.__left_grain["x"])
+            right_max_x = np.max(self.__right_grain["x"])
+            periodic_gap = ((right_bounds[1] - right_max_x) +
+                            (left_min_x - left_bounds[0]))
+            if periodic_gap < central_gap - self.__epsilon:
+                self.__right_grain = self.__right_grain[
+                    self.__right_grain["x"] < right_bounds[1] - central_gap
+                ]
+            # When d_L < d_R (left grain denser in x), the periodic-edge gap equals d_R
+            # which exceeds central_gap, so the fix above does not fire. This leaves
+            # extra interfacial volume at the x periodic boundary. NPT simulations will
+            # relax it away; NVT or static calculations will have structurally
+            # inequivalent interfaces on the two sides of the bicrystal.
+
         self.__whole_system = np.hstack(
             (self.__left_grain, self.__right_grain))
 
@@ -252,6 +354,10 @@ class GBMaker:
             self.__R_left).astype(object)
         self.__R_right_approx = self.__approximate_rotation_matrix_as_int(
             self.__R_right).astype(object)
+        self.__R_left_approx = self.__orient_period_rows(
+            self.__R_left, self.__R_left_approx).astype(object)
+        self.__R_right_approx = self.__orient_period_rows(
+            self.__R_right, self.__R_right_approx).astype(object)
 
         # The periodic distance in each direction is the lattice parameter multiplied by
         # norm of the Miller indices in that direction. This is determined using the
@@ -275,6 +381,11 @@ class GBMaker:
             self.__x_dim_min / spacing["x"]["left"]) * spacing["x"]["left"]
         self.__right_x = math.ceil(
             self.__x_dim_min / spacing["x"]["right"]) * spacing["x"]["right"]
+        target = max(self.__left_x, self.__right_x)
+        self.__left_x = math.ceil(
+            target / spacing["x"]["left"] - self.__epsilon) * spacing["x"]["left"]
+        self.__right_x = math.ceil(
+            target / spacing["x"]["right"] - self.__epsilon) * spacing["x"]["right"]
         self.__x_dim = self.__left_x + self.__right_x
         spacing.update(
             {
@@ -283,14 +394,16 @@ class GBMaker:
             }
         )
 
-        warnings.simplefilter("once", UserWarning)
+        inplane_periodic = []
         for key, val in spacing.items():
             if key == 'x':
                 continue
-            if threshold < val:
+            is_periodic = val <= threshold
+            inplane_periodic.append(is_periodic)
+            if not is_periodic:
                 spacing[key] = threshold
-                warnings.warn("Resulting boundary is non-periodic.")
-        warnings.simplefilter("default", UserWarning)
+                warnings.warn(f"Resulting boundary is non-periodic along {key}.")
+        self.__inplane_periodic = tuple(inplane_periodic)
 
         return spacing
 
@@ -305,20 +418,24 @@ class GBMaker:
         :return: (xy, xz, yz, theta) - the three tilt scalars and the rotation angle to
                                        apply to atom coordinates
         """
+        if not all(self.__inplane_periodic):
+            raise GBMakerValueError(
+                "Triclinic output requires periodic y and z directions."
+            )
 
         # Use grain with larger y-period, consistent with how spacing["y"] is chosen
         if np.linalg.norm(self.__R_left_approx[1]) >= np.linalg.norm(self.__R_right_approx[1]):
             R_grain = self.__R_left
-            g_y = self.__R_left_approx[1].astype(float)
-            g_z = self.__R_left_approx[2].astype(float)
+            R_grain_approx = self.__R_left_approx
         else:
             R_grain = self.__R_right
-            g_y = self.__R_right_approx[1].astype(float)
-            g_z = self.__R_right_approx[2].astype(float)
+            R_grain_approx = self.__R_right_approx
 
-        # Lab-frame period vectors
-        A2_lab = R_grain @ (g_y * self.__a0)
-        A3_lab = R_grain @ (g_z * self.__a0)
+        rotated_unit_cell_basis = self.__unit_cell.conventional @ R_grain.T
+        primitive_periods = (
+            np.asarray(R_grain_approx[1:], dtype=np.float64) @ rotated_unit_cell_basis
+        )
+        A2_lab, A3_lab = self.__box_periodic_basis(primitive_periods)
 
         # Rotate about x to bring A2 into the xy-plane (LAMMPS restricted-triclinic
         # requires b-vector in the xy-plane). x-components are unaffected by this
@@ -345,110 +462,498 @@ class GBMaker:
         unit_cell.init_by_structure(self.__structure, self.__a0, atom_types)
         return unit_cell
 
-    def __generate_left_grain(self) -> np.ndarray:
+    def __generate_grain(
+        self,
+        R_grain: np.ndarray,
+        R_grain_approx: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
         """
-        Generates the left grain of the GB system.
+        Generate one grain by enumerating lattice coefficients over a bounded slab.
 
-        :return: 4xn array containing the atom data (type and position) for the left
-            grain.
+        :param R_grain: Rotation matrix for the grain.
+        :param R_grain_approx: Integer approximation of ``R_grain``.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Structured atom array for the selected grain.
         """
-        body_diagonal = np.linalg.norm(
-            [self.__left_x, self.__y_dim, self.__z_dim])
-        body_diagonal -= body_diagonal % self.__a0
-        X = np.arange(-body_diagonal, body_diagonal, self.__a0)
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
 
-        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.get_supercell(corners)
+        rotated_unit_cell_basis = self.__unit_cell.conventional @ R_grain.T
+        primitive_periods = np.asarray(R_grain_approx[1:], dtype=np.float64)
+        primitive_periods = primitive_periods @ rotated_unit_cell_basis
 
-        positions = np.vstack((atoms["x"], atoms["y"], atoms["z"])).T
-        rotated_positions = np.dot(positions, self.__Rincl.T)
-        atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
-        atoms["x"] += self.__vacuum_thickness
+        reduced_periods = np.linalg.solve(
+            rotated_unit_cell_basis.T, primitive_periods.T
+        ).T
+        x_direction_lattice = np.cross(reduced_periods[0], reduced_periods[1])
+        rounded_direction = np.rint(x_direction_lattice)
+        if np.allclose(
+            x_direction_lattice, rounded_direction, atol=self.__epsilon, rtol=0.0
+        ) and np.any(rounded_direction):
+            x_direction_lattice = self.__reduce_integer_row(
+                rounded_direction.astype(int)
+            ).astype(np.float64)
 
-        return self.__get_points_inside_box(
-            atoms,
-            [
-                self.__vacuum_thickness, 0, 0,
-                self.__left_x + self.__vacuum_thickness, self.__y_dim, self.__z_dim
-            ]
+        selection_box_basis = self.__selection_basis_vectors(primitive_periods).copy()
+        axis_dims = (self.__y_dim, self.__z_dim)
+        inplane_periodic = self.__inplane_periodic
+        for row_index, (is_periodic, axis_dim) in enumerate(
+            zip(inplane_periodic, axis_dims)
+        ):
+            if not is_periodic:
+                selection_box_basis[row_index] *= axis_dim
+
+        selection_box_basis_lattice = np.linalg.solve(
+            rotated_unit_cell_basis.T, selection_box_basis.T
+        ).T
+        local_x_bounds = np.array([0.0, x_bounds[1] - x_bounds[0]], dtype=np.float64)
+        nx_range = self.__x_index_range(
+            primitive_periods, rotated_unit_cell_basis, local_x_bounds
         )
 
-    def __generate_right_grain(self) -> np.ndarray:
-        """
-        Generates the right grain of the GB system.
+        lattice_bound_corners = []
+        for nx in (nx_range[0], nx_range[-1]):
+            x_base = nx * x_direction_lattice
+            for uy in (0.0, 1.0):
+                for uz in (0.0, 1.0):
+                    cell_origin = (
+                        x_base
+                        + uy * selection_box_basis_lattice[0]
+                        + uz * selection_box_basis_lattice[1]
+                    )
+                    for cell_corner in np.ndindex((2, 2, 2)):
+                        lattice_bound_corners.append(
+                            cell_origin + np.array(cell_corner, dtype=np.float64)
+                        )
 
-        The right grain is registered to the nominal interface plane (``left_x +
-        vacuum``), not to the rightmost surviving atom of the clipped left grain. The
-        resulting interfacial phase is one valid DSC configuration; further
-        exploration of admissible phases is left to the optimization workflow.
+        lattice_bound_corners = np.asarray(lattice_bound_corners, dtype=np.float64)
+        lattice_min = np.floor(np.min(lattice_bound_corners, axis=0)).astype(int) - 1
+        lattice_max = np.ceil(np.max(lattice_bound_corners, axis=0)).astype(int) + 1
 
-        :return: 4xn array containing the atom data (type and position)
-            for the right grain.
-        """
-        body_diagonal = np.linalg.norm(
-            [self.__right_x, self.__y_dim, self.__z_dim])
-        body_diagonal -= body_diagonal % self.__a0
-        X = np.arange(-body_diagonal, body_diagonal, self.__a0)
+        coefficient_ranges = [
+            np.arange(lower, upper + 1, dtype=int)
+            for lower, upper in zip(lattice_min, lattice_max)
+        ]
+        lattice_coefficients = np.array(
+            np.meshgrid(*coefficient_ranges, indexing="ij")
+        ).reshape(3, -1).T
 
-        corners = np.vstack(np.meshgrid(X, X, X)).reshape(3, -1).T
-        atoms = self.get_supercell(corners)
-
-        R = np.dot(self.__Rincl, self.__Rmis)
-        positions = np.vstack((atoms["x"], atoms["y"], atoms["z"])).T
-        rotated_positions = np.dot(positions, R.T)
+        atoms = self.get_supercell(lattice_coefficients @ self.__unit_cell.conventional)
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        rotated_positions = positions @ R_grain.T
+        rotated_positions[:, 0] += x_bounds[0]
         atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
 
-        interface_x = self.__left_x + self.__vacuum_thickness
-        atoms["x"] += interface_x
-        return self.__get_points_inside_box(
-            atoms,
-            [
-                interface_x, 0, 0,
-                self.__x_dim + self.__vacuum_thickness, self.__y_dim, self.__z_dim
-            ]
+        if any(inplane_periodic):
+            atoms = self.__select_atoms_in_box_basis(atoms, primitive_periods, x_bounds)
+            atoms = self.__clip_atoms_to_cartesian_box(atoms, x_bounds)
+        else:
+            atoms = self.__clip_atoms_to_cartesian_box(atoms, x_bounds)
+        self.__assert_unique_positions(
+            np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         )
+        return atoms
 
     def __set_gb_region(self):
         """
         Identifies the atoms in the GB region based on the gb thickness.
         """
-        left_x_max = max(self.__left_grain['x'])
-        right_x_min = min(self.__right_grain['x'])
-        left_cut = left_x_max - self.__gb_thickness / 2.0
-        right_cut = right_x_min + self.__gb_thickness / 2.0
+        x_gb = self.__vacuum_thickness + self.__left_x
+        left_cut = x_gb - self.__gb_thickness / 2.0
+        right_cut = x_gb + self.__gb_thickness / 2.0
         left_gb = self.__left_grain[self.__left_grain['x'] > left_cut]
         right_gb = self.__right_grain[self.__right_grain['x'] < right_cut]
         self.__gb_region = np.hstack((left_gb, right_gb))
 
-    def __get_points_inside_box(self, atoms: np.ndarray, box_dim: np.ndarray) -> np.ndarray:
+    def __reduced_coordinate_tolerance(self, basis_vector: np.ndarray) -> float:
         """
-        Selects the lattice points that are inside the given box dimensions.
+        Convert the Cartesian epsilon to reduced-coordinate units for a basis vector.
 
-        :param atoms: Atoms to check. 4xm array containing types and positions.
-        :param box_dim: Dimensions of box (x_min, y_min, z_min, x_max, y_max, z_max).
-        :return: 4xn array containing the Atom positions inside the given box.
+        :param basis_vector: Cartesian basis vector used to define the coordinate scale.
+        :return: Reduced-coordinate tolerance corresponding to ``self.__epsilon``.
         """
-        x_min, y_min, z_min, x_max, y_max, z_max = box_dim
+        basis_vector = np.asarray(basis_vector, dtype=np.float64)
+        basis_length = np.linalg.norm(basis_vector)
 
-        # Epsilon is applied symmetrically to all three directions.
-        # The inclusion window is [dim_min - eps, dim_max - eps) for each axis.
-        #
-        # Lower bounds (all axes): epsilon catches atoms that float just below a box
-        #   face due to rotation-matrix floating-point noise.
-        #
-        # x upper bound: the same noise can place a left-grain terminal plane just
-        # below x_max; without this inward shift it coincides with the first right-grain
-        # plane registered at x_max by __generate_right_grain.
-        # y/z upper bounds: standard strict-less-than for periodic-image exclusion
-        inside_box = (
-            (atoms["x"] >= x_min - self.__epsilon) &
-            (atoms["x"] < x_max - self.__epsilon) &
-            (atoms["y"] >= y_min - self.__epsilon) &
-            (atoms["y"] < y_max) &
-            (atoms["z"] >= z_min - self.__epsilon) &
-            (atoms["z"] < z_max)
+        return self.__epsilon / basis_length
+
+    def __scaled_periodic_basis_vector(
+        self, period_vector: np.ndarray, box_length: float, axis_index: int
+    ) -> np.ndarray:
+        """
+        Scale a periodic basis vector so one axis projection matches the box length.
+
+        :param period_vector: Cartesian periodic basis vector.
+        :param box_length: Desired box length along the selected axis.
+        :param axis_index: Axis whose projection should match ``box_length``.
+        :return: Scaled periodic basis vector.
+        """
+
+        period_vector = np.asarray(period_vector, dtype=np.float64)
+        box_length = float(box_length)
+        if box_length <= 0.0:
+            raise GBMakerValueError("box_length must be strictly positive.")
+        axis_index = int(axis_index)
+
+        # We ignore overflow/invalid values because the check immediately after catches
+        # those states and raises a GBMakerValueError
+        with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
+            scale = box_length / period_vector[axis_index]
+            scaled_vector = period_vector * scale
+        if not np.all(np.isfinite(scaled_vector)):
+            raise GBMakerValueError("Scaled periodic basis vector must be finite.")
+        return scaled_vector
+
+    def __box_periodic_basis(self, primitive_periods: np.ndarray) -> np.ndarray:
+        """
+        Build the in-plane box basis from primitive periodic vectors.
+
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :return: 2x3 array containing the box basis vectors for y and z.
+        """
+        primitive_periods = np.asarray(primitive_periods, dtype=np.float64)
+
+        inplane_periodic = self.__inplane_periodic
+        box_lengths = (self.__y_dim, self.__z_dim)
+        box_basis = np.zeros((2, 3), dtype=np.float64)
+
+        for row_index, (is_periodic, box_length) in enumerate(
+            zip(inplane_periodic, box_lengths)
+        ):
+            if not is_periodic:
+                continue
+
+            axis_index = row_index + 1
+            axis_projection = primitive_periods[row_index, axis_index]
+            if np.isclose(axis_projection, 0.0, atol=self.__epsilon, rtol=0.0):
+                raise GBMakerValueError(
+                    "primitive_periods must have a non-zero projection on the "
+                    "selected box axis."
+                )
+            box_basis[row_index] = self.__scaled_periodic_basis_vector(
+                primitive_periods[row_index], box_length, axis_index
+            )
+
+        return box_basis
+
+    def __selection_basis_vectors(self, primitive_periods: np.ndarray) -> np.ndarray:
+        """
+        Build the canonical in-plane selection basis for y/z box coordinates.
+
+        Periodic axes use the box-periodic basis vectors; non-periodic axes fall back
+        to the corresponding Cartesian unit vectors.
+
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :return: 2x3 array containing the y/z selection basis vectors.
+        """
+        selection_basis = self.__box_periodic_basis(primitive_periods)
+        inplane_periodic = self.__inplane_periodic
+
+        for row_index, is_periodic in enumerate(inplane_periodic):
+            if is_periodic:
+                continue
+            selection_basis[row_index, row_index + 1] = 1.0
+
+        return selection_basis
+
+    def __x_index_range(
+        self,
+        primitive_periods: np.ndarray,
+        rotated_unit_cell_basis: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Build a conservative contiguous lattice-index range along the x-period vector.
+
+        The x-period direction is derived in lattice space as the cross product of the
+        two in-plane primitive periods expressed in the rotated unit-cell basis. The
+        returned integer range is padded conservatively so translated unit cells cover
+        the requested x slab after in-plane box tilts and unit-cell extent are applied.
+
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :param rotated_unit_cell_basis: 3x3 array containing the rotated unit-cell
+            basis vectors as rows.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Contiguous integer array of lattice indices along the x-period
+            direction.
+        """
+        primitive_periods = np.asarray(primitive_periods, dtype=np.float64)
+        rotated_unit_cell_basis = np.asarray(
+            rotated_unit_cell_basis, dtype=np.float64
         )
-        return atoms[inside_box]
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        determinant = np.linalg.det(rotated_unit_cell_basis)
+        if np.isclose(determinant, 0.0, atol=self.__epsilon, rtol=0.0):
+            raise GBMakerValueError(
+                "rotated_unit_cell_basis must form an invertible 3x3 basis."
+            )
+
+        reduced_periods = np.linalg.solve(
+            rotated_unit_cell_basis.T, primitive_periods.T
+        ).T
+        x_direction_lattice = np.cross(reduced_periods[0], reduced_periods[1])
+        if np.linalg.norm(x_direction_lattice) <= self.__epsilon:
+            raise GBMakerValueError(
+                "primitive_periods must define distinct in-plane directions."
+            )
+
+        rounded_direction = np.rint(x_direction_lattice)
+        if np.allclose(
+            x_direction_lattice, rounded_direction, atol=self.__epsilon, rtol=0.0
+        ) and np.any(rounded_direction):
+            x_direction_lattice = self.__reduce_integer_row(
+                rounded_direction.astype(int)
+            ).astype(np.float64)
+
+        x_period_vector = x_direction_lattice @ rotated_unit_cell_basis
+        x_projection = float(x_period_vector[0])
+        if np.isclose(x_projection, 0.0, atol=self.__epsilon, rtol=0.0):
+            raise GBMakerValueError(
+                "x-period direction must have a non-zero projection on x."
+            )
+        if x_projection < 0.0:
+            x_projection = -x_projection
+
+        box_basis = self.__box_periodic_basis(primitive_periods)
+        box_corners_x = np.array(
+            [
+                0.0,
+                box_basis[0, 0],
+                box_basis[1, 0],
+                box_basis[0, 0] + box_basis[1, 0],
+            ],
+            dtype=np.float64,
+        )
+        cell_corners_x = np.array(
+            [
+                np.sum(
+                    rotated_unit_cell_basis[np.array(mask, dtype=bool), 0],
+                    dtype=np.float64,
+                )
+                for mask in np.ndindex((2, 2, 2))
+            ],
+            dtype=np.float64,
+        )
+
+        x_offset_min = float(np.min(box_corners_x) + np.min(cell_corners_x))
+        x_offset_max = float(np.max(box_corners_x) + np.max(cell_corners_x))
+
+        n_min = math.floor((x_bounds[0] - x_offset_max) / x_projection) - 1
+        n_max = math.ceil((x_bounds[1] - x_offset_min) / x_projection) + 1
+        return np.arange(n_min, n_max + 1, dtype=int)
+
+    def __assert_unique_positions(self, positions: np.ndarray) -> None:
+        """
+        Assert that no two positions occupy the same epsilon-quantized cell.
+
+        :param positions: Cartesian positions with shape (N, 3).
+        :raises GBMakerValueError: If any two positions map to the same quantized cell.
+        """
+        positions = np.asarray(positions, dtype=np.float64)
+        if len(positions) == 0:
+            return
+        quantized = np.round(positions / self.__epsilon).astype(np.int64)
+        if len(np.unique(quantized, axis=0)) < len(quantized):
+            raise GBMakerValueError(
+                "Duplicate atomic positions detected within epsilon tolerance."
+            )
+
+    def __reduced_box_coordinates(
+        self, cartesian_coordinates: np.ndarray, box_basis: np.ndarray
+    ) -> np.ndarray:
+        """
+        Convert Cartesian coordinates to mixed box coordinates ``[x_cart, u_y, u_z]``.
+
+        The mixed basis is ``[e_x, A_y, A_z]`` where ``e_x`` is the Cartesian x-axis
+        and ``A_y``/``A_z`` are the in-plane box basis vectors.
+
+        :param cartesian_coordinates: Cartesian coordinates with shape ``(..., 3)``.
+        :param box_basis: 2x3 array containing ``A_y`` and ``A_z``.
+        :return: Mixed box coordinates with shape ``(..., 3)``.
+        """
+        cartesian_coordinates = np.asarray(cartesian_coordinates, dtype=np.float64)
+        box_basis = np.asarray(box_basis, dtype=np.float64)
+
+        yz_basis = box_basis[:, 1:].T
+        determinant = np.linalg.det(yz_basis)
+        if np.isclose(determinant, 0.0, atol=self.__epsilon, rtol=0.0):
+            raise GBMakerValueError(
+                "box_basis y/z projections must form an invertible 2x2 basis."
+            )
+
+        yz_coordinates = cartesian_coordinates[..., 1:]
+        reduced_yz = np.linalg.solve(
+            yz_basis, yz_coordinates.reshape(-1, 2).T
+        ).T.reshape(yz_coordinates.shape)
+        x_cart = (
+            cartesian_coordinates[..., 0]
+            - reduced_yz[..., 0] * box_basis[0, 0]
+            - reduced_yz[..., 1] * box_basis[1, 0]
+        )
+        return np.concatenate((x_cart[..., np.newaxis], reduced_yz), axis=-1)
+
+    def __cartesian_from_box_coordinates(
+        self, box_coordinates: np.ndarray, box_basis: np.ndarray
+    ) -> np.ndarray:
+        """
+        Convert mixed box coordinates ``[x_cart, u_y, u_z]`` to Cartesian coordinates.
+
+        :param box_coordinates: Mixed box coordinates with shape ``(..., 3)``.
+        :param box_basis: 2x3 array containing ``A_y`` and ``A_z``.
+        :return: Cartesian coordinates with shape ``(..., 3)``.
+        """
+        box_coordinates = np.asarray(box_coordinates, dtype=np.float64)
+        box_basis = np.asarray(box_basis, dtype=np.float64)
+
+        cartesian_coordinates = np.array(box_coordinates, copy=True)
+        cartesian_coordinates[..., 0] += np.tensordot(
+            box_coordinates[..., 1:], box_basis[:, 0], axes=([-1], [0])
+        )
+        cartesian_coordinates[..., 1:] = np.tensordot(
+            box_coordinates[..., 1:], box_basis[:, 1:], axes=([-1], [0])
+        )
+        return cartesian_coordinates
+
+    def __clip_atoms_to_cartesian_box(
+        self, atoms: np.ndarray, x_bounds: np.ndarray
+    ) -> np.ndarray:
+        """
+        Clip atoms to Cartesian box bounds on non-periodic axes.
+
+        X is always clipped to the slab bounds. Y and Z are only clipped when the
+        corresponding in-plane axis is non-periodic. Small negative y/z values within
+        epsilon are snapped to zero after filtering.
+
+        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Filtered atom array, with lower-face y/z values clamped to zero on
+            non-periodic axes.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        inplane_periodic = self.__inplane_periodic
+        inside_box = (atoms["x"] >= x_bounds[0] -
+                      self.__epsilon) & (atoms["x"] < x_bounds[1] - self.__epsilon)
+
+        axis_names = ("y", "z")
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for axis_name, axis_dim, is_periodic in zip(axis_names, axis_dims, inplane_periodic):
+            if is_periodic:
+                continue
+            inside_box &= (
+                (atoms[axis_name] >= -self.__epsilon) & (atoms[axis_name] < axis_dim)
+            )
+
+        clipped_atoms = atoms[inside_box].copy()
+        for axis_name, is_periodic in zip(axis_names, inplane_periodic):
+            if is_periodic:
+                continue
+            clipped_atoms[axis_name] = np.where(
+                (clipped_atoms[axis_name] < 0.0) & (
+                    clipped_atoms[axis_name] >= -self.__epsilon),
+                0.0,
+                clipped_atoms[axis_name],
+            )
+
+        return clipped_atoms
+
+    def __deduplicate_positions(self, atoms: np.ndarray) -> np.ndarray:
+        """
+        Reive duplicate atoms using epsilon-quantized Cartesian positions.
+        Keeps the first occurrence of each position.
+        """
+        if len(atoms) == 0:
+            return atoms
+
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        quantized = np.round(positions / self.__epsilon).astype(np.int64)
+        _, unique_indices = np.unique(quantized, axis=0, return_index=True)
+        deduplicated = atoms[np.sort(unique_indices)]
+        self.__assert_unique_positions(np.column_stack(
+            (deduplicated["x"], deduplicated["y"], deduplicated["z"])))
+        return deduplicated
+
+    def __select_atoms_in_box_basis(
+        self,
+        atoms: np.ndarray,
+        primitive_periods: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Select atoms using mixed box coordinates for in-plane boundary handling.
+
+        Periodic in-plane axes are filtered in reduced coordinates on the half-open
+        interval ``[0, 1)`` up to tolerance, wrapped back into the canonical cell, then
+        mapped back to Cartesian coordinates. Non-periodic axes remain Cartesian in the
+        mixed basis and are clipped against the box dimensions directly.
+
+        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
+        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
+        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
+        :return: Filtered structured atom array with wrapped in-plane coordinates.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        selection_basis = self.__selection_basis_vectors(primitive_periods)
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        box_coordinates = self.__reduced_box_coordinates(positions, selection_basis)
+        inplane_periodic = self.__inplane_periodic
+
+        inside_box = np.ones(len(atoms), dtype=bool)
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for row_index, (axis_dim, is_periodic) in enumerate(
+            zip(axis_dims, inplane_periodic)
+        ):
+            reduced_axis = box_coordinates[:, row_index + 1]
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                inside_box &= (
+                    (reduced_axis >= -tol) & (reduced_axis < 1.0 + tol)
+                )
+            else:
+                inside_box &= (
+                    (reduced_axis >= -self.__epsilon) & (reduced_axis < axis_dim)
+                )
+
+        selected_atoms = atoms[inside_box].copy()
+        if len(selected_atoms) == 0:
+            return selected_atoms
+
+        selected_box_coordinates = box_coordinates[inside_box].copy()
+        for row_index, is_periodic in enumerate(inplane_periodic):
+            coordinate_index = row_index + 1
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                selected_box_coordinates[:, coordinate_index] = wrap_reduced_coordinate(
+                    selected_box_coordinates[:, coordinate_index],
+                    tol,
+                )
+                continue
+
+            selected_box_coordinates[:, coordinate_index] = np.where(
+                (
+                    (selected_box_coordinates[:, coordinate_index] < 0.0)
+                    & (selected_box_coordinates[:, coordinate_index] >= -self.__epsilon)
+                ),
+                0.0,
+                selected_box_coordinates[:, coordinate_index],
+            )
+
+        wrapped_positions = self.__cartesian_from_box_coordinates(
+            selected_box_coordinates, selection_basis
+        )
+        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = wrapped_positions.T
+
+        inside_x = (
+            (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
+            & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
+        )
+        selected_atoms = selected_atoms[inside_x]
+        if len(selected_atoms) == 0:
+            return selected_atoms
+
+        return self.__deduplicate_positions(selected_atoms)
 
     def __update_dims(self) -> None:
         """
@@ -479,6 +984,9 @@ class GBMaker:
             )
             self.__repeat_factor[1] = repeat_z
         self.__box_dims = self.__calculate_box_dimensions()
+        if hasattr(self, "_GBMaker__R_left"):
+            self.__generate_gb()
+            self.__set_gb_region()
 
     def __validate(
         self,
@@ -609,6 +1117,7 @@ class GBMaker:
         :param threshold: The maximum allowed value that any spacing can take
         """
         self.__spacing = self.__calculate_periodic_spacing(threshold)
+        self.__update_dims()
 
     def write_lammps(
         self,
@@ -830,9 +1339,15 @@ class GBMaker:
 
     @vacuum_thickness.setter
     def vacuum_thickness(self, value: Number):
+        old_vacuum = self.__vacuum_thickness
         self.__vacuum_thickness = self.__validate(
             value, Number, "vacuum_thickness", positive=True
         )
+        delta = self.__vacuum_thickness - old_vacuum
+        self.__left_grain["x"] += delta
+        self.__right_grain["x"] += delta
+        self.__whole_system["x"] += delta
+        self.__gb_region["x"] += delta
         self.__box_dims = self.__calculate_box_dimensions()
 
     @property
@@ -868,6 +1383,10 @@ class GBMaker:
         return self.__right_grain
 
     @property
+    def gb_plane_x(self) -> float:
+        return self.__vacuum_thickness + self.__left_x
+
+    @property
     def spacing(self) -> dict:
         return self.__spacing
 
@@ -886,16 +1405,3 @@ class GBMaker:
     @property
     def z_dim(self) -> float:
         return self.__z_dim
-
-
-if __name__ == "__main__":
-    theta = math.radians(36.869898)
-    G = GBMaker(
-        a0=3.61,
-        structure="fcc",
-        gb_thickness=10.0,
-        misorientation=[theta, 0, 0, 0, -theta / 2],
-        repeat_factor=[3, 9],
-    )
-    G.write_lammps(np.vstack((G.left_grain, G.right_grain)),
-                   G.box_dims, "test1.dat")
