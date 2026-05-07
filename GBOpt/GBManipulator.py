@@ -125,29 +125,24 @@ class Parent:
             if gb_thickness is None:  # defaults to 10 if passed in as None.
                 gb_thickness = 10
             self.__init_by_file(system, unit_cell, gb_thickness, type_dict)
-        # self.__whole_system = np.hstack((self.__left_grain, self.__right_grain))
-        left_x_max = max(self.__left_grain["x"])
-        right_x_min = min(self.__right_grain["x"])
-        left_cut = left_x_max - self.__gb_thickness / 2.0
-        right_cut = right_x_min + self.__gb_thickness / 2.0
+
+        x_gb = self.__gb_plane_x
+        left_cut = x_gb - self.__gb_thickness / 2.0
+        right_cut = x_gb + self.__gb_thickness / 2.0
         left_gb_mask = self.__left_grain["x"] > left_cut
         right_gb_mask = self.__right_grain["x"] < right_cut
         left_gb = self.__left_grain[left_gb_mask]
         right_gb = self.__right_grain[right_gb_mask]
         self.__gb_indices = np.where(
-            ((self.__whole_system["x"] > left_cut) & (self.__whole_system["x"] <= left_x_max)) |
-            ((self.__whole_system["x"] >= right_x_min)
-             & (self.__whole_system["x"] <= right_cut))
+            (self.__whole_system["x"] > left_cut) & (
+                self.__whole_system["x"] < right_cut)
         )[0]
         self.__gb_atoms = np.hstack((left_gb, right_gb))
-        # TODO: make this a more robust calculation, rather than assuming the GB is in the middle of the system.
         self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
-                    self.__whole_system["x"]
-                    >= self.__box_dims[0, 1] / 2 - self.__gb_thickness/2,
-                    self.__whole_system["x"]
-                    <= self.__box_dims[0, 1] / 2 + self.__gb_thickness/2
+                    self.__whole_system["x"] >= x_gb - self.__gb_thickness / 2,
+                    self.__whole_system["x"] <= x_gb + self.__gb_thickness / 2
                 )
             )
         ]
@@ -170,6 +165,7 @@ class Parent:
         # We do not use GB.x_dim because this is limited to a single grain of the GB,
         # not the entire system.
         self.__x_dim = self.__box_dims[0][1] - self.__box_dims[0][0]
+        self.__gb_plane_x = system.gb_plane_x
 
     def __init_by_file(
         self,
@@ -390,6 +386,8 @@ class Parent:
         mask = self.__whole_system["x"] < grain_cutoff
         self.__left_grain = self.__whole_system[mask]
         self.__right_grain = self.__whole_system[~mask]
+        self.__gb_plane_x = (
+            max(self.__left_grain["x"]) + min(self.__right_grain["x"])) / 2
 
     def __init_from_lammps_input(
         self,
@@ -521,6 +519,8 @@ class Parent:
         mask = self.__whole_system["x"] < grain_cutoff
         self.__left_grain = self.__whole_system[mask]
         self.__right_grain = self.__whole_system[~mask]
+        self.__gb_plane_x = (
+            max(self.__left_grain["x"]) + min(self.__right_grain["x"])) / 2
 
     # Getters
 
@@ -1382,11 +1382,11 @@ class GBManipulator:
              )
 
         if (num_to_insert is not None and
-            (
-                        num_to_insert < 1 or
-                        num_to_insert > int(0.25 * len(gb_atoms))
+                (
+                    num_to_insert < 1 or
+                    num_to_insert > int(0.25 * len(gb_atoms))
                     )
-            ):
+                ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region.")
