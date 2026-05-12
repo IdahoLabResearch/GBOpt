@@ -1,0 +1,8 @@
+# commands for using the Si Stillinger-Weber potential
+
+variable ecoh equal -4.3366
+variable a0 equal 5.431
+
+pair_style sw
+pair_coeff * * Si.sw Si
+mass 1 28.0855

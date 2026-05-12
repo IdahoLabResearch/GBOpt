@@ -1,0 +1,5 @@
+lattice_parameter = 3.52
+structure = "fcc"
+atom_types = "Ni"
+interaction_distance = 4.85
+x_dim_min = 60

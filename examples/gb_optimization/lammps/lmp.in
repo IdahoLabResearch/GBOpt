@@ -1,0 +1,101 @@
+# -------------------------------- Verification --------------------------------
+if "$(!is_defined(variable,datafile))" then "print '-var datafile <filename> missing!'" "quit"
+
+# ------------------------------- Initialization -------------------------------
+units metal
+atom_style atomic
+dimension 3
+boundary p p p
+timestep 0.002
+
+# --------------------------- Read in the Structure ----------------------------
+read_data ${datafile}
+
+# ------------------------ Define Interatomic Potential ------------------------
+include potential.setup
+neighbor 1.0 bin
+neigh_modify every 1 delay 0 check yes
+
+# ------------------------------ Define Computes -------------------------------
+compute eng all pe/atom
+
+# ------------------------------ Run Minimization ------------------------------
+thermo 100
+thermo_style custom step temp pe lx ly lz press pxx pyy pzz dt
+
+include min_strat.commands
+
+if "$(extract_setting(q_flag))" then &
+    "write_dump all custom ${datafile}_final.dump id type q x y z c_eng" &
+else &
+    "write_dump all custom ${datafile}_final.dump id type x y z c_eng" &
+
+# ---------------------------- Calculate GB energy -----------------------------
+# how many GBs? (2 for p p p bicrystal)
+if "$(!is_defined(variable,ngb))" then "variable ngb equal 2"
+
+# --- choose path without nesting ---
+if "$(!is_defined(variable,gb_normal))" then "jump SELF _guess_gbn" else "jump SELF _use_gbn"
+
+label _guess_gbn
+if "$((lx>ly) && (lx>lz))" then &
+    "print '-var gb_normal not set; guessing x (longest edge)'" &
+    "variable gbarea equal ly*lz*v_ngb" &
+    "jump SELF _done_gbarea"
+if "$((ly>lx) && (ly>lz))" then &
+    "print '-var gb_normal not set; guessing y (longest edge)'" &
+    "variable gbarea equal lx*lz*v_ngb" &
+    "jump SELF _done_gbarea"
+if "$((lz>lx) && (lz>ly))" then &
+    "print '-var gb_normal not set; guessing z (longest edge)'" &
+    "variable gbarea equal lx*ly*v_ngb" &
+    "jump SELF _done_gbarea"
+print "Cannot guess gb_normal (ties). Use: -var gb_normal x|y|z"
+quit
+
+label _use_gbn
+if "${gb_normal} == x" then &
+    "variable gbarea equal ly*lz*v_ngb" &
+    "jump SELF _done_gbarea"
+if "${gb_normal} == y" then &
+    "variable gbarea equal lx*lz*v_ngb" &
+    "jump SELF _done_gbarea"
+if "${gb_normal} == z" then &
+    "variable gbarea equal lx*ly*v_ngb" &
+    "jump SELF _done_gbarea"
+print "-var gb_normal must be x|y|z, got: ${gb_normal}"
+quit
+
+label _done_gbarea
+
+if "$(!is_defined(variable,ecoh))" then &
+    "print 'Error: cohesive energy (variable ecoh) not set for this potential'" &
+    "print 'Make sure a line like the following exists: variable ecoh equal <value>'" &
+    "print 'Insert the cohesive energy into the following equation to calculate the grain boundary energy'" &
+    "print 'Relevant values:'" &
+    "print '  Number of atoms: $(count(all))'" &
+    "print '  Potential energy of system: $(pe)'" &
+    "print '  Grain boundary area: ${gbarea}'" &
+    "print 'Final equation: 16.02176634*($(pe)-ecoh*$(count(all)))/${gbarea}'" &
+    "quit"
+variable esum equal "v_ecoh * count(all)"
+variable xseng equal "pe - v_esum"
+
+variable gbe equal v_xseng/v_gbarea
+variable gbeJm2 equal ${gbe}*16.02176634
+print """
+Variables:
+  ecoh: ${ecoh}
+  natoms: $(count(all))
+  esum: ${esum}
+  pe: $(pe)
+  xseng: ${xseng}
+  gbarea: ${gbarea}
+  gbe: ${gbe}
+  gbeJm2: ${gbeJm2}
+"""
+print "GB energy is ${gbeJm2} J/m^2"
+print "${datafile} ${gbeJm2}" file ${datafile}_GBE.txt
+print "${gbeJm2}" file results_${unique_id}.txt
+write_dump all custom final_${unique_id}.dump id type x y z
+

@@ -1,0 +1,18 @@
+lmp_binary = "lmp"
+max_steps = 500
+seed = 123
+cooldown_rate = 0.99
+e_tol = 1.0e-8
+e_accept = 0.1
+choices = ["translate_right_grain", "remove_atoms", "insert_atoms"]
+
+[slurm]
+time = "4:00:00"
+ntasks_per_node = 1
+cpus_per_task = 28
+nodes = 1
+wckey = "ne_ldrd"
+partition = "short"
+omp_num_threads = 28
+srun_mpi = "cray_shasta"
+module = "lammps-user"

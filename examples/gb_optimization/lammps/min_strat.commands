@@ -1,0 +1,79 @@
+# -------------------------- min_strat.commands --------------------------
+# Robust, FIRE→CG minimization
+# Stages:
+#   A) FIRE (fixed box)          — fast knockdown from rough configs
+#   B) CG + box/relax (optional) — drive mean stress ~0 and polish
+#   C) CG (fixed box)            — brief final polish at fixed geometry
+
+# ------------------------------ Defaults --------------------------------
+# Box relaxation mode (orthorhombic cells): aniso|iso
+if "$(!is_defined(variable,dim))"            then "variable dim string aniso"
+# Target pressure (bar) and vmax for fix box/relax
+if "$(!is_defined(variable,relax_p))"        then "variable relax_p   equal 0.0"
+if "$(!is_defined(variable,relax_vmax))"     then "variable relax_vmax equal 0.001"
+
+# FIRE controls (fixed box ONLY)
+if "$(!is_defined(variable,fire_dt))"        then "variable fire_dt   equal 0.005"
+if "$(!is_defined(variable,fire_ftol))"      then "variable fire_ftol equal 1.0e-6"
+if "$(!is_defined(variable,fire_etol))"      then "variable fire_etol equal 0.0"
+if "$(!is_defined(variable,fire_i))"         then "variable fire_i     equal 20000"
+if "$(!is_defined(variable,fire_e))"         then "variable fire_e     equal 100000"
+
+# CG controls
+if "$(!is_defined(variable,cg_ftol))"        then "variable cg_ftol   equal 1.0e-8"
+if "$(!is_defined(variable,cg_etol))"        then "variable cg_etol   equal 1.0e-15"
+if "$(!is_defined(variable,cg_i))"           then "variable cg_i       equal 50000"
+if "$(!is_defined(variable,cg_e))"           then "variable cg_e       equal 200000"
+
+# Shared displacement cap
+if "$(!is_defined(variable,dmax))"           then "variable dmax       equal 0.1"
+
+# Behavior toggles
+#   skip_fire=1        → skip Stage A (FIRE pre-relax)
+#   keep_box_fixed=1   → never use box/relax (entire run at fixed box)
+if "$(!is_defined(variable,skip_fire))"      then "variable skip_fire       equal 0"
+if "$(!is_defined(variable,keep_box_fixed))" then "variable keep_box_fixed  equal 0"
+
+# ------------------------------ Logging ---------------------------------
+print "---- minimization start ----"
+run 0
+print "Initial:  E=$(pe)  P=$(press)  Lx Ly Lz: $(lx) $(ly) $(lz)"
+
+# --------------------------- Stage A: FIRE -------------------------------
+# NOTE: No box/relax here by design
+if "${skip_fire} == 1" then "jump SELF _after_fireA"
+timestep ${fire_dt}
+min_style fire
+min_modify dmax ${dmax}
+minimize ${fire_etol} ${fire_ftol} ${fire_i} ${fire_e}
+print "After FIRE (fixed box):       E=$(pe)  P=$(press)"
+label _after_fireA
+
+# ---------------------- Stage B: CG + box/relax -------------------------
+# Only if user allows box relaxation
+if "${keep_box_fixed} == 1" then "jump SELF _cg_fixed"
+
+fix __relax all box/relax ${dim} ${relax_p} vmax ${relax_vmax}
+min_style cg
+min_modify line quadratic dmax ${dmax}
+minimize ${cg_etol} ${cg_ftol} ${cg_i} ${cg_e}
+print "After CG+box/relax:           E=$(pe)  P=$(press)  Lx Ly Lz: $(lx) $(ly) $(lz)"
+unfix __relax
+jump SELF _final_cg
+
+# ---------------------------- Stage C: CG -------------------------------
+label _cg_fixed
+min_style cg
+min_modify line quadratic dmax ${dmax}
+minimize ${cg_etol} ${cg_ftol} ${cg_i} ${cg_e}
+print "After CG (fixed box):         E=$(pe)  P=$(press)"
+
+# --------------- Optional final fixed-box CG cleanup --------------------
+label _final_cg
+min_style cg
+min_modify line quadratic dmax ${dmax}
+minimize ${cg_etol} ${cg_ftol} 10000 50000
+
+print "Final:    E=$(pe)  P=$(press)  Lx Ly Lz: $(lx) $(ly) $(lz)"
+print "---- minimization end ----"
+# ------------------------------------------------------------------------

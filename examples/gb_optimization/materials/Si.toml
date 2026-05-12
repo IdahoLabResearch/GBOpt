@@ -1,0 +1,5 @@
+lattice_parameter = 5.431
+structure = "diamond"
+atom_types = "Si"
+interaction_distance = 6.0
+x_dim_min = 60

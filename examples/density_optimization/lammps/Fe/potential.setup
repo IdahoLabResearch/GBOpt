@@ -1,0 +1,7 @@
+# commands for using the Fe Mendelev et al potential
+
+variable ecoh equal -4.122434
+variable a0 equal 2.855
+
+pair_style eam/fs
+pair_coeff * * Fe_2.eam.fs Fe

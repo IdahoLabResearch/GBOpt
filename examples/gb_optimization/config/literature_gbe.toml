@@ -1,0 +1,15 @@
+[sigma3_coherent_twin]
+Fe = 0.262
+Ni = 0.064
+
+[sigma5_310_STGB]
+Fe = 0.986
+Ni = 1.218
+
+[sigma5_twist]
+Fe = 1.074
+Ni = 0.958
+
+[sigma13_510_STGB]
+Fe = 0.980
+Ni = 1.201

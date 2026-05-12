@@ -1,0 +1,14 @@
+population_size = 50
+generations = 200
+seed = 0
+choices = ["insert_atoms", "remove_atoms", "translate_right_grain"]
+lmp_binary = "lmp"
+
+[slurm]
+time = "6:00:00"
+ntasks_per_node = 1
+cpus_per_task = 28
+nodes = 1
+wckey = "ne_ldrd"
+partition = "short"
+module = "lammps-user"

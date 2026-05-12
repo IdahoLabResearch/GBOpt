@@ -1,0 +1,6 @@
+lattice_parameter = 2.855
+structure = "bcc"
+atom_types = "Fe"
+interaction_distance = 5.3
+x_dim_min = 60
+repeat_factor = [2, 4]

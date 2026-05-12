@@ -1,0 +1,20 @@
+# SLURM job outputs
+*.out
+*.err
+
+# LAMMPS intermediate files
+*.lammps
+workdir.*/
+gen_*/
+
+# Python
+__pycache__/
+*.pkl
+*.pyc
+
+# Generated figures
+figures/
+
+# Environment
+.venv/
+.envrc

@@ -1,0 +1,7 @@
+# commands for using the Ni Foiles-Hoyt potential
+
+variable ecoh equal -4.45
+variable a0 equal 3.52
+
+pair_style eam/fs
+pair_coeff * * Ni_FoilesHoyt_2006.eam.fs Ni
