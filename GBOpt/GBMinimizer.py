@@ -1,6 +1,8 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+import json
 import math
+import pickle
 import shutil
 import uuid
 from collections.abc import Callable
@@ -11,6 +13,21 @@ from typing import Any, Optional
 import numpy as np
 
 from GBOpt import GBMaker, GBManipulator
+
+
+class GBMinimizerError(Exception):
+    """Base exception for the GBMinimizer module."""
+    pass
+
+
+class GBMinimizerTypeError(GBMinimizerError):
+    """Raised when an argument has an unexpected type."""
+    pass
+
+
+class GBMinimizerValueError(GBMinimizerError):
+    """Raised when an argument has an invalid value."""
+    pass
 
 
 class Mutator:
@@ -76,7 +93,8 @@ class MonteCarloMinimizer:
         self.mutator = Mutator(choices, self.manipulator)
         self.accepted_idx = [0]  # Initial guess is accepted by definition
         self.operation_list = [["START", True]]
-        self.local_random = np.random.default_rng(int(time()) if seed is None else seed)
+        self.local_random = np.random.default_rng(
+            int(time()) if seed is None else seed)
         self.manipulator.rng = self.local_random
         self.GBE_vals = []
 
@@ -102,7 +120,78 @@ class MonteCarloMinimizer:
 
         return manip
 
-    def run_MC(self, E_accept: float = 1e-1, max_steps: int = 50, E_tol: float = 1e-4, max_rejections: int = 20, cooldown_rate: float = 1.0, unique_id: int = uuid.uuid4(), **kwargs) -> float:
+    def _save_checkpoint(
+        self,
+        checkpoint_file: Path,
+        checkpoint_format: str,
+        state: dict,
+    ) -> None:
+        """Save MC loop state to a checkpoint file atomically.
+
+        :param checkpoint_file: Destination path.
+        :param checkpoint_format: ``"json"`` or ``"pickle"``.
+        :param state: Loop-local and instance state to persist.
+        :raises GBMinimizerValueError: If format is not ``"json"`` or ``"pickle"``.
+        """
+        if checkpoint_format not in ("json", "pickle"):
+            raise GBMinimizerValueError(
+                f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+            )
+        tmp = checkpoint_file.with_suffix(checkpoint_file.suffix + ".tmp")
+
+        if checkpoint_format == "json":
+            def _to_serializable(obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                if isinstance(obj, np.floating):
+                    return float(obj)
+                if isinstance(obj, dict):
+                    return {k: _to_serializable(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return [_to_serializable(v) for v in obj]
+                return obj
+
+            with open(tmp, "w") as fp:
+                json.dump(_to_serializable(state), fp, indent=2)
+        else:
+            with open(tmp, "wb") as fp:
+                pickle.dump(state, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+        shutil.move(str(tmp), str(checkpoint_file))
+
+    def _load_checkpoint(
+        self,
+        checkpoint_file: Path,
+        checkpoint_format: str,
+    ) -> dict:
+        """Load MC loop state from a checkpoint file.
+
+        :param checkpoint_file: Source path.
+        :param checkpoint_format: ``"json"`` or ``"pickle"``.
+        :return: State dict as originally saved.
+        :raises GBMinimizerValueError: If format is not ``"json"`` or ``"pickle"``.
+        :raises GBMinimizerError: If the file cannot be parsed. Note: resuming with a
+            different format than was used to write the checkpoint will raise this error.
+        """
+        if checkpoint_format not in ("json", "pickle"):
+            raise GBMinimizerValueError(
+                f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+            )
+        try:
+            if checkpoint_format == "json":
+                with open(checkpoint_file, "r") as fp:
+                    return json.load(fp)
+            else:
+                with open(checkpoint_file, "rb") as fp:
+                    return pickle.load(fp)
+        except Exception as e:
+            raise GBMinimizerError(
+                f"Could not parse checkpoint file {checkpoint_file}: {e}"
+            ) from e
+
+    def run_MC(self, E_accept: float = 1e-1, max_steps: int = 50, E_tol: float = 1e-4, max_rejections: int = 20, cooldown_rate: float = 1.0, unique_id: int = uuid.uuid4(), *, checkpoint_file: str | Path | None = None, checkpoint_format: str = "json", checkpoint_interval: int = 1, **kwargs) -> float:
         # TODO: Add options for changing from linear to logarithmic cooldown
         """
         Runs an MC loop on the grain boundary structure till the set convergence criteria are met.
@@ -113,40 +202,72 @@ class MonteCarloMinimizer:
         :param max_rejections: Maximum number of consequtive rejections before the MC iterations are terminated.
         :param cooldown_rate: Factor ((0,1]) by which to reduce the 'temperature' of the MC simulation each iteration.
         :param unique_id: Unique unsigned integer to which to label all files generated by the MC run.
+        :param checkpoint_file: Path to checkpoint file. If the file exists, the run resumes from it;
+            otherwise a fresh run begins and the file is created. Deleted on normal completion.
+            If ``None``, checkpointing is disabled.
+        :param checkpoint_format: Serialization format for the checkpoint file. Either ``"json"``
+            (default, human-readable) or ``"pickle"`` (binary, no numpy conversion needed).
+        :param checkpoint_interval: Save a checkpoint every N steps (default 1, i.e. every step).
         :param **kwargs: Keyword arguments that are passed to gb_energy_func
         :return: Minimized energy value.
         """
 
         assert cooldown_rate > 0.0 and cooldown_rate <= 1.0
 
-        # Get initial energy
-        init_system = np.array(self.manipulator.parents[0].whole_system, copy=True)
-        init_gbe, _ = self.gb_energy_func(
-            self.GB,
-            self.manipulator,
-            init_system,
-            "initial"+str(unique_id),
-            **kwargs,
-        )
-        type_dict = {value: key for key, value in self.GB.unit_cell.type_map.items()}
-        # Append grain boundary energy calculation to array
-        self.GBE_vals.append(init_gbe)
+        if checkpoint_file is not None:
+            checkpoint_file = Path(checkpoint_file)
+            if checkpoint_format not in ("json", "pickle"):
+                raise GBMinimizerValueError(
+                    f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+                )
 
-        # Set the Monte-Carlo temperature such that there is a 50% probability of accepting an `E_accept` amount of increase to the GBE
-        T = -1 * E_accept / math.log(0.5)
-        rejection_count = 0
+        type_dict = {value: key for key,
+                     value in self.GB.unit_cell.type_map.items()}
 
-        # Set the minimum GBE
-        min_gbe = min(self.GBE_vals)
-        prev_gbe = init_gbe
+        _resuming = checkpoint_file is not None and checkpoint_file.exists()
 
-        # Run the MC iterations
-        for i in range(1, max_steps + 1):
-            # Generate a random mutation on the current GB atom structure
+        if _resuming:
+            _cp = self._load_checkpoint(checkpoint_file, checkpoint_format)
+            self.GBE_vals = _cp["GBE_vals"]
+            self.accepted_idx = _cp["accepted_idx"]
+            self.operation_list = _cp["operation_list"]
+            self.local_random.bit_generator.state = _cp["rng_state"]
+            _resume_step = _cp["step_index"] + 1
+            T = _cp["T"]
+            rejection_count = _cp["rejection_count"]
+            min_gbe = _cp["min_gbe"]
+            prev_gbe = _cp["prev_gbe"]
+            best_dump = _cp["best_dump"]
+            _current_dump = _cp["current_structure_dump"]
+            self.manipulator = GBManipulator(
+                _current_dump,
+                unit_cell=self.GB.unit_cell,
+                gb_thickness=self.GB.gb_thickness,
+                type_dict=type_dict,
+            )
+            self.manipulator.rng = self.local_random
+        else:
+            _resume_step = 1
+            init_system = np.array(
+                self.manipulator.parents[0].whole_system, copy=True)
+            init_gbe, _current_dump = self.gb_energy_func(
+                self.GB,
+                self.manipulator,
+                init_system,
+                "initial" + str(unique_id),
+                **kwargs,
+            )
+            self.GBE_vals.append(init_gbe)
+            T = -1 * E_accept / math.log(0.5)
+            rejection_count = 0
+            min_gbe = min(self.GBE_vals)
+            prev_gbe = init_gbe
+            best_dump = None
+
+        for i in range(_resume_step, max_steps + 1):
             mutation, new_system = self.mutator.mutate(
                 self.local_random, self.GB, self.manipulator)
 
-            # Evaluate the energy of this new structure and append it to the GBE values list
             new_gbe, dump_file_name = self.gb_energy_func(
                 self.GB,
                 self.manipulator,
@@ -156,13 +277,11 @@ class MonteCarloMinimizer:
             )
             self.GBE_vals.append(new_gbe)
 
-            # Accept this new structure if the energy decreases from the previous MC iteration OR probabilistically based on the energy increase
             accepted = new_gbe <= prev_gbe or self.local_random.uniform(
                 0, 1) <= math.exp(-(new_gbe - prev_gbe) / T)
 
             if accepted:
                 self.operation_list.append([mutation, True])
-                # Generate a new GB manipulator using the new structure from the dump file
                 self.manipulator = GBManipulator(
                     dump_file_name,
                     unit_cell=self.GB.unit_cell,
@@ -170,31 +289,90 @@ class MonteCarloMinimizer:
                     type_dict=type_dict,
                 )
                 self.manipulator.rng = self.local_random
+                _current_dump = dump_file_name
                 prev_gbe = new_gbe
-
-                # Add the MC iteration index to the list of accepted values indices
                 self.accepted_idx.append(i)
-                # Set the consecutive rejection counter to zero
                 rejection_count = 0
 
-                # If new structure has the lowest energy observed so far, update the minimum GBE value and copy the dump file for this structure
                 if new_gbe <= min_gbe:
-                    shutil.copyfile(dump_file_name, "min" + dump_file_name)
+                    best_dump = "min" + dump_file_name
+                    shutil.copyfile(dump_file_name, best_dump)
                     del_E = abs(min_gbe - new_gbe)
-                    # If the reduction in minimum energy was less than the tolerance threshold, we consider the MC solve converged
                     if del_E <= E_tol:
                         print("Meets energy tolerance criterion!")
+                        T *= cooldown_rate
+                        if checkpoint_file is not None and i % checkpoint_interval == 0:
+                            self._save_checkpoint(checkpoint_file, checkpoint_format, {
+                                "step_index": i,
+                                "T": T,
+                                "rejection_count": rejection_count,
+                                "min_gbe": min_gbe,
+                                "prev_gbe": prev_gbe,
+                                "best_dump": best_dump,
+                                "current_structure_dump": _current_dump,
+                                "GBE_vals": self.GBE_vals,
+                                "accepted_idx": self.accepted_idx,
+                                "operation_list": self.operation_list,
+                                "rng_state": self.local_random.bit_generator.state,
+                                "run_params": {
+                                    "E_accept": E_accept, "max_steps": max_steps,
+                                    "E_tol": E_tol, "max_rejections": max_rejections,
+                                    "cooldown_rate": cooldown_rate, "unique_id": str(unique_id),
+                                },
+                            })
                         break
                     min_gbe = new_gbe
             else:
                 self.operation_list.append([mutation, False])
                 rejection_count += 1
-                # If too many structures are rejected back-to-back, we prematurely stop the MC iterations since we are stuck
                 if rejection_count > max_rejections:
                     print("Too many rejections!")
+                    T *= cooldown_rate
+                    if checkpoint_file is not None and i % checkpoint_interval == 0:
+                        self._save_checkpoint(checkpoint_file, checkpoint_format, {
+                            "step_index": i,
+                            "T": T,
+                            "rejection_count": rejection_count,
+                            "min_gbe": min_gbe,
+                            "prev_gbe": prev_gbe,
+                            "best_dump": best_dump,
+                            "current_structure_dump": _current_dump,
+                            "GBE_vals": self.GBE_vals,
+                            "accepted_idx": self.accepted_idx,
+                            "operation_list": self.operation_list,
+                            "rng_state": self.local_random.bit_generator.state,
+                            "run_params": {
+                                "E_accept": E_accept, "max_steps": max_steps,
+                                "E_tol": E_tol, "max_rejections": max_rejections,
+                                "cooldown_rate": cooldown_rate, "unique_id": str(unique_id),
+                            },
+                        })
                     break
-            # The temperature is cooled down to gradually reduce the probability of accepting worse solutions over time and let the MC minimization converge
+
             T *= cooldown_rate
+
+            if checkpoint_file is not None and i % checkpoint_interval == 0:
+                self._save_checkpoint(checkpoint_file, checkpoint_format, {
+                    "step_index": i,
+                    "T": T,
+                    "rejection_count": rejection_count,
+                    "min_gbe": min_gbe,
+                    "prev_gbe": prev_gbe,
+                    "best_dump": best_dump,
+                    "current_structure_dump": _current_dump,
+                    "GBE_vals": self.GBE_vals,
+                    "accepted_idx": self.accepted_idx,
+                    "operation_list": self.operation_list,
+                    "rng_state": self.local_random.bit_generator.state,
+                    "run_params": {
+                        "E_accept": E_accept, "max_steps": max_steps,
+                        "E_tol": E_tol, "max_rejections": max_rejections,
+                        "cooldown_rate": cooldown_rate, "unique_id": str(unique_id),
+                    },
+                })
+
+        if checkpoint_file is not None and checkpoint_file.exists():
+            checkpoint_file.unlink()
 
         return min_gbe
 
@@ -230,7 +408,8 @@ class GeneticAlgorithmMinimizer:
         self.gb_batch_energy_func = gb_batch_energy_func
         self.history = []
         self.initial_structure = initial_structure
-        self.local_random = np.random.default_rng(int(time()) if seed is None else seed)
+        self.local_random = np.random.default_rng(
+            int(time()) if seed is None else seed)
         self.manipulator = self._make_initial_manipulator()
         self.mutator = Mutator(choices, self.manipulator)
         self.manipulator.rng = self.local_random
@@ -250,7 +429,8 @@ class GeneticAlgorithmMinimizer:
             manip = GBManipulator(seed, unit_cell=self.GB.unit_cell,
                                   gb_thickness=self.GB.gb_thickness)
 
-        manip.rng = self.local_random if hasattr(self, "local_random") else None
+        manip.rng = self.local_random if hasattr(
+            self, "local_random") else None
 
         return manip
 
@@ -407,57 +587,168 @@ class GeneticAlgorithmMinimizer:
     def _is_valid_file(self, p: Optional[str]) -> bool:
         return bool(p) and Path(p).is_file()
 
-    def run_GA(self, unique_id: int | uuid.UUID | None = None) -> tuple[float, str]:
+    def _save_checkpoint(
+        self,
+        checkpoint_file: Path,
+        checkpoint_format: str,
+        state: dict,
+    ) -> None:
+        """Save GA loop state to a checkpoint file atomically.
+
+        :param checkpoint_file: Destination path.
+        :param checkpoint_format: ``"json"`` or ``"pickle"``.
+        :param state: Loop-local and instance state to persist.
+        :raises GBMinimizerValueError: If format is not ``"json"`` or ``"pickle"``.
+        """
+        if checkpoint_format not in ("json", "pickle"):
+            raise GBMinimizerValueError(
+                f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+            )
+        tmp = checkpoint_file.with_suffix(checkpoint_file.suffix + ".tmp")
+
+        if checkpoint_format == "json":
+            def _to_serializable(obj):
+                if isinstance(obj, np.ndarray):
+                    return obj.tolist()
+                if isinstance(obj, np.integer):
+                    return int(obj)
+                if isinstance(obj, np.floating):
+                    return float(obj)
+                if isinstance(obj, dict):
+                    return {k: _to_serializable(v) for k, v in obj.items()}
+                if isinstance(obj, (list, tuple)):
+                    return [_to_serializable(v) for v in obj]
+                return obj
+
+            with open(tmp, "w") as fp:
+                json.dump(_to_serializable(state), fp, indent=2)
+        else:
+            with open(tmp, "wb") as fp:
+                pickle.dump(state, fp, protocol=pickle.HIGHEST_PROTOCOL)
+
+        shutil.move(str(tmp), str(checkpoint_file))
+
+    def _load_checkpoint(
+        self,
+        checkpoint_file: Path,
+        checkpoint_format: str,
+    ) -> dict:
+        """Load GA loop state from a checkpoint file.
+
+        :param checkpoint_file: Source path.
+        :param checkpoint_format: ``"json"`` or ``"pickle"``.
+        :return: State dict as originally saved.
+        :raises GBMinimizerValueError: If format is not ``"json"`` or ``"pickle"``.
+        :raises GBMinimizerError: If the file cannot be parsed. Note: resuming with a
+            different format than was used to write the checkpoint will raise this error.
+        """
+        if checkpoint_format not in ("json", "pickle"):
+            raise GBMinimizerValueError(
+                f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+            )
+        try:
+            if checkpoint_format == "json":
+                with open(checkpoint_file, "r") as fp:
+                    return json.load(fp)
+            else:
+                with open(checkpoint_file, "rb") as fp:
+                    return pickle.load(fp)
+        except Exception as e:
+            raise GBMinimizerError(
+                f"Could not parse checkpoint file {checkpoint_file}: {e}"
+            ) from e
+
+    def run_GA(self, unique_id: int | uuid.UUID | None = None, *, checkpoint_file: str | Path | None = None, checkpoint_format: str = "json", checkpoint_interval: int = 1) -> tuple[float, str]:
         """
         Runs a genetic algorithm loop on the grain boundary structure.
 
         :param unique_id: Unique unsigned integer to which to label all files generated by the GA run.
+        :param checkpoint_file: Path to checkpoint file. If the file exists, the run resumes from it;
+            otherwise a fresh run begins and the file is created. Deleted on normal completion.
+            If ``None``, checkpointing is disabled.
+        :param checkpoint_format: Serialization format for the checkpoint file. Either ``"json"``
+            (default, human-readable) or ``"pickle"`` (binary, no numpy conversion needed).
+        :param checkpoint_interval: Save a checkpoint every N generations (default 1, i.e. every generation).
         :return: Tuple containing the minimum energy value observed and the associated dump filename.
         """
 
         if unique_id is None:
             unique_id = uuid.uuid4()
 
-        # Evaluate the initial structure
-        init_system = np.array(self.manipulator.parents[0].whole_system, copy=True)
-        init_gbe, init_dump = self.gb_energy_func(
-            self.GB,
-            self.manipulator,
-            init_system,
-            "GA_initial"+str(unique_id),
-        )
-        self.GBE_vals.append([init_gbe])
-        self.history = []
+        if checkpoint_file is not None:
+            checkpoint_file = Path(checkpoint_file)
+            if checkpoint_format not in ("json", "pickle"):
+                raise GBMinimizerValueError(
+                    f"checkpoint_format must be 'json' or 'pickle', got {checkpoint_format!r}"
+                )
 
-        best_energy = init_gbe
-        best_dump = init_dump
+        _resuming = checkpoint_file is not None and checkpoint_file.exists()
 
-        base_parent = init_dump
-        population_manipulators = []
-        population_structures = []
-        population_lineages = []
-
-        if self.initial_structure is not None:
-            seed_manip = self._make_manipulator_from_file(base_parent)
-            population_manipulators.append(seed_manip)
-            population_structures.append(
-                np.array(seed_manip.parents[0].whole_system, copy=True))
-            population_lineages.append(["START", base_parent])
-
-        n_to_generate = self.population_size - len(population_manipulators)
-        for _ in range(n_to_generate):
-            candidate_manip = self._make_manipulator_from_file(base_parent)
-            mutation, candidate_struct = self.mutator.mutate(
-                local_random=self.local_random,
-                GB=self.GB,
-                manipulator=candidate_manip,
+        if _resuming:
+            _cp = self._load_checkpoint(checkpoint_file, checkpoint_format)
+            self.GBE_vals = _cp["GBE_vals"]
+            self.history = _cp["history"]
+            self.local_random.bit_generator.state = _cp["rng_state"]
+            _start_gen = _cp["generation"] + 1
+            best_energy = _cp["best_energy"]
+            best_dump = _cp["best_dump"]
+            population_lineages = _cp["population_lineages"]
+            population_manipulators = []
+            population_structures = []
+            for lineage in population_lineages:
+                parent_path = lineage[1]
+                try:
+                    manip = self._make_manipulator_from_file(parent_path)
+                except Exception:
+                    manip = self._make_manipulator_from_file(best_dump)
+                population_manipulators.append(manip)
+                population_structures.append(
+                    np.array(manip.parents[0].whole_system, copy=True)
+                )
+        else:
+            # Evaluate the initial structure
+            init_system = np.array(
+                self.manipulator.parents[0].whole_system, copy=True)
+            init_gbe, init_dump = self.gb_energy_func(
+                self.GB,
+                self.manipulator,
+                init_system,
+                "GA_initial" + str(unique_id),
             )
-            population_manipulators.append(candidate_manip)
-            population_structures.append(candidate_struct)
-            population_lineages.append([mutation, base_parent])
+            self.GBE_vals.append([init_gbe])
+            self.history = []
+
+            best_energy = init_gbe
+            best_dump = init_dump
+
+            base_parent = init_dump
+            population_manipulators = []
+            population_structures = []
+            population_lineages = []
+
+            if self.initial_structure is not None:
+                seed_manip = self._make_manipulator_from_file(base_parent)
+                population_manipulators.append(seed_manip)
+                population_structures.append(
+                    np.array(seed_manip.parents[0].whole_system, copy=True))
+                population_lineages.append(["START", base_parent])
+
+            n_to_generate = self.population_size - len(population_manipulators)
+            for _ in range(n_to_generate):
+                candidate_manip = self._make_manipulator_from_file(base_parent)
+                mutation, candidate_struct = self.mutator.mutate(
+                    local_random=self.local_random,
+                    GB=self.GB,
+                    manipulator=candidate_manip,
+                )
+                population_manipulators.append(candidate_manip)
+                population_structures.append(candidate_struct)
+                population_lineages.append([mutation, base_parent])
+
+            _start_gen = 0
 
         # Main GA loop
-        for gen in range(self.generations):
+        for gen in range(_start_gen, self.generations):
             gen_energies, gen_files, evaluated_manipulators = self._evaluate_generation(
                 population_manipulators,
                 population_structures,
@@ -469,73 +760,85 @@ class GeneticAlgorithmMinimizer:
             valid_old_idxs = [i for i, f in enumerate(
                 gen_files) if self._is_valid_file(f)]
 
-            # If nothing valid survived evaluation, re-seed from best and continue
+            self.GBE_vals.append(gen_energies)
+            self.history.append(list(zip(population_lineages, gen_energies)))
+
             if not valid_old_idxs:
+                # If nothing valid survived evaluation, re-seed from best
                 next_manipulators = []
                 next_structures = []
                 next_lineages = []
 
                 for _ in range(self.population_size):
-                    candidate_manip = self._make_manipulator_from_file(best_dump)
+                    candidate_manip = self._make_manipulator_from_file(
+                        best_dump)
                     mutation, candidate_struct = self.mutator.mutate(
                         local_random=self.local_random, GB=self.GB, manipulator=candidate_manip)
                     next_manipulators.append(candidate_manip)
                     next_structures.append(candidate_struct)
                     next_lineages.append([mutation, best_dump])
 
-                self.GBE_vals.append(gen_energies)
-                self.history.append(list(zip(population_lineages, gen_energies)))
-
                 population_manipulators = next_manipulators
                 population_structures = next_structures
                 population_lineages = next_lineages
-                continue
+            else:
+                for i in valid_old_idxs:
+                    gbe = gen_energies[i]
+                    dump_file_name = gen_files[i]
+                    if gbe < best_energy:
+                        best_energy = gbe
+                        best_dump = dump_file_name
 
-            for i in valid_old_idxs:
-                gbe = gen_energies[i]
-                dump_file_name = gen_files[i]
-                if gbe < best_energy:
-                    best_energy = gbe
-                    best_dump = dump_file_name
+                # Build compressed arrays of only valid candidates for selection and breeding
+                valid_energies = [gen_energies[i] for i in valid_old_idxs]
+                valid_files = [gen_files[i] for i in valid_old_idxs]
 
-            self.GBE_vals.append(gen_energies)
-            self.history.append(list(zip(population_lineages, gen_energies)))
+                # Selection
+                lowest_valid_idxs, inter_valid_idxs = self._select_indices_by_energy(
+                    valid_energies)
 
-            # Build compressed arrays of only valid candidates for selection and breeding
-            valid_energies = [gen_energies[i] for i in valid_old_idxs]
-            valid_files = [gen_files[i] for i in valid_old_idxs]
+                # Carry over lowest energies
+                next_manipulators = []
+                next_structures = []
+                next_lineages = []
+                for j in lowest_valid_idxs:
+                    old_idx = valid_old_idxs[j]
+                    manip = evaluated_manipulators[old_idx]
+                    dump = gen_files[old_idx]
+                    if manip is None or dump is None:
+                        continue
+                    next_manipulators.append(manip)
+                    next_structures.append(manip.parents[0].whole_system)
+                    next_lineages.append(["carryover", dump])
 
-            # Selection
-            lowest_valid_idxs, inter_valid_idxs = self._select_indices_by_energy(
-                valid_energies)
+                valid_files_str = [f for f in valid_files if f is not None]
 
-            # Carry over lowest energies
-            next_manipulators = []
-            next_structures = []
-            next_lineages = []
-            for j in lowest_valid_idxs:
-                old_idx = valid_old_idxs[j]
-                manip = evaluated_manipulators[old_idx]
-                dump = gen_files[old_idx]
-                if manip is None or dump is None:
-                    continue
-                next_manipulators.append(manip)
-                next_structures.append(manip.parents[0].whole_system)
-                next_lineages.append(["carryover", dump])
+                new_manips, new_structs, new_lineages = self._make_next_generation(
+                    valid_files_str,
+                    inter_valid_idxs,
+                )
 
-            valid_files_str = [f for f in valid_files if f is not None]
+                next_manipulators.extend(new_manips)
+                next_structures.extend(new_structs)
+                next_lineages.extend(new_lineages)
 
-            new_manips, new_structs, new_lineages = self._make_next_generation(
-                valid_files_str,
-                inter_valid_idxs,
-            )
+                population_manipulators = next_manipulators[:self.population_size]
+                population_structures = next_structures[:self.population_size]
+                population_lineages = next_lineages[:self.population_size]
 
-            next_manipulators.extend(new_manips)
-            next_structures.extend(new_structs)
-            next_lineages.extend(new_lineages)
+            if checkpoint_file is not None and (gen + 1) % checkpoint_interval == 0:
+                self._save_checkpoint(checkpoint_file, checkpoint_format, {
+                    "generation": gen,
+                    "best_energy": best_energy,
+                    "best_dump": best_dump,
+                    "GBE_vals": self.GBE_vals,
+                    "history": self.history,
+                    "rng_state": self.local_random.bit_generator.state,
+                    "run_params": {"unique_id": str(unique_id)},
+                    "population_lineages": population_lineages,
+                })
 
-            population_manipulators = next_manipulators[:self.population_size]
-            population_structures = next_structures[:self.population_size]
-            population_lineages = next_lineages[:self.population_size]
+        if checkpoint_file is not None and checkpoint_file.exists():
+            checkpoint_file.unlink()
 
         return (best_energy, best_dump)
