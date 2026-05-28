@@ -21,6 +21,7 @@ except ImportError:
 
 from GBOpt import GBMaker, GBManipulator, GBMinimizer
 from GBOpt.BoundarySpec import FiveDOFSpec
+from GBOpt.Checkpoint import ENERGY_PENALTY
 
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
@@ -155,7 +156,7 @@ def get_gb_energy(
                 pass
         return gbe_val, f"final_{unique_id}.dump"
     else:
-        return 1.0e30, ""
+        return ENERGY_PENALTY, ""
 
 
 def run_mc(
@@ -241,7 +242,7 @@ def run_mc(
         cooldown_rate=cooldown_rate,
         E_tol=e_tol,
         E_accept=e_accept,
-        # checkpoint_file="checkpoint.json",
+        checkpoint_file="checkpoint.json",
     )
 
     op_list = MC.operation_list
@@ -253,7 +254,8 @@ def run_mc(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run MC grain boundary optimization")
+    parser = argparse.ArgumentParser(
+        description="Run MC grain boundary optimization")
     parser.add_argument("--material", required=True)
     parser.add_argument("--boundary", required=True)
     parser.add_argument("--run", type=int, default=1, metavar="N",
@@ -267,7 +269,8 @@ def main() -> None:
     args = parser.parse_args()
 
     init_type = "high_energy" if args.high_energy else "standard"
-    run_dir = PROJECT_ROOT / args.material / args.boundary / "MC" / init_type / f"run{args.run}"
+    run_dir = PROJECT_ROOT / args.material / \
+        args.boundary / "MC" / init_type / f"run{args.run}"
     run_dir.mkdir(parents=True, exist_ok=True)
     os.chdir(run_dir)
 
