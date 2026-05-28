@@ -10,9 +10,10 @@ import subprocess
 import sys
 from functools import partial
 from pathlib import Path
-from typing import List, Tuple
 
 import numpy as np
+
+from GBOpt.Checkpoint import ENERGY_PENALTY
 
 try:
     import tomllib
@@ -21,7 +22,6 @@ except ImportError:
 
 from GBOpt import GBMaker, GBManipulator, GBMinimizer
 from GBOpt.BoundarySpec import FiveDOFSpec
-from GBOpt.Checkpoint import ENERGY_PENALTY
 
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
@@ -57,12 +57,12 @@ def _load_boundaries():
 def _build_gb(
     lattice_parameter: float,
     structure: str,
-    atom_types: str | List[str],
+    atom_types: str | list[str],
     misorientation: np.ndarray,
     gb_thickness: float,
     *,
     x_dim_min: int,
-    repeat_factor: Tuple[int, int],
+    repeat_factor: tuple[int, int],
     interaction_distance: float,
 ) -> GBMaker:
     return GBMaker.from_boundary_spec(
@@ -95,7 +95,7 @@ def get_gb_energy(
     module: str = "",
     material: str = "",
     **kwargs,
-) -> Tuple[float, str]:
+) -> tuple[float, str]:
     box_dims = manipulator.parents[0].box_dims
     out_structure = f"output_{unique_id}.dat"
     output_txt = f"output_{unique_id}.txt"
@@ -141,10 +141,18 @@ def get_gb_energy(
     env = os.environ.copy()
     if _is_teton():
         env["OMP_NUM_THREADS"] = str(n_threads)
+        env.setdefault("OMP_PROC_BIND", "spread")
+        env.setdefault("OMP_PLACES", "threads")
 
-    with open(results_out, "w") as f:
-        P = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT,
-                           env=env, check=False, shell=True)
+    # Don't route subprocess stdout to results_out: LAMMPS writes the GBE via
+    # its own `print ... file` handle, but Kokkos finalization also writes the
+    # OMP_PROC_BIND warning to fd 1 at position 0, overwriting the GBE value.
+    # LAMMPS screen output is already captured via -sc; redirect stdout here to
+    # the log file so any shell-level messages (module load, srun) aren't lost.
+    with open(logfile, "a") as log:
+        P = subprocess.run(
+            cmd, stdout=log, stderr=subprocess.STDOUT, env=env, check=False, shell=True
+        )
 
     if not P.returncode:
         txt = Path(results_out).read_text()
@@ -166,7 +174,7 @@ def run_mc(
     atom_types: str,
     interaction_distance: float,
     x_dim_min: int = 60,
-    repeat_factor: Tuple[int, int] = (2, 3),
+    repeat_factor: tuple[int, int] = (2, 3),
     misorientation: np.ndarray,
     lmp_binary: str = "lmp",
     input_script: str = "lmp.in",
@@ -175,7 +183,7 @@ def run_mc(
     cooldown_rate: float = 0.99,
     e_tol: float = 1e-8,
     e_accept: float = 0.1,
-    choices: List[str] | None = None,
+    choices: list[str] | None = None,
     slurm_cfg: dict | None = None,
     material: str = "",
     initial_structure: Path | None = None,
@@ -207,11 +215,15 @@ def run_mc(
         nodes=nodes,
         partition=partition,
         module=module,
-        material=material
+        material=material,
     )
 
-    GB0 = _build_gb(
-        lattice_parameter, structure, atom_types, misorientation, lattice_parameter,
+    GB0 = GBMaker(
+        lattice_parameter,
+        structure,
+        lattice_parameter,
+        misorientation,
+        atom_types=atom_types,
         interaction_distance=interaction_distance,
         x_dim_min=x_dim_min,
         repeat_factor=repeat_factor,
@@ -219,15 +231,22 @@ def run_mc(
     gb_thickness = 2 * max(GB0.spacing["x"]["left"], GB0.spacing["x"]["right"])
     del GB0
 
-    GB = _build_gb(
-        lattice_parameter, structure, atom_types, misorientation, gb_thickness,
+    GB = GBMaker(
+        lattice_parameter,
+        structure,
+        gb_thickness,
+        misorientation,
+        atom_types=atom_types,
         interaction_distance=interaction_distance,
         x_dim_min=x_dim_min,
         repeat_factor=repeat_factor,
     )
 
-    extra = {"initial_structure": str(
-        initial_structure)} if initial_structure is not None else {}
+    extra = (
+        {"initial_structure": str(initial_structure)}
+        if initial_structure is not None
+        else {}
+    )
     MC = GBMinimizer.MonteCarloMinimizer(
         copy.deepcopy(GB),
         energy_fn,
@@ -247,30 +266,52 @@ def run_mc(
 
     op_list = MC.operation_list
     with open("gbe_vals.txt", "w") as f:
-        for i, val in enumerate(MC.GBE_vals):
-            f.write(f"{op_list[i][0]} {val} {op_list[i][1]}\n")
+        f.writelines(f"{op_list[i][0]} {val} {op_list[i][1]}\n" for i,
+                     val in enumerate(MC.GBE_vals))
 
     print(f"Final minimum GBE = {min(MC.GBE_vals)}")
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Run MC grain boundary optimization")
+    parser = argparse.ArgumentParser(description="Run MC grain boundary optimization")
     parser.add_argument("--material", required=True)
     parser.add_argument("--boundary", required=True)
-    parser.add_argument("--run", type=int, default=1, metavar="N",
-                        help="Run index; controls output directory and seed offset (seed = base_seed + N - 1)")
-    parser.add_argument("--high-energy", action="store_true",
-                        help="Use high-energy restart structure from materials/")
-    parser.add_argument("--e-accept", type=float, default=None, metavar="E",
-                        help="Acceptance energy threshold in eV (overrides mc.toml)")
-    parser.add_argument("--initial-structure", default=None, metavar="PATH",
-                        help="Path to initial LAMMPS data file; overrides GBMaker-generated structure")
+    parser.add_argument(
+        "--run",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Run index; controls output directory and seed offset (seed = base_seed + N - 1)",
+    )
+    parser.add_argument(
+        "--high-energy",
+        action="store_true",
+        help="Use high-energy restart structure from materials/",
+    )
+    parser.add_argument(
+        "--e-accept",
+        type=float,
+        default=None,
+        metavar="E",
+        help="Acceptance energy threshold in eV (overrides mc.toml)",
+    )
+    parser.add_argument(
+        "--initial-structure",
+        default=None,
+        metavar="PATH",
+        help="Path to initial LAMMPS data file; overrides GBMaker-generated structure",
+    )
     args = parser.parse_args()
 
     init_type = "high_energy" if args.high_energy else "standard"
-    run_dir = PROJECT_ROOT / args.material / \
-        args.boundary / "MC" / init_type / f"run{args.run}"
+    run_dir = (
+        PROJECT_ROOT
+        / args.material
+        / args.boundary
+        / "MC"
+        / init_type
+        / f"run{args.run}"
+    )
     run_dir.mkdir(parents=True, exist_ok=True)
     os.chdir(run_dir)
 
@@ -293,7 +334,9 @@ def main() -> None:
     boundaries = _load_boundaries()
     if args.boundary not in boundaries:
         print(
-            f"Unknown boundary '{args.boundary}'. Available: {list(boundaries)}", file=sys.stderr)
+            f"Unknown boundary '{args.boundary}'. Available: {list(boundaries)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     bnd = boundaries[args.boundary]
