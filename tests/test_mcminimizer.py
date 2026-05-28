@@ -11,7 +11,11 @@ from pathlib import Path
 import numpy as np
 
 from GBOpt.GBMaker import GBMaker
-from GBOpt.GBMinimizer import GBMinimizerError, GBMinimizerValueError, MonteCarloMinimizer
+from GBOpt.GBMinimizer import (
+    GBMinimizerError,
+    GBMinimizerValueError,
+    MonteCarloMinimizer,
+)
 
 
 class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
@@ -73,11 +77,11 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
         self.assertEqual(json_files, [])
         self.assertEqual(pkl_files, [])
 
-    def test_run_mc_checkpoint_deleted_on_completion(self):
+    def test_run_mc_checkpoint_kept_on_completion(self):
         mc = self._make_minimizer(self._make_energy_func())
         cp = Path(self.tmpdir.name) / "mc.json"
         mc.run_MC(max_steps=3, unique_id=2, checkpoint_file=cp)
-        self.assertFalse(cp.exists())
+        self.assertTrue(cp.exists())
 
     def test_run_mc_checkpoint_file_is_valid_json(self):
         mc = self._make_minimizer(self._make_energy_func(crash_after=3))
@@ -87,12 +91,14 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
         self.assertTrue(cp.exists())
         with open(cp) as f:
             state = json.load(f)
-        for key in (
-            "step_index", "T", "rejection_count", "min_gbe", "prev_gbe",
-            "GBE_vals", "accepted_idx", "operation_list", "rng_state",
-            "current_structure_dump", "run_params",
-        ):
+        for key in ("schema_version", "minimizer", "progress_unit",
+                    "progress_index", "best_energy", "rng_state", "run_params", "state"):
             self.assertIn(key, state)
+        for key in ("T", "rejection_count", "prev_gbe", "GBE_vals",
+                    "accepted_idx", "operation_list", "current_structure_dump"):
+            self.assertIn(key, state["state"])
+        self.assertEqual(state["minimizer"], "MonteCarloMinimizer")
+        self.assertEqual(state["progress_unit"], "step")
 
     def test_run_mc_checkpoint_format_pickle(self):
         mc = self._make_minimizer(self._make_energy_func(crash_after=3))
@@ -103,8 +109,8 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
         self.assertTrue(cp.exists())
         with open(cp, "rb") as f:
             state = pickle.load(f)
-        self.assertIn("step_index", state)
-        self.assertIn("GBE_vals", state)
+        self.assertIn("progress_index", state)
+        self.assertIn("GBE_vals", state["state"])
 
     def test_run_mc_resume_from_json(self):
         # First run: crash after 3 calls (initial + step1 + step2 succeed; step3 raises)
@@ -114,13 +120,13 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
             mc.run_MC(max_steps=10, unique_id=5, checkpoint_file=cp)
         with open(cp) as f:
             saved = json.load(f)
-        resumed_from_step = saved["step_index"]
+        resumed_from_step = saved["progress_index"]
         gbe_count_before_resume = len(mc.GBE_vals)
         self.assertGreater(resumed_from_step, 0)
         # Resume: swap in a non-crashing energy func and continue
         mc.gb_energy_func = self._make_energy_func()
         mc.run_MC(max_steps=10, unique_id=5, checkpoint_file=cp)
-        self.assertFalse(cp.exists())
+        self.assertTrue(cp.exists())
         self.assertGreater(len(mc.GBE_vals), gbe_count_before_resume)
 
     def test_run_mc_resume_from_pickle(self):
@@ -133,7 +139,7 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
         mc.gb_energy_func = self._make_energy_func()
         mc.run_MC(max_steps=10, unique_id=6, checkpoint_file=cp,
                   checkpoint_format="pickle")
-        self.assertFalse(cp.exists())
+        self.assertTrue(cp.exists())
 
     def test_run_mc_corrupted_checkpoint_raises(self):
         cp = Path(self.tmpdir.name) / "corrupt.json"
@@ -159,7 +165,57 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
                       checkpoint_file=cp, checkpoint_interval=3)
         with open(cp) as f:
             state = json.load(f)
-        self.assertEqual(state["step_index"], 3)
+        self.assertEqual(state["progress_index"], 3)
+
+    def test_resume_without_unique_id_restores_original_label(self):
+        """Resuming run_MC without passing unique_id continues under the
+        original label stored in the checkpoint."""
+        cp = Path(self.tmpdir.name) / "mc_uid.json"
+        mc1 = self._make_minimizer(self._make_energy_func())
+        mc1.run_MC(max_steps=2, unique_id=7777, checkpoint_file=cp)
+
+        mc2 = self._make_minimizer(self._make_energy_func())
+        mc2.run_MC(max_steps=4, checkpoint_file=cp)  # no unique_id
+
+        with open(cp) as f:
+            saved = json.load(f)
+        self.assertEqual(saved["run_params"]["unique_id"], "7777")
+
+    def test_two_fresh_runs_without_unique_id_use_different_labels(self):
+        """Each fresh run_MC() call without unique_id must generate a distinct label."""
+        cp1 = Path(self.tmpdir.name) / "mc1.json"
+        cp2 = Path(self.tmpdir.name) / "mc2.json"
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=1, checkpoint_file=cp1)
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=1, checkpoint_file=cp2)
+        with open(cp1) as f:
+            uid1 = json.load(f)["run_params"]["unique_id"]
+        with open(cp2) as f:
+            uid2 = json.load(f)["run_params"]["unique_id"]
+        self.assertNotEqual(uid1, uid2)
+
+    def test_resume_restores_cooldown_rate_from_checkpoint(self):
+        """Resuming without passing cooldown_rate uses the value from the checkpoint."""
+        cp = Path(self.tmpdir.name) / "mc_cr.json"
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=2, cooldown_rate=0.8, unique_id=1, checkpoint_file=cp)
+        # Resume without specifying cooldown_rate (default is 1.0)
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=4, checkpoint_file=cp)
+        with open(cp) as f:
+            self.assertAlmostEqual(
+                json.load(f)["run_params"]["cooldown_rate"], 0.8)
+
+    def test_resume_restores_min_steps_from_checkpoint(self):
+        """Resuming without passing min_steps uses the value stored in the checkpoint."""
+        cp = Path(self.tmpdir.name) / "mc_ms.json"
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=2, min_steps=5, unique_id=2, checkpoint_file=cp)
+        self._make_minimizer(self._make_energy_func()).run_MC(
+            max_steps=10, checkpoint_file=cp)
+        with open(cp) as f:
+            self.assertEqual(json.load(f)["run_params"]["min_steps"], 5)
 
 
 if __name__ == "__main__":
