@@ -175,6 +175,17 @@ class TestGBMaker(unittest.TestCase):
         self.assertGreater(self.gbm.z_dim, 0)
         self.assertGreater(self.gbm.radius, 0)
 
+    def test_inplane_periodic_type_and_length(self):
+        result = self.gbm.inplane_periodic
+        self.assertIsInstance(result, tuple)
+        self.assertEqual(len(result), 2)
+        self.assertTrue(all(isinstance(v, bool) for v in result))
+
+    def test_inplane_periodic_fully_periodic_for_csl_boundary(self):
+        # Sigma5 [001] 36.87° boundary is a fully coherent CSL — both in-plane
+        # directions must be periodic.
+        self.assertEqual(self.gbm.inplane_periodic, (True, True))
+
     def test_box_dimensions(self):
         box_dims = self.gbm.box_dims
         self.assertTrue(isinstance(box_dims, np.ndarray))
