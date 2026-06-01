@@ -1355,6 +1355,11 @@ class GBMaker:
 
     # Additional getters for other class properties
     @property
+    def inplane_periodic(self) -> tuple:
+        """Read-only view of the in-plane periodicity flags (y, z)."""
+        return tuple(bool(v) for v in self.__inplane_periodic)
+
+    @property
     def box_dims(self) -> np.ndarray:
         return self.__box_dims
 
