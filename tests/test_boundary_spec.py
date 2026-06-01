@@ -1,5 +1,6 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+import numpy as np
 import pytest
 from GBOpt.BoundarySpec import (
     FiveDOFSpec,
@@ -11,6 +12,7 @@ from GBOpt.BoundarySpec import (
     BoundarySpecTypeError,
     BoundarySpecValueError,
     _CSLSpecBase,
+    BoundaryEmbedding,
 )
 
 
@@ -125,3 +127,33 @@ class TestBoundarySpecErrorHierarchy:
     def test_raise_and_catch_as_base(self):
         with pytest.raises(BoundarySpecError):
             raise BoundarySpecValueError("invalid field")
+
+
+class TestBoundaryEmbedding:
+    def _make(self, P=None, Q=None, exact=True, coherent=True, source="pq"):
+        R = np.eye(3)
+        return BoundaryEmbedding(
+            P=P, Q=Q, R_left=R, R_right=R,
+            exact=exact, coherent=coherent, source=source,
+        )
+
+    def test_instantiate_with_arrays(self):
+        P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
+        Q = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
+        emb = self._make(P=P, Q=Q)
+        assert np.array_equal(emb.P, P)
+        assert np.array_equal(emb.Q, Q)
+        assert np.array_equal(emb.R_left, np.eye(3))
+        assert np.array_equal(emb.R_right, np.eye(3))
+
+    def test_instantiate_with_none_pq(self):
+        emb = self._make(P=None, Q=None, exact=False, coherent=False, source="five_dof")
+        assert emb.P is None
+        assert emb.Q is None
+        assert emb.exact is False
+        assert emb.coherent is False
+        assert emb.source == "five_dof"
+
+    def test_source_stored(self):
+        emb = self._make(source="csl")
+        assert emb.source == "csl"

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from typing import Literal, Sequence
 
+import numpy as np
+
 ConstructionMode = Literal["exact", "prefer_exact", "approximate"]
 
 
@@ -52,3 +54,26 @@ class CSLExactSpec(_CSLSpecBase):
 @dataclass(frozen=True)
 class CSLApproxSpec(_CSLSpecBase):
     angle_deg: float = None
+
+
+# ---------------------------------------------------------------------------
+# Internal canonical boundary embedding
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class BoundaryEmbedding:
+    """Canonical internal representation produced by every input adapter.
+
+    P and Q are the exact row-wise orientation matrices (None for
+    approximate-only paths). R_left and R_right are floating-point rotation
+    matrices matching GBMaker's internal convention. exact and coherent flag
+    the construction path and interface type. source names the originating
+    format ("pq", "csl", "five_dof").
+    """
+    P: np.ndarray | None
+    Q: np.ndarray | None
+    R_left: np.ndarray
+    R_right: np.ndarray
+    exact: bool
+    coherent: bool
+    source: str
