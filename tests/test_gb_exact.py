@@ -7,14 +7,139 @@ import pytest
 
 from unittest.mock import patch
 
-from GBOpt.BoundarySpec import BoundaryEmbedding, PQSpec
+from GBOpt.BoundarySpec import BoundaryEmbedding, BoundarySpecError, PQSpec
 from GBOpt.GBMaker import GBMaker
-from GBOpt.Utils.gb_exact import canonicalize_pq, pq_spec_to_embedding
+from GBOpt.Utils.gb_exact import (
+    canonicalize_pq,
+    pq_spec_to_embedding,
+    quaternion_to_rotation_matrix,
+    validate_and_normalize_quaternion,
+    validate_sigma,
+)
 
 
 def _make_identity_pair():
     I = np.eye(3, dtype=float)
     return I.copy(), I.copy()
+
+
+# ---------------------------------------------------------------------------
+# Step 10 — integer-quaternion validation and rotation matrix
+# ---------------------------------------------------------------------------
+
+class TestValidateAndNormalizeQuaternion:
+    # Σ5 [001] 53.13° — integer quaternion [2, 0, 0, 1], N = 5
+    SIGMA5_QUAT = [2, 0, 0, 1]
+
+    def test_valid_returns_unit_quaternion(self):
+        q = validate_and_normalize_quaternion(self.SIGMA5_QUAT)
+        assert q.shape == (4,)
+        assert abs(np.dot(q, q) - 1.0) < 1e-12
+
+    def test_valid_direction_preserved(self):
+        # Normalized quaternion should be parallel to the input.
+        q_in = np.asarray(self.SIGMA5_QUAT, dtype=float)
+        q_out = validate_and_normalize_quaternion(q_in)
+        # All ratios q_out[i] / q_in[i] (for nonzero components) equal 1/sqrt(5).
+        nonzero = q_in != 0
+        ratios = q_out[nonzero] / q_in[nonzero]
+        assert np.allclose(ratios, ratios[0], atol=1e-12)
+
+    def test_wrong_length_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_and_normalize_quaternion([1, 0, 0])
+
+    def test_wrong_shape_2d_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_and_normalize_quaternion([[1, 0, 0, 0]])
+
+    def test_non_integer_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_and_normalize_quaternion([1.5, 0, 0, 1])
+
+    def test_zero_quaternion_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_and_normalize_quaternion([0, 0, 0, 0])
+
+    def test_integer_valued_float_input_accepted(self):
+        # Components that are floats but integer-valued (e.g. 2.0) must be accepted.
+        q = validate_and_normalize_quaternion([2.0, 0.0, 0.0, 1.0])
+        assert abs(np.dot(q, q) - 1.0) < 1e-12
+
+
+class TestQuaternionToRotationMatrix:
+    # Σ5 [001] 53.13° — quat [2, 0, 0, 1] (Hamilton [w,x,y,z]),
+    # expected R = [[3/5, -4/5, 0], [4/5, 3/5, 0], [0, 0, 1]]
+    SIGMA5_QUAT_NORM = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
+    SIGMA5_R_EXPECTED = np.array([
+        [3/5, -4/5, 0],
+        [4/5,  3/5, 0],
+        [0,    0,   1],
+    ])
+
+    def test_sigma5_matches_expected(self):
+        R = quaternion_to_rotation_matrix(self.SIGMA5_QUAT_NORM)
+        np.testing.assert_allclose(R, self.SIGMA5_R_EXPECTED, atol=1e-12)
+
+    def test_output_is_proper_rotation(self):
+        R = quaternion_to_rotation_matrix(self.SIGMA5_QUAT_NORM)
+        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-12)
+        assert abs(np.linalg.det(R) - 1.0) < 1e-12
+
+    def test_identity_quaternion_gives_identity_matrix(self):
+        # [w=1, x=0, y=0, z=0] → identity rotation
+        q_id = np.array([1.0, 0.0, 0.0, 0.0])
+        R = quaternion_to_rotation_matrix(q_id)
+        np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
+
+    def test_sigma5_36deg_quat(self):
+        # Σ5 [001] 36.87° — quat [3, 0, 0, 1], N = 10
+        # expected R = [[4/5, -3/5, 0], [3/5, 4/5, 0], [0, 0, 1]]
+        q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
+        R = quaternion_to_rotation_matrix(q)
+        expected = np.array([
+            [4/5, -3/5, 0],
+            [3/5,  4/5, 0],
+            [0,    0,   1],
+        ])
+        np.testing.assert_allclose(R, expected, atol=1e-12)
+
+
+# ---------------------------------------------------------------------------
+# Step 11 — sigma-from-quaternion validation
+# ---------------------------------------------------------------------------
+
+class TestValidateSigma:
+    # Σ5: quat [2, 0, 0, 1], |q|² = 5 (already odd) → sigma = 5
+    # Σ5: quat [3, 0, 0, 1], |q|² = 10 = 2×5 → sigma = 5
+    # Σ13: quat [3, 2, 0, 0], |q|² = 13 → sigma = 13
+
+    def test_sigma5_quat_2001_correct(self):
+        validate_sigma([2, 0, 0, 1], 5)  # must not raise
+
+    def test_sigma5_quat_3001_correct(self):
+        # |q|² = 10, divided by 2 once → sigma = 5
+        validate_sigma([3, 0, 0, 1], 5)  # must not raise
+
+    def test_sigma13_correct(self):
+        # |q|² = 9+4 = 13 (odd) → sigma = 13
+        validate_sigma([3, 2, 0, 0], 13)  # must not raise
+
+    def test_wrong_sigma_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_sigma([2, 0, 0, 1], 3)  # sigma=5, not 3
+
+    def test_wrong_sigma_off_by_one_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_sigma([2, 0, 0, 1], 4)
+
+    def test_power_of_two_stripped_correctly(self):
+        # quat [2, 2, 0, 0]: |q|² = 8 = 2³ → sigma = 1
+        validate_sigma([2, 2, 0, 0], 1)  # must not raise; would raise if sigma=8
+
+    def test_power_of_two_stripped_wrong_sigma_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_sigma([2, 2, 0, 0], 8)  # sigma=1, not 8
 
 
 class TestCanonicalizePQ:

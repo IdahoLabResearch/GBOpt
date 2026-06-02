@@ -141,6 +141,92 @@ def _canonicalize_matrix(M: np.ndarray) -> np.ndarray:
     return np.array(rows, dtype=float)
 
 
+
+def validate_and_normalize_quaternion(quat: np.ndarray) -> np.ndarray:
+    """Validate that quat is an integer quaternion and return its normalized form.
+
+    A rotation quaternion encodes a rotation by angle θ about a unit axis
+    n̂ = (nx, ny, nz) in Hamilton scalar-first order ``[w, x, y, z]``,
+    where ``w = cos(θ/2)`` and ``(x, y, z) = sin(θ/2) · n̂``. For a CSL
+    grain boundary the rotation angle is rational, so the quaternion
+    components can be exact integers; the unit quaternion is obtained by
+    dividing by the norm.
+
+    :param quat: Candidate integer quaternion in Hamilton order [w, x, y, z],
+        shape (4,).
+    :returns: Normalized (unit-length) quaternion as ``np.ndarray`` of shape
+        (4,) with dtype float.
+    :raises BoundarySpecError: If any component is non-integer or the
+        quaternion is zero.
+    """
+    arr = np.asarray(quat, dtype=float)
+    if arr.ndim != 1 or arr.shape[0] != 4:
+        raise BoundarySpecError(
+            f"Quaternion must be a 1-D array of length 4; got shape {arr.shape}."
+        )
+    if not np.allclose(arr, np.round(arr), atol=1e-9, rtol=0.0):
+        raise BoundarySpecError(
+            f"Quaternion components must be integer-valued; got {arr}. "
+            "CSLExactSpec requires an integer quaternion [a, b, c, d]."
+        )
+    int_q = np.round(arr).astype(int)
+    norm_sq = int(np.dot(int_q, int_q))
+    if norm_sq == 0:
+        raise BoundarySpecError(
+            "Quaternion is the zero vector; a non-zero integer quaternion is required."
+        )
+    return arr / np.sqrt(float(norm_sq))
+
+
+def quaternion_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
+    """Convert a unit quaternion [w, x, y, z] to a 3×3 rotation matrix.
+
+    Delegates to ``scipy.spatial.transform.Rotation`` using scalar-last order
+    internally; the reordering is handled here so callers always use Hamilton
+    scalar-first order. The quaternion must already be normalized — call
+    ``validate_and_normalize_quaternion`` first.
+
+    :param quat: Normalized unit quaternion in Hamilton scalar-first order
+        [w, x, y, z], shape (4,).
+    :returns: Rotation matrix ``R`` of shape (3, 3) such that
+        ``v_rotated = v @ R.T`` (row-vector convention).
+    """
+    from scipy.spatial.transform import Rotation
+
+    q = np.asarray(quat, dtype=float)
+    # scipy uses scalar-last order [x, y, z, w]
+    return Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+
+
+def validate_sigma(quat: np.ndarray, sigma: int) -> None:
+    """Validate that sigma derived from quat matches the user-supplied value.
+
+    Sigma (Σ) is the reciprocal density of coincidence sites for a CSL grain
+    boundary. For an integer quaternion ``q = [w, x, y, z]``, sigma is the
+    odd part of ``N = w² + x² + y² + z²`` — that is, ``N`` divided by its
+    largest power-of-2 factor. For example: ``q = [2, 0, 0, 1]`` gives
+    ``N = 5``, so ``sigma = 5``; ``q = [3, 0, 0, 1]`` gives ``N = 10 = 2·5``,
+    so ``sigma = 5``. Validation is an exact integer equality check.
+
+    :param quat: Integer quaternion (unnormalized) in Hamilton order
+        [w, x, y, z], shape (4,).
+    :param sigma: Expected sigma value to validate against.
+    :raises BoundarySpecError: If the derived sigma does not match.
+    """
+    int_q = np.round(np.asarray(quat, dtype=float)).astype(int)
+    norm_sq = int(np.dot(int_q, int_q))
+    # Divide out the largest power of 2 to obtain the odd sigma value.
+    while norm_sq % 2 == 0:
+        norm_sq //= 2
+    derived = norm_sq
+    if derived != int(sigma):
+        raise BoundarySpecError(
+            f"Sigma mismatch: quaternion {int_q.tolist()} gives "
+            f"sigma={derived}, but sigma={sigma} was provided."
+        )
+
+
+
 def canonicalize_pq(
     P: np.ndarray,
     Q: np.ndarray,
