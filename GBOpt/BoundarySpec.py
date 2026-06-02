@@ -28,6 +28,58 @@ class BoundarySpecValueError(BoundarySpecError, ValueError):
 # Boundary-format dataclasses
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class FiveDOFSpec:
+    """Five-degree-of-freedom boundary specified by Euler-angle parameters.
+
+    :param params: Five-element sequence ``[alpha, beta, gamma, theta, phi]``
+        (ZXZ Euler angles plus inclination), all as finite floats.
+    """
+
+    params: Sequence[float]
+
+    def __post_init__(self):
+        try:
+            arr = np.asarray(self.params, dtype=float)
+        except (ValueError, TypeError) as e:
+            raise BoundarySpecTypeError(
+                f"FiveDOFSpec.params cannot be converted to a numeric array: {e}"
+            ) from e
+        if arr.ndim != 1 or arr.shape[0] != 5:
+            raise BoundarySpecValueError(
+                "FiveDOFSpec.params must be a 5-element sequence of "
+                f"[alpha, beta, gamma, theta, phi]; got shape {arr.shape}"
+            )
+        if not np.all(np.isfinite(arr)):
+            raise BoundarySpecValueError(
+                "FiveDOFSpec.params contains non-finite entries (NaN or inf)"
+            )
+
+
+def _validate_miller(seq, name: str, length: int = 3) -> None:
+    """Raise BoundarySpecError if seq is not a non-zero integer sequence of the given length."""
+    try:
+        arr = np.asarray(seq, dtype=float)
+    except (ValueError, TypeError) as e:
+        raise BoundarySpecTypeError(
+            f"{name} cannot be converted to a numeric array: {e}"
+        ) from e
+    if arr.ndim != 1 or arr.shape[0] != length:
+        raise BoundarySpecValueError(
+            f"{name} must be a {length}-element integer sequence; got shape {arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise BoundarySpecValueError(
+            f"{name} contains non-finite entries (NaN or inf)"
+        )
+    if not np.allclose(arr, np.round(arr), atol=1e-9, rtol=0.0):
+        raise BoundarySpecValueError(
+            f"{name} must have integer-valued components; got {arr.tolist()}"
+        )
+    if not np.any(np.round(arr).astype(int)):
+        raise BoundarySpecValueError(f"{name} must not be all-zero")
+
+
 def _validate_pq_matrix(m, name: str) -> None:
     """Raise BoundarySpecError if m is not a valid 3x3 non-singular finite matrix.
 
@@ -61,6 +113,94 @@ class PQSpec:
     def __post_init__(self):
         _validate_pq_matrix(self.P, "P")
         _validate_pq_matrix(self.Q, "Q")
+
+
+@dataclass(frozen=True)
+class _CSLSpecBase:
+    axis: Sequence[int]
+    plane: Sequence[int]
+    sigma: int | None = None
+
+    def __post_init__(self):
+        _validate_miller(self.axis, "axis")
+        _validate_miller(self.plane, "plane")
+        if self.sigma is not None:
+            if not isinstance(self.sigma, int) or self.sigma <= 0:
+                raise BoundarySpecValueError("sigma must be a positive integer")
+
+
+@dataclass(frozen=True)
+class CSLExactSpec(_CSLSpecBase):
+    """Exact CSL boundary specified by rotation axis, boundary plane, and integer quaternion.
+
+    :param axis: Rotation axis as integer Miller indices [u v w], e.g. ``[0, 0, 1]``
+        for a [001]-axis tilt boundary.
+    :param plane: Boundary-plane normal as integer Miller indices [h k l] in grain 1's
+        crystal frame, e.g. ``[1, 0, 0]`` for a symmetric (100) tilt boundary.
+    :param quat: Integer quaternion in Hamilton scalar-first order ``[w, x, y, z]``
+        where w = cos(θ/2) and (x, y, z) = sin(θ/2)·n̂.  All four components must
+        be integers (the actual unit quaternion is derived by dividing by the norm).
+        Example — Σ5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
+    :param sigma: Optional sigma value for the CSL boundary (e.g. ``5`` for Σ5).
+        When provided it is validated against the quaternion; mismatches raise
+        ``BoundarySpecError``.  Sigma equals the odd part of w²+x²+y²+z².
+    """
+
+    # default=None is required by Python dataclass inheritance rules: once the
+    # parent class (_CSLSpecBase) has any field with a default (sigma=None),
+    # every subclass field must also carry a default.  The __post_init__ below
+    # turns the None sentinel into a hard error, making quat effectively required.
+    quat: Sequence[int] = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.quat is None:
+            raise BoundarySpecValueError("CSLExactSpec.quat is required.")
+        _validate_miller(self.quat, "quat", length=4)
+        # The quaternion vector part [x, y, z] (indices 1–3) encodes the
+        # rotation axis; it must be parallel to the user-supplied axis field.
+        quat_vec = np.array(self.quat[1:], dtype=float)
+        axis_vec = np.asarray(self.axis, dtype=float)
+        if np.linalg.norm(quat_vec) > 1e-10:  # skip identity quaternion [1,0,0,0]
+            cross = np.cross(quat_vec, axis_vec)
+            denom = np.linalg.norm(quat_vec) * np.linalg.norm(axis_vec)
+            if np.linalg.norm(cross) > 1e-9 * denom:
+                raise BoundarySpecValueError(
+                    f"Quaternion vector part {quat_vec.tolist()} is not parallel to "
+                    f"axis {list(self.axis)}. The axis must match the rotation axis "
+                    "encoded in the quaternion (components [x, y, z] in Hamilton order)."
+                )
+
+
+@dataclass(frozen=True)
+class CSLApproxSpec(_CSLSpecBase):
+    """Approximate CSL boundary specified by rotation axis, boundary plane, and angle.
+
+    :param axis: Rotation axis as integer Miller indices [u v w].
+    :param plane: Boundary-plane normal as integer Miller indices [h k l] in
+        grain 1's crystal frame.
+    :param angle_deg: Misorientation angle in degrees (required).
+    :param sigma: Optional nominal sigma value (informational only; not validated
+        against the angle since the construction is approximate).
+    """
+
+    # default=None required by dataclass inheritance; __post_init__ enforces it.
+    angle_deg: float = None
+
+    def __post_init__(self):
+        super().__post_init__()
+        if self.angle_deg is None:
+            raise BoundarySpecValueError("CSLApproxSpec.angle_deg is required.")
+        try:
+            val = float(self.angle_deg)
+        except (TypeError, ValueError) as e:
+            raise BoundarySpecTypeError(
+                f"CSLApproxSpec.angle_deg must be a finite float; got {self.angle_deg!r}"
+            ) from e
+        if not np.isfinite(val):
+            raise BoundarySpecValueError(
+                f"CSLApproxSpec.angle_deg must be finite; got {val}"
+            )
 
 
 # ---------------------------------------------------------------------------

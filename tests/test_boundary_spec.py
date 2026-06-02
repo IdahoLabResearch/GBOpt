@@ -3,10 +3,16 @@
 import numpy as np
 import pytest
 from GBOpt.BoundarySpec import (
-    PQSpec,
-    ConstructionMode,
-    BoundarySpecError,
     BoundaryEmbedding,
+    BoundarySpecError,
+    BoundarySpecTypeError,
+    BoundarySpecValueError,
+    CSLApproxSpec,
+    CSLExactSpec,
+    ConstructionMode,
+    FiveDOFSpec,
+    PQSpec,
+    _CSLSpecBase,
 )
 
 
@@ -20,6 +26,39 @@ class TestImports:
 
         args = typing.get_args(ConstructionMode)
         assert set(args) == {"exact", "prefer_exact", "approximate"}
+
+
+class TestFiveDOFSpec:
+    VALID_PARAMS = [0.1, 0.2, 0.3, 45.0, 30.0]
+
+    def test_frozen(self):
+        spec = FiveDOFSpec(params=self.VALID_PARAMS)
+        with pytest.raises((AttributeError, TypeError)):
+            spec.params = [0.0, 0.0, 0.0, 0.0, 0.0]
+
+    def test_stores_params(self):
+        spec = FiveDOFSpec(params=self.VALID_PARAMS)
+        assert list(spec.params) == self.VALID_PARAMS
+
+    def test_valid_5_element_passes(self):
+        spec = FiveDOFSpec(params=self.VALID_PARAMS)
+        assert spec is not None
+
+    def test_wrong_length_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            FiveDOFSpec(params=[0.1, 0.2, 0.3])
+
+    def test_non_numeric_raises(self):
+        with pytest.raises(BoundarySpecTypeError):
+            FiveDOFSpec(params=["a", "b", "c", "d", "e"])
+
+    def test_nan_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            FiveDOFSpec(params=[0.1, float("nan"), 0.3, 45.0, 30.0])
+
+    def test_inf_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            FiveDOFSpec(params=[0.1, float("inf"), 0.3, 45.0, 30.0])
 
 
 class TestPQSpec:
@@ -67,6 +106,114 @@ class TestPQSpec:
         with pytest.raises(BoundarySpecError):
             PQSpec(P=P_singular, Q=Q)
 
+
+class TestCSLSpecBase:
+    def test_frozen(self):
+        spec = _CSLSpecBase(axis=[0, 0, 1], plane=[1, 0, 0])
+        with pytest.raises((AttributeError, TypeError)):
+            spec.axis = [1, 1, 0]
+
+    def test_sigma_defaults_to_none(self):
+        spec = _CSLSpecBase(axis=[0, 0, 1], plane=[1, 0, 0])
+        assert spec.sigma is None
+
+    def test_sigma_stored(self):
+        spec = _CSLSpecBase(axis=[0, 0, 1], plane=[1, 0, 0], sigma=5)
+        assert spec.sigma == 5
+
+    def test_zero_axis_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            _CSLSpecBase(axis=[0, 0, 0], plane=[1, 0, 0])
+
+    def test_non_integer_plane_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            _CSLSpecBase(axis=[0, 0, 1], plane=[1.5, 0.0, 0.0])
+
+    def test_non_positive_sigma_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            _CSLSpecBase(axis=[0, 0, 1], plane=[1, 0, 0], sigma=0)
+
+    def test_nan_axis_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            _CSLSpecBase(axis=[0, float("nan"), 1], plane=[1, 0, 0])
+
+
+class TestCSLExactSpec:
+    # Σ5 [001] 36.87 deg: quat=[3,0,0,1] has vector part [0,0,1] ∥ axis=[0,0,1].
+    VALID_QUAT = [3, 0, 0, 1]
+
+    def test_frozen(self):
+        spec = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=self.VALID_QUAT)
+        with pytest.raises((AttributeError, TypeError)):
+            spec.quat = [1, 0, 0, 0]
+
+    def test_stores_quat(self):
+        spec = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=self.VALID_QUAT)
+        assert list(spec.quat) == self.VALID_QUAT
+
+    def test_sigma_optional(self):
+        spec = CSLExactSpec(
+            axis=[0, 0, 1], plane=[1, 0, 0], quat=self.VALID_QUAT, sigma=5
+        )
+        assert spec.sigma == 5
+
+    def test_quat_none_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0])
+
+    def test_non_integer_quat_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[1.5, 0.0, 0.0, 1.0])
+
+    def test_wrong_quat_length_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[1, 0, 0])
+
+    def test_axis_quat_vector_mismatch_raises(self):
+        # quat vector part [0, 0, 1] is not parallel to axis [1, 0, 0]
+        with pytest.raises(BoundarySpecValueError):
+            CSLExactSpec(axis=[1, 0, 0], plane=[0, 0, 1], quat=[3, 0, 0, 1])
+
+    def test_zero_axis_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLExactSpec(axis=[0, 0, 0], plane=[1, 0, 0], quat=self.VALID_QUAT)
+
+
+class TestCSLApproxSpec:
+    def test_frozen(self):
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+        with pytest.raises((AttributeError, TypeError)):
+            spec.angle_deg = 45.0
+
+    def test_stores_angle_deg(self):
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+        np.testing.assert_allclose(spec.angle_deg, 36.87, atol=1e-12, rtol=0)
+
+    def test_sigma_optional(self):
+        spec = CSLApproxSpec(
+            axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87, sigma=5
+        )
+        assert spec.sigma == 5
+
+    def test_angle_none_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0])
+
+    def test_non_numeric_angle_raises(self):
+        with pytest.raises(BoundarySpecTypeError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg="45")
+
+    def test_nan_angle_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=float("nan"))
+
+    def test_inf_angle_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=float("inf"))
+
+    def test_zero_plane_raises(self):
+        with pytest.raises(BoundarySpecValueError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[0, 0, 0], angle_deg=36.87)
 
 
 class TestBoundaryEmbedding:

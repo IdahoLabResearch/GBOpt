@@ -10,8 +10,12 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from GBOpt.UnitCell import UnitCell
-from GBOpt.BoundarySpec import PQSpec
-from GBOpt.Utils.gb_exact import pq_spec_to_embedding
+from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
+from GBOpt.Utils.gb_exact import (
+    csl_approx_spec_to_embedding,
+    csl_spec_to_embedding,
+    pq_spec_to_embedding,
+)
 
 
 class GBMakerError(Exception):
@@ -186,14 +190,26 @@ class GBMaker:
     ) -> "GBMaker":
         """Public factory that builds a GBMaker from a boundary-spec dataclass.
 
+        Supported boundary types and modes:
+
+        ============= =========== ===========  ============
+        Boundary type exact        approximate  prefer_exact
+        ============= =========== ===========  ============
+        PQSpec        ✓            ✗            ✗
+        CSLExactSpec  ✓            ✗            ✗
+        CSLApproxSpec ✗ (raises)   ✓            ✗
+        FiveDOFSpec   not yet      not yet      not yet
+        ============= =========== ===========  ============
+
         :param a0: Crystal lattice parameter (Angstroms).
         :param structure: Crystal structure string.
         :param atom_types: Atom type string or tuple of strings.
-        :param boundary: A boundary-spec dataclass. Only ``PQSpec`` is supported;
-            all other types raise ``NotImplementedError``.
-        :param mode: Construction mode — one of ``"exact"``, ``"prefer_exact"``, or
-            ``"approximate"``. Only ``"exact"`` is supported for ``PQSpec``; the others
-            raise ``NotImplementedError``.
+        :param boundary: A boundary-spec dataclass (``PQSpec``,
+            ``CSLExactSpec``, or ``CSLApproxSpec``).
+        :param mode: Construction mode — ``"exact"`` uses exact integer P/Q
+            matrices (requires ``PQSpec`` or ``CSLExactSpec``);
+            ``"approximate"`` uses floating-point rotation matrices
+            (required for ``CSLApproxSpec``).
         :param gb_thickness: Width of the GB region (Angstroms), default 0.
         :param repeat_factor: In-plane repeat factor(s), default 2.
         :param x_dim_min: Minimum grain thickness in x (Angstroms), default 50.
@@ -201,22 +217,43 @@ class GBMaker:
         :param interaction_distance: Maximum atom interaction distance, default 15.
         :param gb_id: Grain boundary identifier, default 1.
         :return: Fully initialized GBMaker instance.
-        :raises NotImplementedError: For any boundary spec type other than ``PQSpec``,
-            or for modes other than ``"exact"`` with ``PQSpec``.
+        :raises BoundarySpecError: If the mode is incompatible with the
+            boundary type (e.g. ``CSLApproxSpec`` with ``mode="exact"``).
+        :raises NotImplementedError: For unsupported boundary types or modes.
         """
-        if not isinstance(boundary, PQSpec):
-            raise NotImplementedError(
-                f"from_boundary_spec does not yet support {type(boundary).__name__}; "
-                f"only PQSpec is currently implemented."
-            )
+        if isinstance(boundary, PQSpec):
+            if mode != "exact":
+                raise NotImplementedError(
+                    f"Construction mode '{mode}' is not yet supported for PQSpec; "
+                    f"only mode='exact' is currently implemented."
+                )
+            embedding = pq_spec_to_embedding(boundary)
 
-        if mode != "exact":
-            raise NotImplementedError(
-                f"Construction mode '{mode}' is not yet supported for PQSpec; "
-                f"only mode='exact' is currently implemented."
-            )
+        elif isinstance(boundary, CSLExactSpec):
+            if mode != "exact":
+                raise NotImplementedError(
+                    f"Construction mode '{mode}' is not yet supported for CSLExactSpec; "
+                    f"only mode='exact' is currently implemented."
+                )
+            embedding = csl_spec_to_embedding(boundary)
 
-        embedding = pq_spec_to_embedding(boundary)
+        elif isinstance(boundary, CSLApproxSpec):
+            if mode == "exact":
+                raise BoundarySpecError(
+                    "CSLApproxSpec cannot be used with mode='exact': no integer "
+                    "quaternion is available for exactification. Use CSLExactSpec "
+                    "for an exact construction, or mode='approximate'."
+                )
+            if mode != "approximate":
+                raise NotImplementedError(
+                    f"Construction mode '{mode}' is not yet supported for CSLApproxSpec."
+                )
+            embedding = csl_approx_spec_to_embedding(boundary)
+
+        else:
+            raise NotImplementedError(
+                f"from_boundary_spec does not yet support {type(boundary).__name__}."
+            )
         return cls._from_boundary_embedding(
             embedding,
             a0=a0,

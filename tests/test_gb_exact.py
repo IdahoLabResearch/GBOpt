@@ -7,10 +7,17 @@ import pytest
 
 from unittest.mock import patch
 
-from GBOpt.BoundarySpec import BoundaryEmbedding, BoundarySpecError, PQSpec
+from GBOpt.BoundarySpec import (
+    BoundaryEmbedding,
+    BoundarySpecError,
+    CSLApproxSpec,
+    CSLExactSpec,
+    PQSpec,
+)
 from GBOpt.GBMaker import GBMaker
 from GBOpt.Utils.gb_exact import (
     canonicalize_pq,
+    csl_spec_to_embedding,
     pq_spec_to_embedding,
     quaternion_to_rotation_matrix,
     reduce_2d_basis,
@@ -30,7 +37,7 @@ def _make_identity_pair():
 # ---------------------------------------------------------------------------
 
 class TestValidateAndNormalizeQuaternion:
-    # Σ5 [001] 53.13° — integer quaternion [2, 0, 0, 1], N = 5
+    # Σ5 [001] 53.13 deg — integer quaternion [2, 0, 0, 1], N = 5
     SIGMA5_QUAT = [2, 0, 0, 1]
 
     def test_valid_returns_unit_quaternion(self):
@@ -70,7 +77,7 @@ class TestValidateAndNormalizeQuaternion:
 
 
 class TestQuaternionToRotationMatrix:
-    # Σ5 [001] 53.13° — quat [2, 0, 0, 1] (Hamilton [w,x,y,z]),
+    # Σ5 [001] 53.13 deg — quat [2, 0, 0, 1] (Hamilton [w,x,y,z]),
     # expected R = [[3/5, -4/5, 0], [4/5, 3/5, 0], [0, 0, 1]]
     SIGMA5_QUAT_NORM = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
     SIGMA5_R_EXPECTED = np.array([
@@ -95,7 +102,7 @@ class TestQuaternionToRotationMatrix:
         np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
 
     def test_sigma5_36deg_quat(self):
-        # Σ5 [001] 36.87° — quat [3, 0, 0, 1], N = 10
+        # Σ5 [001] 36.87 deg — quat [3, 0, 0, 1], N = 10
         # expected R = [[4/5, -3/5, 0], [3/5, 4/5, 0], [0, 0, 1]]
         q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
         R = quaternion_to_rotation_matrix(q)
@@ -143,19 +150,23 @@ class TestValidateSigma:
         with pytest.raises(BoundarySpecError):
             validate_sigma([2, 2, 0, 0], 8)  # sigma=1, not 8
 
+    def test_zero_quaternion_raises(self):
+        with pytest.raises(BoundarySpecError):
+            validate_sigma([0, 0, 0, 0], 1)
+
 
 # ---------------------------------------------------------------------------
 # Step 12 — in-plane CSL solve and 2D reduction
 # ---------------------------------------------------------------------------
 
 def _sigma5_53deg_R():
-    """R for Σ5 [001] 53.13° boundary (quat=[2,0,0,1], N=5)."""
+    """R for Σ5 [001] 53.13 deg boundary (quat=[2,0,0,1], N=5)."""
     q = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
     return quaternion_to_rotation_matrix(q)
 
 
 def _sigma5_36deg_R():
-    """R for Σ5 [001] 36.87° boundary (quat=[3,0,0,1], N=10)."""
+    """R for Σ5 [001] 36.87 deg boundary (quat=[3,0,0,1], N=10)."""
     q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
     return quaternion_to_rotation_matrix(q)
 
@@ -437,6 +448,86 @@ class TestPQSpecToEmbedding:
             pq_spec_to_embedding(spec)
 
 
+# ---------------------------------------------------------------------------
+# Step 13 — CSLExactSpec validation and adapter
+# ---------------------------------------------------------------------------
+
+class TestCSLExactSpecValidation:
+    def test_valid_spec_instantiates(self):
+        CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[2, 0, 0, 1])
+
+    def test_missing_or_malformed_quat_raises(self):
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0])
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[2, 0, 1])
+
+    def test_non_integer_miller_indices_raise(self):
+        # _validate_miller must reject non-integer values before rounding.
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[1.5, 0, 0], quat=[2, 0, 0, 1])
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0.7, 0, 1], plane=[1, 0, 0], quat=[2, 0, 0, 1])
+
+    def test_zero_axis_or_plane_raises(self):
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0, 0, 0], plane=[1, 0, 0], quat=[2, 0, 0, 1])
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 0], quat=[2, 0, 0, 1])
+
+    def test_axis_quat_mismatch_raises(self):
+        # quat [2,0,0,1] encodes rotation about [0,0,1]; axis=[1,0,0] is wrong.
+        with pytest.raises(BoundarySpecError):
+            CSLExactSpec(axis=[1, 0, 0], plane=[1, 0, 0], quat=[2, 0, 0, 1])
+
+    def test_sigma_mismatch_raises(self):
+        # quat [2,0,0,1] → sigma=5, not 3
+        with pytest.raises(BoundarySpecError):
+            csl_spec_to_embedding(
+                CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0],
+                             quat=[2, 0, 0, 1], sigma=3)
+            )
+
+
+class TestCSLSpecToEmbedding:
+    # Σ5 [001] 36.87 deg — quat [3,0,0,1], plane [1,0,0]
+    SPEC_36 = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
+    # Equivalent PQSpec for the cross-format round-trip assertion
+    PQ_36 = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
+    # Σ3 [111] 60 deg twin — quat [3,1,1,1], plane [1,1,1]; non-(100) regression
+    SPEC_SIGMA3 = CSLExactSpec(axis=[1, 1, 1], plane=[1, 1, 1], quat=[3, 1, 1, 1])
+
+    def test_embedding_flags_and_proper_rotations(self):
+        emb = csl_spec_to_embedding(self.SPEC_36)
+        assert isinstance(emb, BoundaryEmbedding)
+        assert emb.exact is True
+        assert emb.coherent is True
+        assert emb.source == "csl"
+        for R in (emb.R_left, emb.R_right):
+            np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
+            assert abs(np.linalg.det(R) - 1.0) < 1e-10
+
+    def test_cross_format_round_trip(self):
+        # The central regression target: CSLExactSpec and the equivalent PQSpec
+        # must produce byte-identical canonical P and Q matrices.
+        emb_csl = csl_spec_to_embedding(self.SPEC_36)
+        emb_pq = pq_spec_to_embedding(self.PQ_36)
+        np.testing.assert_array_equal(emb_csl.P, emb_pq.P)
+        np.testing.assert_array_equal(emb_csl.Q, emb_pq.Q)
+
+    def test_sigma3_111_plane_gives_proper_rotations(self):
+        # Non-(100) regression: [111] plane requires e2 = plane×e1 to keep
+        # P rows mutually orthogonal; the null-basis e1,e2 pair is not enough.
+        emb = csl_spec_to_embedding(self.SPEC_SIGMA3)
+        for label, R in [("R_left", emb.R_left), ("R_right", emb.R_right)]:
+            np.testing.assert_allclose(
+                R @ R.T, np.eye(3), atol=1e-10,
+                err_msg=f"{label} is not orthogonal for Σ3 [111] boundary")
+            assert abs(np.linalg.det(R) - 1.0) < 1e-10, \
+                f"{label} det ≠ 1 for Σ3 [111] boundary"
+
+
 class TestFromBoundaryEmbedding:
     # Common parameters shared by all sub-tests.
     A0 = 3.615          # Cu lattice parameter
@@ -584,19 +675,67 @@ class TestFromBoundarySpec:
             gb_spec.whole_system, gb_emb.whole_system)
 
 
+# ---------------------------------------------------------------------------
+# Step 14 — CSL specs wired into from_boundary_spec
+# ---------------------------------------------------------------------------
+
+class TestFromBoundarySpecCSL:
+    A0 = 3.615
+    STRUCTURE = "fcc"
+    ATOM_TYPES = "Cu"
+    GB_THICKNESS = 5.0
+
+    # Σ5 [001] 36.87 deg exact spec and its equivalent PQSpec
+    EXACT_SPEC = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
+    PQ_SPEC = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                     Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
+    APPROX_SPEC = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+
+    def _build(self, spec, mode):
+        return GBMaker.from_boundary_spec(
+            self.A0, self.STRUCTURE, self.ATOM_TYPES, spec, mode=mode,
+            gb_thickness=self.GB_THICKNESS,
+        )
+
+    def test_cslexactspec_exact_builds_stoichiometric_bicrystal(self):
+        gb = self._build(self.EXACT_SPEC, mode="exact")
+        ws = gb.whole_system
+        # Monatomic fcc: all atoms must have the same species name.
+        assert len(np.unique(ws["name"])) == 1
+
+    def test_cslexactspec_matches_equivalent_pqspec(self):
+        # Exact CSL and the equivalent PQ must build the same atom array.
+        gb_csl = self._build(self.EXACT_SPEC, mode="exact")
+        gb_pq = self._build(self.PQ_SPEC, mode="exact")
+        np.testing.assert_array_equal(gb_csl.whole_system, gb_pq.whole_system)
+
+    def test_cslapproxspec_exact_raises(self):
+        with pytest.raises(BoundarySpecError):
+            self._build(self.APPROX_SPEC, mode="exact")
+
+    def test_cslapproxspec_approximate_succeeds(self):
+        gb = self._build(self.APPROX_SPEC, mode="approximate")
+        assert gb.whole_system.size > 0
+
+    def test_cslapproxspec_missing_angle_raises(self):
+        with pytest.raises(BoundarySpecError):
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0])
+
+
 class TestFromBoundarySpecMultispecies:
-    """Step 9 acceptance: exact-PQ construction must preserve stoichiometry.
+    """Step 9 / Step 14 acceptance: exact-path construction must preserve stoichiometry.
 
     Monatomic tests cannot catch species-count failures.  These tests use
-    known exact Sigma5 [001] P/Q and assert the correct cation:anion ratio,
-    which also implies charge neutrality for these structures.
+    known exact Sigma5 [001] boundaries (via both PQSpec and CSLExactSpec) and
+    assert the correct cation:anion ratio, which also implies charge neutrality.
     """
 
-    # Sigma5 [001] 36.87 deg tilt — orthogonal integer rows, verified proper rotation.
+    # Sigma5 [001] 36.87 deg tilt — verified proper rotation.
     P = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     Q = [[4, -3, 0], [3, 4, 0], [0, 0, 1]]
+    CSL_SPEC = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
 
-    def _species_counts(self, a0, structure, atom_types):
+    def _species_counts_pq(self, a0, structure, atom_types):
         spec = PQSpec(P=self.P, Q=self.Q)
         gb = GBMaker.from_boundary_spec(
             a0, structure, atom_types, spec, mode="exact", gb_thickness=2.0
@@ -605,11 +744,28 @@ class TestFromBoundarySpecMultispecies:
         names, counts = np.unique(ws["name"], return_counts=True)
         return {str(n): int(c) for n, c in zip(names, counts)}
 
+    def _species_counts_csl(self, a0, structure, atom_types):
+        gb = GBMaker.from_boundary_spec(
+            a0, structure, atom_types, self.CSL_SPEC, mode="exact", gb_thickness=2.0
+        )
+        ws = gb.whole_system
+        names, counts = np.unique(ws["name"], return_counts=True)
+        return {str(n): int(c) for n, c in zip(names, counts)}
+
     def test_rocksalt_stoichiometric(self):
         # NaCl: cation : anion must be 1 : 1.
-        counts = self._species_counts(4.0, "rocksalt", ("Na", "Cl"))
+        counts = self._species_counts_pq(4.0, "rocksalt", ("Na", "Cl"))
         assert counts["Na"] == counts["Cl"], (
             f"Rocksalt bicrystal is not stoichiometric: {counts}"
+        )
+
+    def test_cslexactspec_rocksalt_stoichiometric(self):
+        # CSLExactSpec exact path must produce the same stoichiometric result
+        # as the equivalent PQSpec — catches any multi-species regression in
+        # the csl_spec_to_embedding → _from_boundary_embedding path.
+        counts = self._species_counts_csl(4.0, "rocksalt", ("Na", "Cl"))
+        assert counts["Na"] == counts["Cl"], (
+            f"Rocksalt bicrystal via CSLExactSpec is not stoichiometric: {counts}"
         )
 
     @pytest.mark.known_bug
@@ -618,7 +774,7 @@ class TestFromBoundarySpecMultispecies:
         # Known bug: GBMaker produces 12 fewer O atoms than expected (e.g.
         # 9492 O / 4752 U instead of 9504 O / 4752 U) on both the legacy and
         # exact-PQ paths.  Confirmed pre-existing; not introduced by Stage B.
-        counts = self._species_counts(5.47, "fluorite", ("U", "O"))
+        counts = self._species_counts_pq(5.47, "fluorite", ("U", "O"))
         assert counts["O"] == 2 * counts["U"], (
             f"Fluorite bicrystal is not stoichiometric: {counts}"
         )

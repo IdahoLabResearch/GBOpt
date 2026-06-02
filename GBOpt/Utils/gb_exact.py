@@ -215,6 +215,10 @@ def validate_sigma(quat: np.ndarray, sigma: int) -> None:
     """
     int_q = np.round(np.asarray(quat, dtype=float)).astype(int)
     norm_sq = int(np.dot(int_q, int_q))
+    if norm_sq == 0:
+        raise BoundarySpecError(
+            "Quaternion is zero; sigma cannot be derived from a zero quaternion."
+        )
     # Divide out the largest power of 2 to obtain the odd sigma value.
     while norm_sq % 2 == 0:
         norm_sq //= 2
@@ -470,3 +474,152 @@ def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
         coherent=True,
         source="pq",
     )
+
+
+def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedding:
+    """Convert a validated CSLExactSpec to a BoundaryEmbedding.
+
+    **How P and Q are constructed.**  In GBMaker's convention each row of a
+    grain's orientation matrix records which crystal Miller direction aligns
+    with the corresponding lab axis: row 0 = lab x (boundary normal), row 1 =
+    lab y, row 2 = lab z.
+
+    For grain 1 we fix the boundary normal (``plane``) as row 0 and fill rows
+    1–2 with the two cross-product null-basis vectors of that plane (see
+    ``_plane_null_basis``).  For grain 2 each row is obtained by applying the
+    misorientation matrix M_int to the corresponding integer row of P and
+    GCD-reducing the result::
+
+        Q[row i] = gcd_reduce(P[row i] @ M_int)
+
+    where ``M_int = round(N · R)`` and N is recovered from R.  This formula
+    is equivalent to rotating each lab axis from grain 1's crystal frame into
+    grain 2's crystal frame — exactly what R_right encodes.  After
+    ``canonicalize_pq`` the resulting matrices are identical to what a
+    ``PQSpec`` with the same boundary would produce, enabling the cross-format
+    round-trip test.
+
+    :param spec: A ``CSLExactSpec`` instance (quat is required).
+    :param max_exact_atoms: Passed to ``solve_inplane_csl`` as the cell-size
+        guard.  Raises ``BoundarySpecError`` if the in-plane CSL cell would be
+        larger than this.
+    :return: ``BoundaryEmbedding`` with ``exact=True``, ``coherent=True``,
+        ``source="csl"``.
+    :raises BoundarySpecError: On invalid quaternion, sigma mismatch, missing
+        CSL for the given plane, or cell too large.
+    """
+    if spec.quat is None:
+        raise BoundarySpecError("CSLExactSpec.quat is required.")
+
+    quat_arr = np.asarray(spec.quat, dtype=float)
+    quat_norm = validate_and_normalize_quaternion(quat_arr)
+
+    if spec.sigma is not None:
+        validate_sigma(quat_arr, spec.sigma)
+
+    R = quaternion_to_rotation_matrix(quat_norm)
+    N = _recover_sigma_from_rotation(R)
+    M_int = np.round(N * R).astype(int)
+
+    # Validate that a CSL exists for this plane — raises if not.
+    solve_inplane_csl(
+        np.asarray(spec.axis, dtype=float),
+        np.asarray(spec.plane, dtype=float),
+        R,
+        max_exact_atoms=max_exact_atoms,
+    )
+
+    # Build P: row 0 = boundary normal; rows 1–2 = orthogonal in-plane basis.
+    # e1 is one null-basis vector (orthogonal to plane_int).
+    # e2 = plane_int × e1 is then orthogonal to BOTH plane_int and e1, ensuring
+    # the three rows form a proper rotation when normalized.
+    plane_int = _row_gcd_reduce(np.round(np.asarray(spec.plane, dtype=float)).astype(int))
+    e1, _ = _plane_null_basis(plane_int)
+    e1 = _row_gcd_reduce(e1)
+    e2 = _row_gcd_reduce(np.cross(plane_int, e1).astype(int))
+    P = np.array([
+        plane_int.astype(float),
+        e1.astype(float),
+        e2.astype(float),
+    ])
+
+    # Build Q: rotate each lab axis from grain 1 into grain 2's crystal frame.
+    Q = np.array([
+        _row_gcd_reduce(P[i].astype(int) @ M_int).astype(float)
+        for i in range(3)
+    ])
+
+    P_canon, Q_canon = canonicalize_pq(P, Q)
+
+    R_left = P_canon / np.linalg.norm(P_canon, axis=1, keepdims=True)
+    R_right = Q_canon / np.linalg.norm(Q_canon, axis=1, keepdims=True)
+    for r_name, Rm in [("R_left", R_left), ("R_right", R_right)]:
+        if not (np.allclose(Rm @ Rm.T, np.eye(3), atol=1e-10)
+                and abs(np.linalg.det(Rm) - 1.0) < 1e-10):
+            raise BoundarySpecError(
+                f"{r_name} derived from CSLExactSpec is not a proper rotation matrix "
+                "(R @ R.T ≠ I or det ≠ 1). Check that axis, plane, and quat are "
+                "mutually consistent."
+            )
+
+    return BoundaryEmbedding(
+        P=P_canon,
+        Q=Q_canon,
+        R_left=R_left,
+        R_right=R_right,
+        exact=True,
+        coherent=True,
+        source="csl",
+    )
+
+
+def csl_approx_spec_to_embedding(spec) -> BoundaryEmbedding:
+    """Convert a CSLApproxSpec to a BoundaryEmbedding using the approximate path.
+
+    Constructs floating-point R_left and R_right from the given plane and
+    axis/angle misorientation.  P and Q are set to None (no exact integer
+    matrices are available).
+
+    R_left is built so that its first row is the unit boundary-plane normal.
+    The remaining two rows are completed via Gram-Schmidt using the two
+    non-dominant axis-aligned unit vectors, giving a proper rotation.
+    R_right = R_left @ R_mis, where R_mis is the rotation about the given
+    axis by angle_deg.
+
+    :param spec: A ``CSLApproxSpec`` instance.
+    :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=True``,
+        ``source="csl"``.
+    """
+    from scipy.spatial.transform import Rotation
+
+    plane = np.asarray(spec.plane, dtype=float)
+    plane_unit = plane / np.linalg.norm(plane)
+
+    axis = np.asarray(spec.axis, dtype=float)
+    axis_unit = axis / np.linalg.norm(axis)
+    angle_rad = float(spec.angle_deg) * np.pi / 180.0
+    R_mis = Rotation.from_rotvec(axis_unit * angle_rad).as_matrix()
+
+    # Build R_left: row 0 = plane unit normal; rows 1–2 = orthogonal in-plane
+    # directions.  e2 = plane × e1 is orthogonal to both by construction.
+    plane_int = _row_gcd_reduce(np.round(plane).astype(int))
+    e1, _ = _plane_null_basis(plane_int)
+    e1 = _row_gcd_reduce(e1)
+    e2 = _row_gcd_reduce(np.cross(plane_int, e1).astype(int))
+    e1_unit = e1.astype(float) / np.linalg.norm(e1)
+    e2_unit = e2.astype(float) / np.linalg.norm(e2)
+
+    R_left = np.array([plane_unit, e1_unit, e2_unit])
+    R_right = R_left @ R_mis
+
+    return BoundaryEmbedding(
+        P=None,
+        Q=None,
+        R_left=R_left,
+        R_right=R_right,
+        exact=False,
+        coherent=True,
+        source="csl",
+    )
+
+
