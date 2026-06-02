@@ -28,6 +28,7 @@ class TestImports:
     def test_construction_mode_values(self):
         # ConstructionMode is a typing.Literal — check it exists and its args
         import typing
+
         args = typing.get_args(ConstructionMode)
         assert set(args) == {"exact", "prefer_exact", "approximate"}
 
@@ -41,7 +42,7 @@ class TestFiveDOFSpec:
     def test_stores_params(self):
         p = [0.1, 0.2, 0.3, 0.4, 0.5]
         spec = FiveDOFSpec(params=p)
-        assert list(spec.params) == p
+        np.testing.assert_allclose(list(spec.params), p, atol=1e-15, rtol=0)
 
 
 class TestPQSpec:
@@ -101,7 +102,7 @@ class TestCSLApproxSpec:
 
     def test_stores_angle_deg(self):
         spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
-        assert spec.angle_deg == 36.87
+        np.testing.assert_allclose(spec.angle_deg, 36.87, atol=1e-12, rtol=0)
 
     def test_inherits_base(self):
         assert issubclass(CSLApproxSpec, _CSLSpecBase)
@@ -121,6 +122,7 @@ class TestBoundarySpecErrorHierarchy:
 
     def test_independent_from_gbmaker_errors(self):
         from GBOpt.GBMaker import GBMakerError
+
         assert not issubclass(BoundarySpecError, GBMakerError)
         assert not issubclass(GBMakerError, BoundarySpecError)
 
@@ -133,18 +135,23 @@ class TestBoundaryEmbedding:
     def _make(self, P=None, Q=None, exact=True, coherent=True, source="pq"):
         R = np.eye(3)
         return BoundaryEmbedding(
-            P=P, Q=Q, R_left=R, R_right=R,
-            exact=exact, coherent=coherent, source=source,
+            P=P,
+            Q=Q,
+            R_left=R,
+            R_right=R,
+            exact=exact,
+            coherent=coherent,
+            source=source,
         )
 
     def test_instantiate_with_arrays(self):
         P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
         Q = np.array([[0, 1, 0], [1, 0, 0], [0, 0, 1]], dtype=float)
         emb = self._make(P=P, Q=Q)
-        assert np.array_equal(emb.P, P)
-        assert np.array_equal(emb.Q, Q)
-        assert np.array_equal(emb.R_left, np.eye(3))
-        assert np.array_equal(emb.R_right, np.eye(3))
+        np.testing.assert_allclose(emb.P, P, atol=1e-15, rtol=0)
+        np.testing.assert_allclose(emb.Q, Q, atol=1e-15, rtol=0)
+        np.testing.assert_allclose(emb.R_left, np.eye(3), atol=1e-15, rtol=0)
+        np.testing.assert_allclose(emb.R_right, np.eye(3), atol=1e-15, rtol=0)
 
     def test_instantiate_with_none_pq(self):
         emb = self._make(P=None, Q=None, exact=False, coherent=False, source="five_dof")
@@ -157,3 +164,46 @@ class TestBoundaryEmbedding:
     def test_source_stored(self):
         emb = self._make(source="csl")
         assert emb.source == "csl"
+
+
+class TestGBExactSkeleton:
+    """Verify the gb_exact stub surface is present and raises NotImplementedError."""
+
+    def test_module_importable(self):
+        import GBOpt.Utils.gb_exact as gb_exact
+
+        assert gb_exact is not None
+
+    def test_expected_functions_present(self):
+        import GBOpt.Utils.gb_exact as gb_exact
+
+        expected = [
+            "validate_and_normalize_quaternion",
+            "quaternion_to_rotation_matrix",
+            "validate_sigma",
+            "solve_inplane_csl",
+            "reduce_2d_basis",
+            "canonicalize_pq",
+            "exactify_five_dof",
+        ]
+        for name in expected:
+            assert hasattr(gb_exact, name), f"gb_exact missing: {name}"
+
+    def test_stubs_raise_not_implemented(self):
+        import GBOpt.Utils.gb_exact as gb_exact
+
+        dummy = np.zeros(4)
+        dummy3 = np.zeros(3)
+        dummy33 = np.eye(3)
+        cases = [
+            lambda: gb_exact.validate_and_normalize_quaternion(dummy),
+            lambda: gb_exact.quaternion_to_rotation_matrix(dummy),
+            lambda: gb_exact.validate_sigma(dummy, 5),
+            lambda: gb_exact.solve_inplane_csl(dummy3, dummy3, dummy33),
+            lambda: gb_exact.reduce_2d_basis(dummy3, dummy3),
+            lambda: gb_exact.canonicalize_pq(dummy33, dummy33),
+            lambda: gb_exact.exactify_five_dof(np.zeros(5)),
+        ]
+        for fn in cases:
+            with pytest.raises(NotImplementedError):
+                fn()

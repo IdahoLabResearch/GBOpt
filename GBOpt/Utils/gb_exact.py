@@ -8,8 +8,6 @@ Each stub raises NotImplementedError until its owning step is complete.
 
 import numpy as np
 
-from GBOpt.BoundarySpec import BoundarySpecError
-
 
 def validate_and_normalize_quaternion(quat: np.ndarray) -> np.ndarray:
     """Validate that quat is an integer quaternion and return its normalized form.
@@ -125,6 +123,12 @@ def canonicalize_pq(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return canonical forms of the P and Q orientation matrices.
 
+    This is the Step 4 hook for canonical P/Q reconstruction. Callers
+    (Stage B/C adapters) are responsible for assembling P and Q from
+    CSL solve outputs (boundary normal + reduced in-plane basis vectors)
+    before passing them here. This function applies only the final
+    canonicalization rules — it does not reconstruct P/Q from scratch.
+
     Canonicalization rules:
     - rows are integer or exact rational directions reduced by gcd
     - matrices are right-handed (positive determinant after normalization)
@@ -136,7 +140,8 @@ def canonicalize_pq(
     Parameters
     ----------
     P, Q : np.ndarray of shape (3, 3)
-        Row-wise orientation matrices for each grain.
+        Row-wise orientation matrices for each grain, assembled by the
+        caller from the outputs of solve_inplane_csl / reduce_2d_basis.
 
     Returns
     -------
