@@ -227,6 +227,175 @@ def validate_sigma(quat: np.ndarray, sigma: int) -> None:
 
 
 
+def _recover_sigma_from_rotation(R: np.ndarray, max_sigma: int = 10001) -> int:
+    """Return N such that N·R is an integer matrix (N = sigma or a multiple).
+
+    For a rotation matrix produced from an integer quaternion [w,x,y,z] with
+    norm-squared N = w²+x²+y²+z², every entry of R is a rational number whose
+    denominator (in lowest terms) divides N.  We recover N as the LCM of the
+    denominators of all matrix entries, using ``Fraction.limit_denominator`` to
+    convert each floating-point entry to its exact rational form.
+
+    This is O(9) — one Fraction call per matrix entry — rather than a linear
+    search up to max_sigma.
+
+    :param R: 3×3 rotation matrix whose entries are rationals with denominator ≤ max_sigma.
+    :param max_sigma: Upper bound passed to ``limit_denominator``; the search
+        raises if the true denominator exceeds this value.
+    :return: LCM of all entry denominators = the common scaling factor N.
+    :raises BoundarySpecError: If any entry's denominator exceeds max_sigma, which
+        indicates R was not produced from an integer quaternion with sigma < max_sigma.
+    """
+    from fractions import Fraction
+    from math import lcm
+
+    denom = 1
+    for entry in R.flat:
+        if abs(entry) > 1e-10:
+            frac = Fraction(entry).limit_denominator(max_sigma)
+            denom = lcm(denom, frac.denominator)
+    if denom == 0:
+        raise BoundarySpecError(
+            "Could not recover sigma from rotation matrix (all entries near zero)."
+        )
+    return denom
+
+
+def _plane_null_basis(
+    plane_int: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return two linearly independent integer vectors orthogonal to plane_int.
+
+    For a plane normal [h, k, l] the two basis vectors are cross products of
+    [h,k,l] with the two axis-aligned unit vectors that are **not** the dominant
+    axis.  Because the dominant component (largest |value|) of [h,k,l] is
+    non-zero, it always survives in the cross-product result, guaranteeing
+    neither basis vector is the zero vector.
+
+    The three cases and their cross products are::
+
+        dominant axis = x  →  e1 = [h,k,l]×ŷ = [-l, 0,  h]
+                               e2 = [h,k,l]×ẑ = [ k,-h,  0]
+        dominant axis = y  →  e1 = [h,k,l]×x̂ = [ 0, l, -k]
+                               e2 = [h,k,l]×ẑ = [ k,-h,  0]
+        dominant axis = z  →  e1 = [h,k,l]×x̂ = [ 0, l, -k]
+                               e2 = [h,k,l]×ŷ = [-l, 0,  h]
+
+    All results are exact integers.
+    """
+    h, k, l = int(plane_int[0]), int(plane_int[1]), int(plane_int[2])
+    idx = int(np.argmax([abs(h), abs(k), abs(l)]))
+    if idx == 0:
+        e1 = np.array([-l,  0,  h])   # [h,k,l] × ŷ
+        e2 = np.array([ k, -h,  0])   # [h,k,l] × ẑ
+    elif idx == 1:
+        e1 = np.array([ 0,  l, -k])   # [h,k,l] × x̂
+        e2 = np.array([ k, -h,  0])   # [h,k,l] × ẑ
+    else:
+        e1 = np.array([ 0,  l, -k])   # [h,k,l] × x̂
+        e2 = np.array([-l,  0,  h])   # [h,k,l] × ŷ
+    return e1, e2
+
+
+def solve_inplane_csl(
+    axis: np.ndarray,
+    plane: np.ndarray,
+    R: np.ndarray,
+    max_exact_atoms: int = 10_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Solve the exact in-plane CSL basis from rotation axis, boundary plane, and R.
+
+    A CSL (Coincidence Site Lattice) vector is an integer lattice vector v of
+    grain 1 that is also a lattice vector of grain 2, i.e. ``v @ R`` is an
+    integer vector (row-vector convention).  This function finds the two
+    shortest such vectors that lie in the boundary plane ``plane · v = 0``.
+
+    The search works in the 2-D integer lattice spanned by the two null-space
+    basis vectors of ``plane`` (see ``_plane_null_basis``).  Every candidate
+    ``v = s·e1 + t·e2`` is tested against the CSL condition
+    ``(v @ M_int) % N == 0`` where ``M_int = round(N·R)`` and N is the sigma
+    value recovered from R.
+
+    :param axis: Integer Miller rotation axis [u v w] (used for documentation
+        only; the CSL condition is derived solely from R).
+    :param plane: Integer Miller boundary-plane normal [h k l] in grain 1's
+        crystal frame.
+    :param R: Exact rotation matrix from ``quaternion_to_rotation_matrix``.
+    :param max_exact_atoms: Guard on cell size.  Raises if the area of the
+        in-plane CSL unit cell (``|v1 × v2|``) exceeds this value, which would
+        produce an impractically large simulation cell.
+    :return: ``(v1, v2)`` — two linearly independent in-plane CSL vectors,
+        before Gauss reduction.  Pass to ``reduce_2d_basis`` to get the
+        shortest basis.
+    :raises BoundarySpecError: If fewer than two independent in-plane CSL
+        vectors are found within the search range, or if the cell exceeds
+        ``max_exact_atoms``.
+    """
+    plane_int = _row_gcd_reduce(np.round(plane).astype(int))
+    N = _recover_sigma_from_rotation(R)
+    M_int = np.round(N * R).astype(int)
+
+    e1, e2 = _plane_null_basis(plane_int)
+
+    # Search the 2-D in-plane integer lattice for CSL vectors.
+    # The bound N+2 is sufficient: in-plane CSL vectors have components of
+    # order sqrt(N) in the worst case, so s,t ≤ N covers all primitive vectors.
+    search_range = max(N + 2, 10)
+    candidates = []
+    for s in range(-search_range, search_range + 1):
+        for t in range(-search_range, search_range + 1):
+            if s == 0 and t == 0:
+                continue
+            v = s * e1 + t * e2
+            if np.all((v @ M_int) % N == 0):
+                candidates.append(v.copy())
+
+    if len(candidates) < 2:
+        raise BoundarySpecError(
+            "Could not find two independent in-plane CSL vectors for the given "
+            f"plane={plane_int.tolist()} and rotation matrix.  Verify that the "
+            "quaternion defines a valid CSL boundary for this plane."
+        )
+
+    # Pick the shortest vector, then the shortest independent from it.
+    candidates.sort(key=lambda v: int(np.dot(v, v)))
+    v1 = candidates[0]
+    v2 = next(
+        (c for c in candidates[1:] if np.any(np.cross(v1, c) != 0)),
+        None,
+    )
+    if v2 is None:
+        raise BoundarySpecError(
+            "All in-plane CSL vectors found are collinear; could not form a 2-D basis."
+        )
+
+    area = np.linalg.norm(np.cross(v1, v2))
+    if area > max_exact_atoms:
+        raise BoundarySpecError(
+            f"Exact in-plane CSL cell area ({area:.1f}) exceeds max_exact_atoms="
+            f"{max_exact_atoms}.  Use mode='approximate' or increase the limit."
+        )
+
+    return v1.astype(float), v2.astype(float)
+
+
+def reduce_2d_basis(
+    v1: np.ndarray,
+    v2: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply Gauss-Lagrange 2-D lattice reduction to a pair of in-plane vectors.
+
+    Returns the shortest basis for the lattice spanned by v1 and v2, with the
+    shorter vector first.  Delegates to the internal ``_gauss_reduce_2d`` helper.
+
+    :param v1: First in-plane basis vector (integer-valued).
+    :param v2: Second in-plane basis vector (integer-valued).
+    :return: ``(r1, r2)`` — reduced basis, ``‖r1‖ ≤ ‖r2‖``.
+    """
+    r1, r2 = _gauss_reduce_2d(v1, v2)
+    return r1.astype(float), r2.astype(float)
+
+
 def canonicalize_pq(
     P: np.ndarray,
     Q: np.ndarray,

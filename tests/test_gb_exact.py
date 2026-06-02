@@ -13,6 +13,8 @@ from GBOpt.Utils.gb_exact import (
     canonicalize_pq,
     pq_spec_to_embedding,
     quaternion_to_rotation_matrix,
+    reduce_2d_basis,
+    solve_inplane_csl,
     validate_and_normalize_quaternion,
     validate_sigma,
 )
@@ -140,6 +142,67 @@ class TestValidateSigma:
     def test_power_of_two_stripped_wrong_sigma_raises(self):
         with pytest.raises(BoundarySpecError):
             validate_sigma([2, 2, 0, 0], 8)  # sigma=1, not 8
+
+
+# ---------------------------------------------------------------------------
+# Step 12 — in-plane CSL solve and 2D reduction
+# ---------------------------------------------------------------------------
+
+def _sigma5_53deg_R():
+    """R for Σ5 [001] 53.13° boundary (quat=[2,0,0,1], N=5)."""
+    q = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
+    return quaternion_to_rotation_matrix(q)
+
+
+def _sigma5_36deg_R():
+    """R for Σ5 [001] 36.87° boundary (quat=[3,0,0,1], N=10)."""
+    q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
+    return quaternion_to_rotation_matrix(q)
+
+
+class TestSolveInplaneCSL:
+    def test_sigma5_53deg_plane100(self):
+        # Single end-to-end check: shape, in-plane, CSL, and independence.
+        R = _sigma5_53deg_R()
+        v1, v2 = solve_inplane_csl([0, 0, 1], [1, 0, 0], R)
+        assert v1.shape == (3,) and v2.shape == (3,)
+        assert abs(np.dot([1, 0, 0], v1)) < 1e-10
+        assert abs(np.dot([1, 0, 0], v2)) < 1e-10
+        for v in (v1, v2):
+            vR = v @ R
+            np.testing.assert_allclose(vR, np.round(vR), atol=1e-9,
+                                       err_msg=f"v={v} is not a CSL vector")
+        assert np.linalg.norm(np.cross(v1, v2)) > 0.5
+
+    def test_sigma5_36deg_plane100_csl_vectors(self):
+        # Different sigma/quaternion; verifies sigma recovery handles N=10.
+        R = _sigma5_36deg_R()
+        v1, v2 = solve_inplane_csl([0, 0, 1], [1, 0, 0], R)
+        for v in (v1, v2):
+            vR = v @ R
+            np.testing.assert_allclose(vR, np.round(vR), atol=1e-9)
+
+    def test_cell_too_large_raises(self):
+        R = _sigma5_53deg_R()
+        with pytest.raises(BoundarySpecError):
+            solve_inplane_csl([0, 0, 1], [1, 0, 0], R, max_exact_atoms=1)
+
+
+class TestReduce2DBasis:
+    def test_shorter_vector_is_first(self):
+        v1 = np.array([0, 0, 1], dtype=float)
+        v2 = np.array([0, 1, 0], dtype=float)
+        r1, r2 = reduce_2d_basis(v1, v2)
+        assert np.linalg.norm(r1) <= np.linalg.norm(r2) + 1e-10
+
+    def test_spans_same_lattice(self):
+        # Area |v1×v2| must be preserved after reduction.
+        v1 = np.array([0, 5, 0], dtype=float)
+        v2 = np.array([0, 0, 1], dtype=float)
+        r1, r2 = reduce_2d_basis(v1, v2)
+        area_before = np.linalg.norm(np.cross(v1, v2))
+        area_after = np.linalg.norm(np.cross(r1, r2))
+        assert abs(area_before - area_after) < 1e-10
 
 
 class TestCanonicalizePQ:
