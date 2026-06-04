@@ -18,6 +18,45 @@ from GBOpt.Utils.gb_exact import (
 )
 
 
+def _find_commensurate_pair(
+    d1: float,
+    d2: float,
+    tol: float,
+    max_n: int,
+) -> "tuple[int, int, float, float] | None":
+    """Find the smallest integer pair (n1, n2) such that n1*d1 ≈ n2*d2.
+
+    Searches all pairs with 1 ≤ n1, n2 ≤ max_n and returns the one with
+    the smallest ``max(n1*d1, n2*d2)`` whose relative mismatch satisfies::
+
+        |n1*d1 - n2*d2| / max(n1*d1, n2*d2) ≤ tol
+
+    Returns ``(n1, n2, n1*d1, n2*d2)`` or ``None`` if no pair is found.
+
+    :param d1: Period of the first grain (Angstroms).
+    :param d2: Period of the second grain (Angstroms).
+    :param tol: Maximum allowed relative mismatch (e.g. ``0.005`` for 0.5%).
+    :param max_n: Upper bound on n1 and n2.
+    :return: Best commensurate pair or ``None``.
+
+    .. todo::
+        For non-cubic structures with oblique in-plane cells, the period
+        lengths depend on the full metric tensor and the two in-plane axes
+        may need to be treated jointly when the cell is not rectangular.
+    """
+    best: "tuple[int, int, float, float] | None" = None
+    best_size = float("inf")
+    for n1 in range(1, max_n + 1):
+        l1 = n1 * d1
+        for n2 in range(1, max_n + 1):
+            l2 = n2 * d2
+            mismatch = abs(l1 - l2) / max(l1, l2)
+            if mismatch <= tol and max(l1, l2) < best_size:
+                best = (n1, n2, l1, l2)
+                best_size = max(l1, l2)
+    return best
+
+
 class GBMakerError(Exception):
     """Base class for Exceptions in the GBMaker class."""
     pass
@@ -84,6 +123,9 @@ class GBMaker:
     def __init__(self, a0: float, structure: str, gb_thickness: float,
                  misorientation: np.ndarray, atom_types: str | Tuple[str, ...], *,
                  _embedding=None,
+                 _mismatch_tol=None,
+                 _mismatch_max_cells: int = 50,
+                 _strain_grain: str = "both",
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim_min: float = 50,
                  vacuum: float = 10, interaction_distance: float = 15.0,
                  gb_id: int = 1, epsilon: float = 1e-10):
@@ -120,6 +162,9 @@ class GBMaker:
         self.__id = self.__validate(gb_id, int, "id", positive=True)
         self.__inplane_periodic = (True, True)
         self.__embedding = _embedding
+        self.__mismatch_tol = _mismatch_tol
+        self.__mismatch_max_cells = int(_mismatch_max_cells)
+        self.__strain_grain = _strain_grain
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
@@ -142,6 +187,9 @@ class GBMaker:
         vacuum: float = 10,
         interaction_distance: float = 15.0,
         gb_id: int = 1,
+        mismatch_tol=None,
+        mismatch_max_cells: int = 50,
+        strain_grain: str = "both",
     ) -> "GBMaker":
         """Build a GBMaker from a BoundaryEmbedding.
 
@@ -160,11 +208,17 @@ class GBMaker:
         :param vacuum: Vacuum thickness (Angstroms), default 10.
         :param interaction_distance: Maximum atom interaction distance, default 15.
         :param gb_id: Grain boundary identifier, default 1.
+        :param mismatch_tol: Passed through to ``_mismatch_tol``.
+        :param mismatch_max_cells: Passed through to ``_mismatch_max_cells``.
+        :param strain_grain: Passed through to ``_strain_grain``.
         :return: Fully initialized GBMaker instance.
         """
         return cls(
             a0, structure, gb_thickness, np.zeros(5), atom_types,
             _embedding=embedding,
+            _mismatch_tol=mismatch_tol,
+            _mismatch_max_cells=mismatch_max_cells,
+            _strain_grain=strain_grain,
             repeat_factor=repeat_factor,
             x_dim_min=x_dim_min,
             vacuum=vacuum,
@@ -187,6 +241,9 @@ class GBMaker:
         vacuum: float = 10,
         interaction_distance: float = 15.0,
         gb_id: int = 1,
+        mismatch_tol: "float | None" = None,
+        mismatch_max_cells: int = 50,
+        strain_grain: str = "both",
     ) -> "GBMaker":
         """Public factory that builds a GBMaker from a boundary-spec dataclass.
 
@@ -231,13 +288,36 @@ class GBMaker:
         :param vacuum: Vacuum thickness (Angstroms), default 10.
         :param interaction_distance: Maximum atom interaction distance, default 15.
         :param gb_id: Grain boundary identifier, default 1.
+        :param mismatch_tol: When not ``None``, search for integer multiples
+            ``n1*d1 ≈ n2*d2`` (``approximate`` mode only) to minimize the
+            in-plane mismatch strain.  Typical value: ``0.005`` (0.5%).
+            Raises ``NotImplementedError`` for ``mode="exact"`` (exact path
+            already enforces integer commensurability).
+        :param mismatch_max_cells: Upper bound on n1 and n2 in the
+            commensurability search, default 50.
+        :param strain_grain: Which grain absorbs the residual mismatch.
+            ``"both"`` (default) sets the box to the average of ``n1*d1``
+            and ``n2*d2`` (symmetric strain); ``"left"`` uses ``n2*d2``
+            (right grain exact); ``"right"`` uses ``n1*d1`` (left grain
+            exact).  Ignored when ``mismatch_tol`` is ``None``.
         :return: Fully initialized GBMaker instance.
         :raises BoundarySpecError: If the mode is incompatible with the
             boundary type (e.g. ``CSLApproxSpec`` with ``mode="exact"``).
         :raises GBMakerValueError: If ``mode="exact"`` and the shared in-plane
             box is not commensurate with both grains' in-plane periods.
-        :raises NotImplementedError: For unsupported boundary types or modes.
+        :raises NotImplementedError: For unsupported boundary types, modes, or
+            when ``mismatch_tol`` is combined with ``mode="exact"``.
         """
+        if mismatch_tol is not None and mode == "exact":
+            warnings.warn(
+                "mismatch_tol has no effect with mode='exact': the exact path "
+                "already enforces integer-commensurate in-plane periods via the "
+                "membership kernel. mismatch_tol will be ignored.",
+                UserWarning,
+                stacklevel=2,
+            )
+            mismatch_tol = None
+
         if isinstance(boundary, PQSpec):
             if mode != "exact":
                 raise NotImplementedError(
@@ -282,6 +362,9 @@ class GBMaker:
             vacuum=vacuum,
             interaction_distance=interaction_distance,
             gb_id=gb_id,
+            mismatch_tol=mismatch_tol,
+            mismatch_max_cells=mismatch_max_cells,
+            strain_grain=strain_grain,
         )
 
     @staticmethod
@@ -1321,6 +1404,56 @@ class GBMaker:
 
         return self.__deduplicate_positions(selected_atoms)
 
+    def __apply_strain_accommodation(
+        self,
+        current_dim: float,
+        axis_name: str,
+        row_left,
+        row_right,
+    ) -> float:
+        """Return a commensurate in-plane dimension for one axis.
+
+        Calls ``_find_commensurate_pair`` with ``self.__mismatch_tol`` and
+        ``self.__mismatch_max_cells``.  If a pair is found, the returned
+        dimension is chosen according to ``self.__strain_grain``:
+
+        - ``"both"`` — average of n1*d1 and n2*d2 (symmetric strain on each)
+        - ``"left"`` — n2*d2 (right grain exact, left grain absorbs strain)
+        - ``"right"`` — n1*d1 (left grain exact, right grain absorbs strain)
+
+        If no pair is found, emits a ``UserWarning`` and returns
+        ``current_dim`` unchanged.
+
+        :param current_dim: Current box dimension (Angstroms).
+        :param axis_name: ``"y"`` or ``"z"`` (used in the warning message).
+        :param row_left: Row of ``__R_left_approx`` for this axis.
+        :param row_right: Row of ``__R_right_approx`` for this axis.
+        :return: Possibly adjusted box dimension.
+        """
+        d1 = self.__a0 * float(np.linalg.norm(np.asarray(row_left, dtype=float)))
+        d2 = self.__a0 * float(np.linalg.norm(np.asarray(row_right, dtype=float)))
+        result = _find_commensurate_pair(
+            d1, d2, self.__mismatch_tol, self.__mismatch_max_cells
+        )
+        if result is None:
+            residual = abs(d1 - d2) / max(d1, d2)
+            warnings.warn(
+                f"No commensurate {axis_name} pair found within "
+                f"mismatch_max_cells={self.__mismatch_max_cells} for "
+                f"mismatch_tol={self.__mismatch_tol}. "
+                f"Residual mismatch: {residual:.4%}. "
+                f"Falling back to max(d1, d2) * repeat_factor.",
+                UserWarning,
+                stacklevel=4,
+            )
+            return current_dim
+        n1, n2, l1, l2 = result
+        if self.__strain_grain == "both":
+            return (l1 + l2) / 2.0
+        if self.__strain_grain == "left":
+            return l2
+        return l1  # "right"
+
     def __update_dims(self) -> None:
         """
         Updates the y_dim and z_dim parameters after a relevant parameter has been
@@ -1331,6 +1464,22 @@ class GBMaker:
         """
         self.__y_dim = self.__repeat_factor[0] * self.__spacing["y"]
         self.__z_dim = self.__repeat_factor[1] * self.__spacing["z"]
+
+        use_exact = (
+            self.__embedding is not None
+            and self.__embedding.exact
+            and self.__embedding.P is not None
+        )
+        if self.__mismatch_tol is not None and not use_exact:
+            self.__y_dim = self.__apply_strain_accommodation(
+                self.__y_dim, "y",
+                self.__R_left_approx[1], self.__R_right_approx[1],
+            )
+            self.__z_dim = self.__apply_strain_accommodation(
+                self.__z_dim, "z",
+                self.__R_left_approx[2], self.__R_right_approx[2],
+            )
+
         repeat_z = self.__repeat_factor[1]
         cutoff = 2 * self.__interaction_distance
         if self.__y_dim < cutoff:

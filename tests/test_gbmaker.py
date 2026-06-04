@@ -17,9 +17,146 @@ from GBOpt.GBMaker import (
     GBMaker,
     GBMakerTypeError,
     GBMakerValueError,
+    _find_commensurate_pair,
     wrap_reduced_coordinate,
 )
 from GBOpt.UnitCell import UnitCell
+
+
+class TestStrainAccommodation(unittest.TestCase):
+    """Step 16b-c: mismatch_tol / strain_grain wired through from_boundary_spec."""
+
+    A0 = 5.47       # UO2 lattice parameter (fluorite)
+    STRUCTURE = "fluorite"
+    ATOM_TYPES = ("U", "O")
+    GB_THICKNESS = 0.0
+    # Σ5 [001] 36.87° ATGB: P = identity, Q = [[4,-3,0],[3,4,0],[0,0,1]]
+    # (asymmetric in y because norm(P[1])=1 ≠ norm(Q[1])=5)
+    from GBOpt.BoundarySpec import CSLApproxSpec as _ApproxSpec
+    APPROX_SPEC = _ApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+
+    def _build(self, mismatch_tol=None, strain_grain="both"):
+        from GBOpt.GBMaker import GBMaker
+        from GBOpt.BoundarySpec import CSLApproxSpec
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+        return GBMaker.from_boundary_spec(
+            self.A0, self.STRUCTURE, self.ATOM_TYPES, spec,
+            mode="approximate", gb_thickness=self.GB_THICKNESS,
+            mismatch_tol=mismatch_tol, strain_grain=strain_grain,
+        )
+
+    def test_default_no_accommodation(self):
+        # Without mismatch_tol, behaviour unchanged: y_dim = repeat * max(d1, d2)
+        gb = self._build()
+        assert gb.whole_system.size > 0
+
+    def test_mismatch_tol_finds_pair_and_adjusts_y_dim(self):
+        gb = self._build(mismatch_tol=0.005)
+        # The accommodation must yield a y_dim that is within 0.5% of both
+        # grains' in-plane y-periods (n1*d1 and n2*d2)
+        a0 = self.A0
+        R_la = gb._GBMaker__R_left_approx[1].astype(float)
+        R_ra = gb._GBMaker__R_right_approx[1].astype(float)
+        d1 = a0 * float(np.linalg.norm(R_la))
+        d2 = a0 * float(np.linalg.norm(R_ra))
+        y = gb.y_dim
+        # y / d1 and y / d2 should each be within mismatch_tol of an integer
+        for d in (d1, d2):
+            ratio = y / d
+            self.assertAlmostEqual(ratio, round(ratio), delta=0.005 * ratio + 0.01,
+                                   msg=f"y_dim={y:.4f} is not within 0.5% of a "
+                                       f"multiple of d={d:.4f}")
+
+    def test_strain_grain_left_sets_y_dim_to_n2_d2(self):
+        gb_both = self._build(mismatch_tol=0.005, strain_grain="both")
+        gb_left = self._build(mismatch_tol=0.005, strain_grain="left")
+        gb_right = self._build(mismatch_tol=0.005, strain_grain="right")
+        # "left" → box = n2*d2 (right grain exact), "right" → box = n1*d1
+        # All three should still be within tolerance of at least one grain's period.
+        for gb, label in ((gb_left, "left"), (gb_right, "right"), (gb_both, "both")):
+            self.assertGreater(gb.y_dim, 0, msg=f"strain_grain={label}: y_dim <= 0")
+
+    def test_y_and_z_treated_independently(self):
+        # y and z periods differ for the approx spec; both must be accommodated
+        gb = self._build(mismatch_tol=0.005)
+        self.assertNotEqual(gb.y_dim, gb.z_dim)   # different periods → different dims
+
+    def test_fallback_warning_when_no_pair_found(self):
+        # Force _find_commensurate_pair to return None for both axes so the
+        # fallback warning fires regardless of what the actual periods are.
+        with patch("GBOpt.GBMaker._find_commensurate_pair", return_value=None):
+            with warnings.catch_warnings(record=True) as w:
+                warnings.simplefilter("always")
+                self._build(mismatch_tol=0.005)
+        msgs = [str(x.message) for x in w]
+        self.assertTrue(
+            any("No commensurate" in m for m in msgs),
+            f"Expected a 'No commensurate' warning; got: {msgs}",
+        )
+
+    def test_mismatch_tol_with_exact_mode_warns_and_ignores(self):
+        from GBOpt.BoundarySpec import PQSpec
+        spec = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                      Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            gb = GBMaker.from_boundary_spec(
+                3.615, "fcc", "Cu", spec, mode="exact",
+                mismatch_tol=0.005,
+            )
+        msgs = [str(x.message) for x in w]
+        self.assertTrue(
+            any("no effect" in m.lower() or "ignored" in m.lower() for m in msgs),
+            f"Expected a warning about mismatch_tol being ignored; got: {msgs}",
+        )
+        # bicrystal should still build successfully
+        self.assertGreater(gb.whole_system.size, 0)
+
+
+class TestFindCommensurablePair(unittest.TestCase):
+    """Unit tests for the _find_commensurate_pair helper (Step 16a)."""
+
+    def test_identical_periods_returns_n1_n2_1(self):
+        result = _find_commensurate_pair(3.0, 3.0, tol=0.005, max_n=10)
+        self.assertIsNotNone(result)
+        n1, n2, l1, l2 = result
+        self.assertEqual(n1, 1)
+        self.assertEqual(n2, 1)
+        self.assertAlmostEqual(l1, 3.0)
+        self.assertAlmostEqual(l2, 3.0)
+
+    def test_exact_multiple_found(self):
+        # d2 = 2*d1 → n1=2, n2=1 should be found with tol=0
+        result = _find_commensurate_pair(3.0, 6.0, tol=0.0, max_n=10)
+        self.assertIsNotNone(result)
+        n1, n2, l1, l2 = result
+        self.assertAlmostEqual(l1, l2, places=10)
+
+    def test_commensurate_pair_within_tolerance(self):
+        # 3*5.0 = 15.0, 2*7.48 = 14.96 → mismatch = 0.04/15 ≈ 0.27%
+        result = _find_commensurate_pair(5.0, 7.48, tol=0.005, max_n=20)
+        self.assertIsNotNone(result)
+        n1, n2, l1, l2 = result
+        mismatch = abs(l1 - l2) / max(l1, l2)
+        self.assertLessEqual(mismatch, 0.005)
+
+    def test_no_pair_within_tight_tolerance(self):
+        # Irrational-like ratio: no small-integer pair within 0.001%
+        result = _find_commensurate_pair(1.0, math.pi, tol=0.00001, max_n=5)
+        self.assertIsNone(result)
+
+    def test_returns_smallest_box(self):
+        # Both (n1=1,n2=2) and (n1=2,n2=4) are valid; (1,2) has smaller box.
+        result = _find_commensurate_pair(4.0, 2.0, tol=0.0, max_n=10)
+        n1, n2, _, _ = result
+        self.assertEqual(max(n1 * 4.0, n2 * 2.0), 4.0)
+
+    def test_tolerance_boundary(self):
+        # mismatch exactly at tol should be accepted
+        d1, d2 = 10.0, 10.1
+        tol = abs(d1 - d2) / max(d1, d2)
+        result = _find_commensurate_pair(d1, d2, tol=tol, max_n=5)
+        self.assertIsNotNone(result)
 
 
 class TestGBMaker(unittest.TestCase):
