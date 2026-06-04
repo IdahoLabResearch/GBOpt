@@ -201,6 +201,21 @@ class GBMaker:
         FiveDOFSpec   not yet      not yet      not yet
         ============= =========== ===========  ============
 
+        **Commensurability requirement (exact mode only):**
+        The shared in-plane simulation box is set to
+        ``repeat_factor × max(grain1_period, grain2_period)`` along each
+        in-plane axis.  For the exact path this box must be an integer
+        multiple of *both* grains' in-plane periods; otherwise a
+        ``GBMakerValueError`` is raised.  For symmetric CSL boundaries
+        (e.g. Σ5 [001] tilt) the two grains share the same in-plane period
+        so the condition is always satisfied.  For asymmetric or mixed
+        tilt/twist boundaries where the two grains have incommensurate
+        in-plane periods, use ``mode="approximate"`` or increase
+        ``repeat_factor`` until the box is commensurate with both grains.
+        A geometrically complete fix — constructing the shared box from the
+        CSL in-plane cell rather than the maximum single-grain period — is
+        not yet implemented.
+
         :param a0: Crystal lattice parameter (Angstroms).
         :param structure: Crystal structure string.
         :param atom_types: Atom type string or tuple of strings.
@@ -219,6 +234,8 @@ class GBMaker:
         :return: Fully initialized GBMaker instance.
         :raises BoundarySpecError: If the mode is incompatible with the
             boundary type (e.g. ``CSLApproxSpec`` with ``mode="exact"``).
+        :raises GBMakerValueError: If ``mode="exact"`` and the shared in-plane
+            box is not commensurate with both grains' in-plane periods.
         :raises NotImplementedError: For unsupported boundary types or modes.
         """
         if isinstance(boundary, PQSpec):
@@ -404,8 +421,8 @@ class GBMaker:
 
         The commensurability guard raises if y or z does not divide evenly
         (within tolerance), which means the shared in-plane box is not an
-        integer multiple of this grain's in-plane periods.  This is a known
-        Phase-1 limitation documented in Step 14e.
+        integer multiple of this grain's in-plane periods.  See the
+        commensurability note in ``from_boundary_spec`` for guidance.
 
         :param P_or_Q: 3×3 canonical integer orientation matrix for this grain.
         :param x_length: Equalized x-slab thickness for this grain (Angstroms).
@@ -434,16 +451,18 @@ class GBMaker:
                 f"Exact construction requires the y box ({self.__y_dim:.6f} Å) to be "
                 f"an integer multiple of this grain's y-period ({y_period:.6f} Å), "
                 f"but got repeat_y = {repeat_y_raw:.8f}.  "
-                "This is a known Phase-1 limitation: use a repeat_factor that makes "
-                "the y box commensurate with both grains' in-plane periods."
+                "Use mode='approximate' or adjust repeat_factor until both grains' "
+                "in-plane periods divide the shared box exactly. See the "
+                "commensurability note in from_boundary_spec for details."
             )
         if abs(repeat_z_raw - repeat_z) > tol:
             raise GBMakerValueError(
                 f"Exact construction requires the z box ({self.__z_dim:.6f} Å) to be "
                 f"an integer multiple of this grain's z-period ({z_period:.6f} Å), "
                 f"but got repeat_z = {repeat_z_raw:.8f}.  "
-                "This is a known Phase-1 limitation: use a repeat_factor that makes "
-                "the z box commensurate with both grains' in-plane periods."
+                "Use mode='approximate' or adjust repeat_factor until both grains' "
+                "in-plane periods divide the shared box exactly. See the "
+                "commensurability note in from_boundary_spec for details."
             )
 
         return repeat_x, repeat_y, repeat_z
@@ -539,11 +558,25 @@ class GBMaker:
                 self.__R_left_approx,
                 left_bounds,
             )
+            # For vacuum=0 (periodic-in-x), the right grain's last x-period
+            # would wrap onto the left grain's first plane under PBC, creating
+            # a spurious double interface. Build one period shorter so the
+            # grain ends before its own upper boundary — stoichiometric because
+            # we exclude a complete origin period rather than float-slicing.
+            # Guard: only trim when at least two x-periods remain after the
+            # reduction. If the grain spans only one period the trim would
+            # remove all atoms; in that case skip the stoichiometric trim and
+            # rely on the gap-equalization step below.
+            x_period_right = self.__x_period(self.__R_right_approx)
+            right_bounds_eff = right_bounds.copy()
+            if (self.__vacuum_thickness == 0
+                    and right_bounds_eff[1] - right_bounds_eff[0]
+                    > x_period_right * (1 + self.__epsilon)):
+                right_bounds_eff[1] -= x_period_right
             self.__right_grain = self.__generate_grain(
                 self.__R_right,
                 self.__R_right_approx,
-                right_bounds,
-                trim_upper_face=True,
+                right_bounds_eff,
             )
 
         # The two grains may have different interplanar x-spacings (asymmetric tilt,
@@ -569,9 +602,35 @@ class GBMaker:
                 # takes precedence over exact gap symmetry on this path.
                 pass
             else:
-                self.__right_grain = self.__right_grain[
-                    self.__right_grain["x"] < right_bounds[1] - central_gap
-                ]
+                # Period-based equalization: compute how many whole x-periods
+                # of the right grain must be removed so that the periodic gap
+                # grows to match the central gap.  Removing n complete periods
+                # is stoichiometric (adjacent periods overlap in x-coordinate
+                # space for multi-species structures, so no float threshold can
+                # cleanly separate them — see Step 15a rationale).
+                excess = right_max_x - (right_bounds[1] - central_gap)
+                n_remove = max(1, math.ceil(excess / x_period_right))
+                new_upper = right_bounds_eff[1] - n_remove * x_period_right
+                if new_upper <= right_bounds_eff[0]:
+                    warnings.warn(
+                        f"Gap equalization would remove all atoms from the right "
+                        f"grain ({n_remove} x-periods; right_x = "
+                        f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} Å, "
+                        f"x_period = {x_period_right:.4f} Å). "
+                        "Skipping equalization to preserve non-empty grain."
+                    )
+                else:
+                    if n_remove * x_period_right > (right_bounds_eff[1] - right_bounds_eff[0]) / 2:
+                        warnings.warn(
+                            f"Gap equalization removed {n_remove} x-period(s) "
+                            f"({n_remove * x_period_right:.4f} Å) — more than half "
+                            "the right grain. The resulting bicrystal may be unusable."
+                        )
+                    self.__right_grain = self.__generate_grain(
+                        self.__R_right,
+                        self.__R_right_approx,
+                        np.array([right_bounds_eff[0], new_upper], dtype=np.float64),
+                    )
             # When d_L < d_R (left grain denser in x), the periodic-edge gap equals d_R
             # which exceeds central_gap, so the fix above does not fire. This leaves
             # extra interfacial volume at the x periodic boundary. NPT simulations will
@@ -736,12 +795,25 @@ class GBMaker:
         unit_cell.init_by_structure(self.__structure, self.__a0, atom_types)
         return unit_cell
 
+    def __x_period(self, R_grain_approx: np.ndarray) -> float:
+        """Return one full x-period length for the given grain.
+
+        The x-period is the distance between equivalent crystallographic
+        planes along the boundary-normal direction, equal to
+        ``a0 * ||R_grain_approx[0]||``.
+
+        :param R_grain_approx: Integer approximation of the grain rotation matrix.
+        :return: x-period in Angstroms.
+        """
+        return self.__a0 * float(
+            np.linalg.norm(np.asarray(R_grain_approx[0], dtype=float))
+        )
+
     def __generate_grain(
         self,
         R_grain: np.ndarray,
         R_grain_approx: np.ndarray,
         x_bounds: np.ndarray,
-        trim_upper_face: bool = False,
     ) -> np.ndarray:
         """
         Generate one grain by enumerating lattice coefficients over a bounded slab.
@@ -749,7 +821,6 @@ class GBMaker:
         :param R_grain: Rotation matrix for the grain.
         :param R_grain_approx: Integer approximation of ``R_grain``.
         :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
-        :param trim_upper_face: Flag to trim the upper x bound atoms.
         :return: Structured atom array for the selected grain.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
@@ -823,12 +894,6 @@ class GBMaker:
         if any(inplane_periodic):
             atoms = self.__select_atoms_in_box_basis(atoms, primitive_periods, x_bounds)
         atoms = self.__clip_atoms_to_cartesian_box(atoms, x_bounds)
-
-        if trim_upper_face:
-            x_span = x_bounds[1] - x_bounds[0]
-            n_planes = len(np.unique(np.round(atoms["x"] / self.__epsilon)))
-            d_hkl = x_span / n_planes
-            atoms = atoms[atoms["x"] < x_bounds[1] - d_hkl * 1e-3]
 
         return self.__deduplicate_positions(atoms)
 

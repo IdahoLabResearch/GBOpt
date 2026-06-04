@@ -1422,8 +1422,10 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         )
 
     def test_asymmetric_trim_equalizes_periodic_and_central_gap(self):
-        """When d_R < d_L, the periodic-edge gap should be trimmed to match
-        the central GB gap, preventing close-contact atom pairs."""
+        """When d_R < d_L, the periodic-edge gap is trimmed toward the central
+        GB gap by removing whole x-periods of the right grain.  The gap
+        cannot be equalised exactly (whole-period snapping), so the assertion
+        allows a residual up to one x-period of the right grain."""
         a0 = 5.431
         theta5 = 2 * np.arctan(1 / 3)
         misorientation = np.array([theta5, 0, 0, 0, -np.arctan(1 / 2)])
@@ -1433,17 +1435,21 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         gb_thickness = 2 * max(gbm.spacing["x"]["left"], gbm.spacing["x"]["right"])
         gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
 
+        x_period_right = a0 * float(np.linalg.norm(
+            gbm._GBMaker__R_right_approx[0].astype(float)))
         central_gap = np.min(gbm.right_grain["x"]) - np.max(gbm.left_grain["x"])
         periodic_gap = (
             gbm.x_dim
             - np.max(gbm.right_grain["x"])
             + np.min(gbm.left_grain["x"])
         )
-        self.assertAlmostEqual(
-            periodic_gap, central_gap, places=4,
+        residual = abs(periodic_gap - central_gap)
+        self.assertLessEqual(
+            residual, x_period_right,
             msg=(
-                f"Periodic gap {periodic_gap:.6f} Å should equal central gap "
-                f"{central_gap:.6f} Å after asymmetric trim"
+                f"Periodic gap {periodic_gap:.6f} Å and central gap "
+                f"{central_gap:.6f} Å differ by {residual:.6f} Å, "
+                f"which exceeds one x-period ({x_period_right:.4f} Å)"
             ),
         )
 
@@ -1473,6 +1479,23 @@ class TestGBMakerGenerateGB(unittest.TestCase):
                 f"Periodic gap {periodic_gap:.6f} Å should exceed central gap "
                 f"{central_gap:.6f} Å when left grain is denser in x"
             ),
+        )
+
+    def test_vacuum0_trim_is_stoichiometric(self):
+        """Period-based vacuum=0 trim must not break cation:anion stoichiometry."""
+        import math
+        a0 = 5.47
+        theta5 = 2 * np.arctan(1 / 3)
+        mis = np.array([theta5, 0, 0, 0, -theta5 / 2])
+        gbm = GBMaker(a0, "fluorite", 0.0, mis, ("U", "O"),
+                      vacuum=0, repeat_factor=2, x_dim_min=50,
+                      interaction_distance=11.0)
+        ws = gbm.whole_system
+        names, counts = np.unique(ws["name"], return_counts=True)
+        c = {str(n): int(v) for n, v in zip(names, counts)}
+        self.assertEqual(
+            c["O"], 2 * c["U"],
+            f"Fluorite vacuum=0 bicrystal is not stoichiometric: {c}"
         )
 
     def test_gb_region_atoms_lie_within_window(self):
