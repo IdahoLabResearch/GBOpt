@@ -390,6 +390,110 @@ class GBMaker:
             ]
         )
 
+    def __exact_grain_repeats(
+        self,
+        P_or_Q: np.ndarray,
+        x_length: float,
+    ) -> tuple[int, int, int]:
+        """Compute integer repeat counts (repeat_x, repeat_y, repeat_z) for an exact grain.
+
+        Derives how many times the supercell period fits into the box along each
+        axis.  The x count is derived from the already-equalized grain thickness
+        ``x_length``.  The y and z counts are derived from ``self.__y_dim`` /
+        ``self.__z_dim``.
+
+        The commensurability guard raises if y or z does not divide evenly
+        (within tolerance), which means the shared in-plane box is not an
+        integer multiple of this grain's in-plane periods.  This is a known
+        Phase-1 limitation documented in Step 14e.
+
+        :param P_or_Q: 3×3 canonical integer orientation matrix for this grain.
+        :param x_length: Equalized x-slab thickness for this grain (Angstroms).
+        :return: (repeat_x, repeat_y, repeat_z) as positive integers.
+        :raises GBMakerValueError: If y or z is not commensurate with the box.
+        """
+        from GBOpt.Utils.gb_exact import build_supercell_matrix
+
+        S = build_supercell_matrix(P_or_Q)
+        a0 = self.__a0
+
+        x_period = a0 * float(np.linalg.norm(S[0]))
+        y_period = a0 * float(np.linalg.norm(S[1]))
+        z_period = a0 * float(np.linalg.norm(S[2]))
+
+        repeat_x = int(round(x_length / x_period))
+        repeat_y_raw = self.__y_dim / y_period
+        repeat_z_raw = self.__z_dim / z_period
+
+        repeat_y = int(round(repeat_y_raw))
+        repeat_z = int(round(repeat_z_raw))
+
+        tol = 1e-6
+        if abs(repeat_y_raw - repeat_y) > tol:
+            raise GBMakerValueError(
+                f"Exact construction requires the y box ({self.__y_dim:.6f} Å) to be "
+                f"an integer multiple of this grain's y-period ({y_period:.6f} Å), "
+                f"but got repeat_y = {repeat_y_raw:.8f}.  "
+                "This is a known Phase-1 limitation: use a repeat_factor that makes "
+                "the y box commensurate with both grains' in-plane periods."
+            )
+        if abs(repeat_z_raw - repeat_z) > tol:
+            raise GBMakerValueError(
+                f"Exact construction requires the z box ({self.__z_dim:.6f} Å) to be "
+                f"an integer multiple of this grain's z-period ({z_period:.6f} Å), "
+                f"but got repeat_z = {repeat_z_raw:.8f}.  "
+                "This is a known Phase-1 limitation: use a repeat_factor that makes "
+                "the z box commensurate with both grains' in-plane periods."
+            )
+
+        return repeat_x, repeat_y, repeat_z
+
+    def __generate_grain_exact(
+        self,
+        R_grain: np.ndarray,
+        P_or_Q: np.ndarray,
+        x_length: float,
+        x_offset: float,
+    ) -> np.ndarray:
+        """Build one grain using the integer membership kernel (exact path).
+
+        Enumerates conventional-cell origins via pure-integer arithmetic,
+        expands each accepted origin to the full ``UnitCell.asarray()`` basis,
+        rotates to the lab frame, and translates by ``x_offset``.  The float
+        selection/clipping/deduplication routines (``__select_atoms_in_box_basis``,
+        ``__clip_atoms_to_cartesian_box``, ``__deduplicate_positions``) and
+        ``trim_upper_face`` are **never called** on this path.
+
+        :param R_grain: Proper rotation matrix for this grain.
+        :param P_or_Q: 3×3 canonical integer orientation matrix.
+        :param x_length: Equalized x-slab thickness (Angstroms).
+        :param x_offset: Lab x-coordinate of the grain's lower face (Angstroms).
+        :return: Structured atom array in the same format as ``__generate_grain``.
+        """
+        from GBOpt.Utils.gb_exact import build_supercell_matrix, enumerate_supercell_origins
+
+        repeat_x, repeat_y, repeat_z = self.__exact_grain_repeats(P_or_Q, x_length)
+        S = build_supercell_matrix(P_or_Q)
+        origins = enumerate_supercell_origins(S, repeat_x, repeat_y, repeat_z)
+
+        # Cartesian origins in the crystal frame: n @ (a0 * I) = a0 * n
+        cart_origins = origins.astype(np.float64) * self.__a0
+
+        atoms = self.get_supercell(cart_origins)
+
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        rotated = positions @ R_grain.T
+        rotated[:, 0] += x_offset
+        atoms["x"], atoms["y"], atoms["z"] = rotated.T
+
+        # Invariant: total atoms = accepted origins × basis size
+        uc_size = len(self.__unit_cell.asarray())
+        assert len(atoms) == len(origins) * uc_size, (
+            f"Exact builder atom count mismatch: expected "
+            f"{len(origins) * uc_size}, got {len(atoms)}"
+        )
+        return atoms
+
     def __generate_gb(self) -> None:
         """
         Private method to calculate the left grain, right grain, and whole GB system
@@ -408,17 +512,39 @@ class GBMaker:
             ],
             dtype=np.float64,
         )
-        self.__left_grain = self.__generate_grain(
-            self.__R_left,
-            self.__R_left_approx,
-            left_bounds,
+
+        use_exact = (
+            self.__embedding is not None
+            and self.__embedding.exact
+            and self.__embedding.coherent
+            and self.__embedding.P is not None
         )
-        self.__right_grain = self.__generate_grain(
-            self.__R_right,
-            self.__R_right_approx,
-            right_bounds,
-            trim_upper_face=True,
-        )
+
+        if use_exact:
+            self.__left_grain = self.__generate_grain_exact(
+                self.__R_left,
+                self.__embedding.P,
+                self.__left_x,
+                left_bounds[0],
+            )
+            self.__right_grain = self.__generate_grain_exact(
+                self.__R_right,
+                self.__embedding.Q,
+                self.__right_x,
+                right_bounds[0],
+            )
+        else:
+            self.__left_grain = self.__generate_grain(
+                self.__R_left,
+                self.__R_left_approx,
+                left_bounds,
+            )
+            self.__right_grain = self.__generate_grain(
+                self.__R_right,
+                self.__R_right_approx,
+                right_bounds,
+                trim_upper_face=True,
+            )
 
         # The two grains may have different interplanar x-spacings (asymmetric tilt,
         # mixed tilt/twist, etc.), causing the periodic-edge gap to differ from the
@@ -432,9 +558,20 @@ class GBMaker:
         periodic_gap = ((right_bounds[1] - right_max_x) +
                         (left_min_x - left_bounds[0]))
         if periodic_gap < central_gap - self.__epsilon:
-            self.__right_grain = self.__right_grain[
-                self.__right_grain["x"] < right_bounds[1] - central_gap
-            ]
+            if use_exact:
+                # Exact grains are filled by whole unit-cell periods; a float
+                # x-threshold would cut partial crystal planes and destroy
+                # stoichiometry. Unit-cell offsets routinely push a few atoms
+                # just past the nominal grain boundary, making the periodic
+                # gap slightly smaller than the central gap. Because the
+                # bicrystal is bracketed by vacuum the atoms remain inside
+                # the LAMMPS box and no close contacts form. Stoichiometry
+                # takes precedence over exact gap symmetry on this path.
+                pass
+            else:
+                self.__right_grain = self.__right_grain[
+                    self.__right_grain["x"] < right_bounds[1] - central_gap
+                ]
             # When d_L < d_R (left grain denser in x), the periodic-edge gap equals d_R
             # which exceeds central_gap, so the fix above does not fire. This leaves
             # extra interfacial volume at the x periodic boundary. NPT simulations will
