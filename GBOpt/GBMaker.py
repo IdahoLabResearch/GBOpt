@@ -621,6 +621,13 @@ class GBMaker:
             and self.__embedding.coherent
             and self.__embedding.P is not None
         )
+        # right_bounds_eff tracks any pre-build reduction applied to the right
+        # grain's upper bound (vacuum=0 period trim).  It starts equal to
+        # right_bounds and may be reduced in the float-path branch below.
+        # All subsequent gap-equalization logic uses right_bounds_eff so the
+        # reference is consistent with the grain that was actually built.
+        right_bounds_eff = right_bounds.copy()
+        vacuum0_trim_applied = False
 
         if use_exact:
             self.__left_grain = self.__generate_grain_exact(
@@ -651,11 +658,12 @@ class GBMaker:
             # remove all atoms; in that case skip the stoichiometric trim and
             # rely on the gap-equalization step below.
             x_period_right = self.__x_period(self.__R_right_approx)
-            right_bounds_eff = right_bounds.copy()
+            vacuum0_trim_applied = False
             if (self.__vacuum_thickness == 0
                     and right_bounds_eff[1] - right_bounds_eff[0]
                     > x_period_right * (1 + self.__epsilon)):
                 right_bounds_eff[1] -= x_period_right
+                vacuum0_trim_applied = True
             self.__right_grain = self.__generate_grain(
                 self.__R_right,
                 self.__R_right_approx,
@@ -671,7 +679,12 @@ class GBMaker:
         central_gap = right_min_x - left_max_x
         left_min_x = np.min(self.__left_grain["x"])
         right_max_x = np.max(self.__right_grain["x"])
-        periodic_gap = ((right_bounds[1] - right_max_x) +
+        # Use right_bounds_eff (the effective upper bound after any vacuum=0
+        # period trim) so the gap equalization check is consistent with the
+        # grain that was actually built.  Using the original right_bounds[1]
+        # here would make the periodic gap appear negative after the trim and
+        # trigger a cascade of unwanted additional equalization passes.
+        periodic_gap = ((right_bounds_eff[1] - right_max_x) +
                         (left_min_x - left_bounds[0]))
         if periodic_gap < central_gap - self.__epsilon:
             if use_exact:
@@ -684,6 +697,14 @@ class GBMaker:
                 # the LAMMPS box and no close contacts form. Stoichiometry
                 # takes precedence over exact gap symmetry on this path.
                 pass
+            elif self.__vacuum_thickness == 0 and vacuum0_trim_applied:
+                # The period trim already removed one complete x-period (the
+                # stoichiometric PBC fix). Unit-cell positive x-offsets push
+                # right_max_x slightly past right_bounds_eff[1], making
+                # periodic_gap look negative — physically harmless because all
+                # atoms are inside the LAMMPS box. An additional equalization
+                # pass would over-trim and break stoichiometry.
+                pass
             else:
                 # Period-based equalization: compute how many whole x-periods
                 # of the right grain must be removed so that the periodic gap
@@ -691,7 +712,7 @@ class GBMaker:
                 # is stoichiometric (adjacent periods overlap in x-coordinate
                 # space for multi-species structures, so no float threshold can
                 # cleanly separate them — see Step 15a rationale).
-                excess = right_max_x - (right_bounds[1] - central_gap)
+                excess = right_max_x - (right_bounds_eff[1] - central_gap)
                 n_remove = max(1, math.ceil(excess / x_period_right))
                 new_upper = right_bounds_eff[1] - n_remove * x_period_right
                 if new_upper <= right_bounds_eff[0]:
