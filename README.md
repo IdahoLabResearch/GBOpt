@@ -23,3 +23,10 @@ Then install the dependencies
 pip install .
 ```
 
+## Citing GBOpt
+
+If you use GBOpt in your research, please cite:
+
+French, J. C. and Bhave, C. V. (2026). GBOpt: Grain Boundary Structure Optimization Using
+Monte Carlo and Evolutionary Algorithms. *SoftwareX*, 35, 102763.
+https://doi.org/10.1016/j.softx.2026.102763
