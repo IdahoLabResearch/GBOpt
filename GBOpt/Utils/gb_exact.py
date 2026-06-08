@@ -460,39 +460,74 @@ def _recover_sigma_from_rotation(R: np.ndarray, max_sigma: int = 10001) -> int:
     return denom
 
 
+def _ext_gcd(a: int, b: int) -> tuple[int, int, int]:
+    """Return (g, x, y) with x*a + y*b = g = gcd(|a|, |b|)."""
+    old_r, r = a, b
+    old_s, s = 1, 0
+    while r:
+        q = old_r // r
+        old_r, r = r, old_r - q * r
+        old_s, s = s, old_s - q * s
+    g = abs(old_r)
+    x = old_s if old_r >= 0 else -old_s
+    y = (g - x * a) // b if b else 0
+    return g, x, y
+
+
 def _plane_null_basis(
     plane_int: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Return two linearly independent integer vectors orthogonal to plane_int.
+    """Return a **primitive** integer basis for the null space of plane_int.
 
-    For a plane normal [h, k, l] the two basis vectors are cross products of
-    [h,k,l] with the two axis-aligned unit vectors that are **not** the dominant
-    axis.  Because the dominant component (largest |value|) of [h,k,l] is
-    non-zero, it always survives in the cross-product result, guaranteeing
-    neither basis vector is the zero vector.
+    Finds e1, e2 ∈ Z³ such that:
 
-    The three cases and their cross products are::
+    * ``plane_int · e1 = 0`` and ``plane_int · e2 = 0`` (both in-plane), and
+    * ``e1 × e2 = plane_int`` (the basis spans the *full* integer plane lattice,
+      not a coarser sublattice).
 
-        dominant axis = x  →  e1 = [h,k,l]×ŷ = [-l, 0,  h]
-                               e2 = [h,k,l]×ẑ = [ k,-h,  0]
-        dominant axis = y  →  e1 = [h,k,l]×x̂ = [ 0, l, -k]
-                               e2 = [h,k,l]×ẑ = [ k,-h,  0]
-        dominant axis = z  →  e1 = [h,k,l]×x̂ = [ 0, l, -k]
-                               e2 = [h,k,l]×ŷ = [-l, 0,  h]
+    The construction applies unimodular column operations (Smith-Normal-Form
+    style) to ``[h, k, l]`` until it becomes ``[g, 0, 0]`` with g = gcd = 1,
+    tracking the transformations in V ∈ GL₃(Z).  Because V is unimodular,
+    columns 1 and 2 of V are exactly the primitive null vectors.
 
-    All results are exact integers.
+    The cross-product criterion ``e1 × e2 = ±plane_int`` ensures the 2-D
+    integer lattice in the plane is covered without gaps — the previous
+    axis-aligned cross-product formula could return vectors whose span had
+    index > 1 (e.g. plane [5,2,3] gave index-5 sublattice, causing
+    ``solve_inplane_csl`` to miss short CSL vectors).
     """
-    h, k, l = int(plane_int[0]), int(plane_int[1]), int(plane_int[2])
-    idx = int(np.argmax([abs(h), abs(k), abs(l)]))
-    if idx == 0:
-        e1 = np.array([-l,  0,  h])   # [h,k,l] × ŷ
-        e2 = np.array([ k, -h,  0])   # [h,k,l] × ẑ
-    elif idx == 1:
-        e1 = np.array([ 0,  l, -k])   # [h,k,l] × x̂
-        e2 = np.array([ k, -h,  0])   # [h,k,l] × ẑ
-    else:
-        e1 = np.array([ 0,  l, -k])   # [h,k,l] × x̂
-        e2 = np.array([-l,  0,  h])   # [h,k,l] × ŷ
+    vec = np.array(
+        [int(plane_int[0]), int(plane_int[1]), int(plane_int[2])], dtype=int
+    )
+    V = np.eye(3, dtype=int)
+
+    for i in range(2):
+        # Move the first nonzero entry to position i (column pivot).
+        nz = next((j for j in range(i, 3) if vec[j] != 0), None)
+        if nz is None:
+            break
+        if nz != i:
+            vec[[i, nz]] = vec[[nz, i]]
+            V[:, [i, nz]] = V[:, [nz, i]]
+        # Zero out vec[j] for every j > i via extended GCD.
+        for j in range(i + 1, 3):
+            if vec[j] == 0:
+                continue
+            g, a, b = _ext_gcd(int(vec[i]), int(vec[j]))
+            c, d = int(vec[i]) // g, int(vec[j]) // g
+            old_i, old_j = V[:, i].copy(), V[:, j].copy()
+            V[:, i] = a * old_i + b * old_j        # new col i absorbs the gcd
+            V[:, j] = -d * old_i + c * old_j       # new col j becomes 0
+            vec[i] = g
+            vec[j] = 0
+
+    # After reduction vec == [1, 0, 0] (since gcd(h,k,l) = 1 for primitive plane).
+    # V is unimodular, so [h,k,l] @ V[:,1:] == [0,0] and V[:,1:] is primitive.
+    e1 = V[:, 1].astype(float)
+    e2 = V[:, 2].astype(float)
+    # Guarantee e1 × e2 = +plane_int (not −plane_int) for a consistent orientation.
+    if np.dot(np.cross(e1, e2), plane_int) < 0:
+        e2 = -e2
     return e1, e2
 
 
@@ -716,21 +751,21 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     N = _recover_sigma_from_rotation(R)
     M_int = np.round(N * R).astype(int)
 
-    # Validate that a CSL exists for this plane — raises if not.
-    solve_inplane_csl(
+    plane_int = _row_gcd_reduce(np.round(np.asarray(spec.plane, dtype=float)).astype(int))
+
+    # Find the minimal in-plane CSL basis (raises if none exists or cell is too large).
+    # Use the shortest CSL in-plane vector as e1 so the max_exact_atoms guard
+    # applies to the same basis that P will actually use.
+    v1, v2 = solve_inplane_csl(
         np.asarray(spec.axis, dtype=float),
         np.asarray(spec.plane, dtype=float),
         R,
         max_exact_atoms=max_exact_atoms,
     )
-
-    # Build P: row 0 = boundary normal; rows 1–2 = orthogonal in-plane basis.
-    # e1 is one null-basis vector (orthogonal to plane_int).
-    # e2 = plane_int × e1 is then orthogonal to BOTH plane_int and e1, ensuring
-    # the three rows form a proper rotation when normalized.
-    plane_int = _row_gcd_reduce(np.round(np.asarray(spec.plane, dtype=float)).astype(int))
-    e1, _ = _plane_null_basis(plane_int)
-    e1 = _row_gcd_reduce(e1)
+    r1, _r2 = reduce_2d_basis(v1, v2)
+    e1 = _row_gcd_reduce(r1)
+    # e2 = plane_int × e1 is orthogonal to both, keeping P rows mutually
+    # orthogonal so the normalized rows form a proper rotation matrix.
     e2 = _row_gcd_reduce(np.cross(plane_int, e1).astype(int))
     P = np.array([
         plane_int.astype(float),
@@ -745,6 +780,20 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     ])
 
     P_canon, Q_canon = canonicalize_pq(P, Q)
+
+    # Re-check the cell size using the actual constructed matrices.
+    # solve_inplane_csl guards |v1 × v2| (the CSL in-plane area), but e2 is
+    # defined as plane × e1 rather than the second CSL vector, so det(P)
+    # equals |plane|²·|e1|², which can exceed the CSL area by a factor of
+    # |plane|² for non-(100) boundaries.
+    det_P = abs(_int_det3(np.round(P_canon).astype(int)))
+    det_Q = abs(_int_det3(np.round(Q_canon).astype(int)))
+    if max(det_P, det_Q) > max_exact_atoms:
+        raise BoundarySpecError(
+            f"CSL supercell exceeds max_exact_atoms={max_exact_atoms}: "
+            f"|det(P)|={det_P}, |det(Q)|={det_Q}. "
+            "Use mode='approximate' or increase the limit."
+        )
 
     R_left = P_canon / np.linalg.norm(P_canon, axis=1, keepdims=True)
     R_right = Q_canon / np.linalg.norm(Q_canon, axis=1, keepdims=True)

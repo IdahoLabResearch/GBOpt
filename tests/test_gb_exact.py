@@ -338,6 +338,46 @@ class TestSolveInplaneCSL:
         with pytest.raises(BoundarySpecError):
             solve_inplane_csl([0, 0, 1], [1, 0, 0], R, max_exact_atoms=1)
 
+    def test_sigma5_36deg_plane523_primitive_basis(self):
+        # Regression for the non-primitive null-basis bug on general planes.
+        # For plane [5,2,3] the old cross-product formula produced e1=[-3,0,5],
+        # e2=[2,-5,0] whose 2-D span has index 5 in the full plane lattice
+        # (e1×e2 = 5*[5,2,3]).  solve_inplane_csl therefore searched only an
+        # index-5 sublattice, saw area ≈ 154 and raised with max_exact_atoms=100
+        # even though a valid in-plane CSL basis with area ≈ 30.82 exists.
+        R = _sigma5_36deg_R()
+        v1, v2 = solve_inplane_csl([0, 0, 1], [5, 2, 3], R, max_exact_atoms=100)
+        area = np.linalg.norm(np.cross(v1, v2))
+        assert area < 40.0, (
+            f"CSL cell area ({area:.4f}) too large; non-primitive null basis suspected"
+        )
+        # Both returned vectors must lie in the plane [5,2,3]
+        for v in (v1, v2):
+            assert abs(np.dot([5, 2, 3], v)) < 1e-9, f"{v} not in-plane for [5,2,3]"
+
+    def test_sigma5_36deg_plane210_primitive_basis(self):
+        # Regression: plane [2,1,0] has l=0 so the cross-product basis formula
+        # previously produced [0,0,2] (gcd=2, non-primitive).  After the fix,
+        # the basis must be primitive: [0,0,1] is in-plane and a CSL vector for
+        # the [001] rotation, so the solver must find it and report area ≈ 11.18,
+        # not the doubled 22.36 that the non-primitive lattice gave.
+        R = _sigma5_36deg_R()
+        v1, v2 = solve_inplane_csl([0, 0, 1], [2, 1, 0], R)
+        r1, _r2 = reduce_2d_basis(v1, v2)
+        # Shortest in-plane CSL vector must be primitive (length 1, i.e. [0,0,±1])
+        assert abs(np.linalg.norm(r1) - 1.0) < 1e-9, (
+            f"Expected primitive in-plane CSL vector of length 1, got {r1} "
+            f"(norm={np.linalg.norm(r1):.4f})"
+        )
+        area = np.linalg.norm(np.cross(v1, v2))
+        assert area < 15.0, (
+            f"CSL cell area ({area:.4f}) too large; non-primitive basis suspected"
+        )
+        # Must also pass with a tight max_exact_atoms limit that would have
+        # failed on the old doubled basis (area ≈ 22.36 > 20 would have raised)
+        v1b, v2b = solve_inplane_csl([0, 0, 1], [2, 1, 0], R, max_exact_atoms=20)
+        assert np.linalg.norm(np.cross(v1b, v2b)) < 15.0
+
 
 class TestReduce2DBasis:
     def test_shorter_vector_is_first(self):
