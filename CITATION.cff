@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+authors:
+  - family-names: French
+    given-names: Jarin C.
+    orcid: https://orcid.org/0000-0002-2758-0055
+  - family-names: Bhave
+    given-names: Chaitanya V.
+    orcid: https://orcid.org/0000-0001-5508-1352
+title: "GBOpt: Grain Boundary Structure Optimization Using Monte Carlo and Evolutionary Algorithms"
+doi: 10.1016/j.softx.2026.102763
+url: "https://github.com/IdahoLabResearch/GBOpt"
+preferred-citation:
+  type: article
+  authors:
+    - family-names: French
+      given-names: Jarin C.
+      orcid: https://orcid.org/0000-0002-2758-0055
+    - family-names: Bhave
+      given-names: Chaitanya V.
+      orcid: https://orcid.org/0000-0001-5508-1352
+  title: "GBOpt: Grain Boundary Structure Optimization Using Monte Carlo and Evolutionary Algorithms"
+  doi: 10.1016/j.softx.2026.102763
+  journal: SoftwareX
+  year: 2026
+  month: 9
+  volume: 35
+  start: 102763
