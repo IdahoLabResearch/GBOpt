@@ -3,10 +3,18 @@
 """Exact-solver utilities for canonical P/Q bicrystal construction."""
 
 import math
-
 import numpy as np
 
 from GBOpt.BoundarySpec import BoundaryEmbedding, BoundarySpecError, PQSpec
+from GBOpt.Utils.exact_csl import (
+    ExactCSLError,
+    csl_from_scaled_rotation,
+    inplane_basis_from_csl,
+    integer_quaternion_from_unit,
+    pq_from_csl_plane,
+    quaternion_to_scaled_rotation,
+    validate_scaled_rotation_matrix,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -386,11 +394,23 @@ def quaternion_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
     :returns: Rotation matrix ``R`` of shape (3, 3) such that
         ``v_rotated = v @ R.T`` (row-vector convention).
     """
-    from scipy.spatial.transform import Rotation
-
     q = np.asarray(quat, dtype=float)
-    # scipy uses scalar-last order [x, y, z, w]
-    return Rotation.from_quat([q[1], q[2], q[3], q[0]]).as_matrix()
+    if q.shape != (4,):
+        raise BoundarySpecError(
+            f"Quaternion must be a 1-D array of length 4; got shape {q.shape}."
+        )
+    if np.allclose(q, np.round(q), atol=1e-9, rtol=0.0):
+        q_int = tuple(int(v) for v in np.round(q).astype(int))
+    else:
+        try:
+            q_int = integer_quaternion_from_unit(q)
+        except ExactCSLError as exc:
+            raise BoundarySpecError(str(exc)) from exc
+    try:
+        scaled = quaternion_to_scaled_rotation(q_int)
+    except ExactCSLError as exc:
+        raise BoundarySpecError(str(exc)) from exc
+    return np.asarray(scaled.M, dtype=float) / float(scaled.N)
 
 
 def validate_sigma(quat: np.ndarray, sigma: int) -> None:
@@ -408,16 +428,28 @@ def validate_sigma(quat: np.ndarray, sigma: int) -> None:
     :param sigma: Expected sigma value to validate against.
     :raises BoundarySpecError: If the derived sigma does not match.
     """
-    int_q = np.round(np.asarray(quat, dtype=float)).astype(int)
-    norm_sq = int(np.dot(int_q, int_q))
-    if norm_sq == 0:
+    arr = np.asarray(quat, dtype=float)
+    if arr.shape != (4,):
+        raise BoundarySpecError(
+            f"Quaternion must be a 1-D array of length 4; got shape {arr.shape}."
+        )
+    if not np.allclose(arr, np.round(arr), atol=1e-9, rtol=0.0):
+        raise BoundarySpecError(
+            f"Quaternion components must be integer-valued; got {arr}. "
+            "CSLExactSpec requires an integer quaternion [a, b, c, d]."
+        )
+    int_q = np.round(arr).astype(int)
+    if int(np.dot(int_q, int_q)) == 0:
         raise BoundarySpecError(
             "Quaternion is zero; sigma cannot be derived from a zero quaternion."
         )
-    # Divide out the largest power of 2 to obtain the odd sigma value.
-    while norm_sq % 2 == 0:
-        norm_sq //= 2
-    derived = norm_sq
+    try:
+        rot = quaternion_to_scaled_rotation(tuple(int(x) for x in int_q))
+        csl = csl_from_scaled_rotation(rot)
+    except ExactCSLError as exc:
+        raise BoundarySpecError(str(exc)) from exc
+
+    derived = csl.sigma
     if derived != int(sigma):
         raise BoundarySpecError(
             f"Sigma mismatch: quaternion {int_q.tolist()} gives "
@@ -566,51 +598,24 @@ def solve_inplane_csl(
         ``max_exact_atoms``.
     """
     plane_int = _row_gcd_reduce(np.round(plane).astype(int))
-    N = _recover_sigma_from_rotation(R)
-    M_int = np.round(N * R).astype(int)
+    try:
+        N = _recover_sigma_from_rotation(R)
+        M_int = np.round(N * np.asarray(R, dtype=float)).astype(int)
+        row_rotation = validate_scaled_rotation_matrix(M_int.T, N=N)
+        csl = csl_from_scaled_rotation(row_rotation)
+        inplane = inplane_basis_from_csl(csl.basis_hnf, tuple(int(x) for x in plane_int))
+    except ExactCSLError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
-    e1, e2 = _plane_null_basis(plane_int)
-
-    # Search the 2-D in-plane integer lattice for CSL vectors.
-    # The bound N+2 is sufficient: in-plane CSL vectors have components of
-    # order sqrt(N) in the worst case, so s,t ≤ N covers all primitive vectors.
-    search_range = max(N + 2, 10)
-    candidates = []
-    for s in range(-search_range, search_range + 1):
-        for t in range(-search_range, search_range + 1):
-            if s == 0 and t == 0:
-                continue
-            v = s * e1 + t * e2
-            if np.all((v @ M_int) % N == 0):
-                candidates.append(v.copy())
-
-    if len(candidates) < 2:
-        raise BoundarySpecError(
-            "Could not find two independent in-plane CSL vectors for the given "
-            f"plane={plane_int.tolist()} and rotation matrix.  Verify that the "
-            "quaternion defines a valid CSL boundary for this plane."
-        )
-
-    # Pick the shortest vector, then the shortest independent from it.
-    candidates.sort(key=lambda v: int(np.dot(v, v)))
-    v1 = candidates[0]
-    v2 = next(
-        (c for c in candidates[1:] if np.any(np.cross(v1, c) != 0)),
-        None,
-    )
-    if v2 is None:
-        raise BoundarySpecError(
-            "All in-plane CSL vectors found are collinear; could not form a 2-D basis."
-        )
-
+    v1 = np.asarray(inplane.basis[:, 0], dtype=float)
+    v2 = np.asarray(inplane.basis[:, 1], dtype=float)
     area = np.linalg.norm(np.cross(v1, v2))
     if area > max_exact_atoms:
         raise BoundarySpecError(
             f"Exact in-plane CSL cell area ({area:.1f}) exceeds max_exact_atoms="
             f"{max_exact_atoms}.  Use mode='approximate' or increase the limit."
         )
-
-    return v1.astype(float), v2.astype(float)
+    return v1, v2
 
 
 def reduce_2d_basis(
@@ -744,14 +749,49 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     quat_arr = np.asarray(spec.quat, dtype=float)
     quat_norm = validate_and_normalize_quaternion(quat_arr)
 
-    if spec.sigma is not None:
-        validate_sigma(quat_arr, spec.sigma)
+    try:
+        rot = quaternion_to_scaled_rotation(tuple(int(x) for x in np.round(quat_arr).astype(int)))
+        csl = csl_from_scaled_rotation(rot)
+    except ExactCSLError as exc:
+        raise BoundarySpecError(str(exc)) from exc
+
+    if spec.sigma is not None and csl.sigma != int(spec.sigma):
+        raise BoundarySpecError(
+            f"Sigma mismatch: quaternion {np.round(quat_arr).astype(int).tolist()} "
+            f"gives sigma={csl.sigma}, but sigma={spec.sigma} was provided."
+        )
+
+    plane_int = _row_gcd_reduce(np.round(np.asarray(spec.plane, dtype=float)).astype(int))
+    plane_col = np.asarray(plane_int, dtype=object)
+    image = rot.M @ plane_col
+    preserves_plane = (
+        all(int(value) % rot.N == 0 for value in image)
+        and np.array_equal(
+            _row_gcd_reduce(np.array([int(value) // rot.N for value in image], dtype=int)),
+            plane_int,
+        )
+    )
+    if preserves_plane:
+        try:
+            inplane = inplane_basis_from_csl(csl.basis_hnf, tuple(int(x) for x in plane_int))
+            P_raw, Q_raw = pq_from_csl_plane(rot, inplane)
+            P_canon, Q_canon = canonicalize_pq(P_raw, Q_raw)
+        except ExactCSLError as exc:
+            raise BoundarySpecError(str(exc)) from exc
+        R_exact = np.asarray(rot.M, dtype=float) / float(rot.N)
+        return BoundaryEmbedding(
+            P=P_canon,
+            Q=Q_canon,
+            R_left=R_exact,
+            R_right=R_exact,
+            exact=True,
+            coherent=True,
+            source="csl",
+        )
 
     R = quaternion_to_rotation_matrix(quat_norm)
     N = _recover_sigma_from_rotation(R)
     M_int = np.round(N * R).astype(int)
-
-    plane_int = _row_gcd_reduce(np.round(np.asarray(spec.plane, dtype=float)).astype(int))
 
     # Find the minimal in-plane CSL basis (raises if none exists or cell is too large).
     # Use the shortest CSL in-plane vector as e1 so the max_exact_atoms guard

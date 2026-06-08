@@ -606,10 +606,12 @@ class GBMaker:
 
         # Invariant: total atoms = accepted origins × basis size
         uc_size = len(self.__unit_cell.asarray())
-        assert len(atoms) == len(origins) * uc_size, (
-            f"Exact builder atom count mismatch: expected "
-            f"{len(origins) * uc_size}, got {len(atoms)}"
-        )
+        expected_atoms = len(origins) * uc_size
+        if len(atoms) != expected_atoms:
+            raise GBMakerValueError(
+                f"Exact builder atom count mismatch: expected "
+                f"{expected_atoms}, got {len(atoms)}"
+            )
 
         # Assign a fine x-layer label to every atom: the integer coordinate
         # u_num_0 = (origin @ adj(S))[0], which ranges over [0, repeat_x·|det_S|).
@@ -730,7 +732,10 @@ class GBMaker:
                 # Layers are identified by the fine u_num_0 coordinate of each
                 # origin, ensuring stoichiometric completeness regardless of how
                 # the rotation maps those members into Cartesian x-space.
-                assert n0_labels is not None
+                if n0_labels is None:
+                    raise GBMakerValueError(
+                        "Exact gap equalization requires right-grain x-layer labels."
+                    )
                 removed_layers = 0
                 unique_n0 = np.sort(np.unique(n0_labels))
                 while len(unique_n0) > 1:

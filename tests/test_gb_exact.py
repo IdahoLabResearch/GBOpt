@@ -15,6 +15,10 @@ from GBOpt.BoundarySpec import (
     PQSpec,
 )
 from GBOpt.GBMaker import GBMaker
+from GBOpt.Utils.exact_csl import (
+    csl_from_scaled_rotation,
+    quaternion_to_scaled_rotation,
+)
 from GBOpt.Utils.gb_exact import (
     _int_adj3,
     _int_det3,
@@ -294,6 +298,19 @@ class TestValidateSigma:
         with pytest.raises(BoundarySpecError):
             validate_sigma([0, 0, 0, 0], 1)
 
+    @pytest.mark.parametrize("quat", [
+        (2, 0, 0, 1),
+        (3, 0, 0, 1),
+        (1, 1, 1, 1),
+        (1, 2, 3, 4),
+    ])
+    def test_matches_snf_derived_sigma(self, quat):
+        rot = quaternion_to_scaled_rotation(quat)
+        csl = csl_from_scaled_rotation(rot)
+        validate_sigma(quat, csl.sigma)
+        with pytest.raises(BoundarySpecError):
+            validate_sigma(quat, csl.sigma + 1)
+
 
 # ---------------------------------------------------------------------------
 # Step 12 — in-plane CSL solve and 2D reduction
@@ -346,7 +363,9 @@ class TestSolveInplaneCSL:
         # index-5 sublattice, saw area ≈ 154 and raised with max_exact_atoms=100
         # even though a valid in-plane CSL basis with area ≈ 30.82 exists.
         R = _sigma5_36deg_R()
-        v1, v2 = solve_inplane_csl([0, 0, 1], [5, 2, 3], R, max_exact_atoms=100)
+        v1, v2 = solve_inplane_csl(
+            [0, 0, 1], [5, 2, 3], R, max_exact_atoms=100
+        )
         area = np.linalg.norm(np.cross(v1, v2))
         assert area < 40.0, (
             f"CSL cell area ({area:.4f}) too large; non-primitive null basis suspected"
@@ -375,7 +394,9 @@ class TestSolveInplaneCSL:
         )
         # Must also pass with a tight max_exact_atoms limit that would have
         # failed on the old doubled basis (area ≈ 22.36 > 20 would have raised)
-        v1b, v2b = solve_inplane_csl([0, 0, 1], [2, 1, 0], R, max_exact_atoms=20)
+        v1b, v2b = solve_inplane_csl(
+            [0, 0, 1], [2, 1, 0], R, max_exact_atoms=20
+        )
         assert np.linalg.norm(np.cross(v1b, v2b)) < 15.0
 
 
@@ -695,6 +716,14 @@ class TestCSLSpecToEmbedding:
         emb_pq = pq_spec_to_embedding(self.PQ_36)
         np.testing.assert_array_equal(emb_csl.P, emb_pq.P)
         np.testing.assert_array_equal(emb_csl.Q, emb_pq.Q)
+
+    def test_non_preserving_plane_fallback_builds_embedding(self):
+        # The [100] plane is not invariant under a [001] Sigma5 rotation, so
+        # this exercises the fallback path that builds P/Q after an in-plane
+        # CSL solve.
+        emb = csl_spec_to_embedding(self.SPEC_36)
+        assert emb.exact is True
+        assert emb.coherent is True
 
     def test_sigma3_111_plane_gives_proper_rotations(self):
         # Non-(100) regression: [111] plane requires e2 = plane×e1 to keep
