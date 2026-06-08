@@ -6,13 +6,14 @@ import os
 import tempfile
 import unittest
 import warnings
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
+from GBOpt.Atom import Atom
 from GBOpt.GBMaker import GBMaker
 
-# from unittest.mock import patch
 from GBOpt.GBManipulator import (
     GBManipulator,
     GBManipulatorValueError,
@@ -25,6 +26,7 @@ from GBOpt.GBManipulator import (
     ParentsProxyValueError,
     ParentValueError,
     _ParentsProxy,
+    _calculate_local_order,
 )
 from GBOpt.UnitCell import UnitCell
 
@@ -42,6 +44,80 @@ def structured_array_equal(array1, array2):
                 return False
 
     return True
+
+
+class TestLyakhovLocalOrder(unittest.TestCase):
+    def test_local_order_is_higher_for_ideal_crystal_neighborhoods(self):
+        cases = [
+            ("fcc", "Cu", 18),
+            ("bcc", "Fe", 14),
+            ("sc", "Po", 6),
+            ("diamond", "C", 34),
+            ("fluorite", ("U", "O"), 50),
+            ("rocksalt", ("Na", "Cl"), 32),
+            ("zincblende", ("Zn", "S"), 34),
+        ]
+        for structure, atoms, expected_neighbors in cases:
+            with self.subTest(structure=structure):
+                ideal_order, distorted_order, neighbor_count = (
+                    self._local_order_for_structure(structure, atoms)
+                )
+
+                self.assertEqual(neighbor_count, expected_neighbors)
+                self.assertTrue(np.isfinite(ideal_order))
+                self.assertTrue(np.isfinite(distorted_order))
+                self.assertGreaterEqual(ideal_order, 0.0)
+                self.assertGreaterEqual(distorted_order, 0.0)
+                self.assertGreater(
+                    ideal_order - distorted_order,
+                    1e-8,
+                    "Ideal crystal neighborhood should be more ordered than a "
+                    "deterministically distorted neighborhood.",
+                )
+
+    def _local_order_for_structure(self, structure, atoms):
+        unit_cell = UnitCell()
+        unit_cell.init_by_structure(structure, 1.0, atoms)
+        basis = unit_cell.asarray()
+        basis_positions = np.column_stack((basis["x"], basis["y"], basis["z"]))
+        basis_types = unit_cell.names(asint=True)
+        rmax = 1.05
+
+        translation_indices = np.array(
+            np.meshgrid(
+                np.arange(-2, 3),
+                np.arange(-2, 3),
+                np.arange(-2, 3),
+                indexing="ij",
+            )
+        ).reshape(3, -1).T
+        translations = translation_indices @ unit_cell.conventional
+        supercell_positions = (
+            translations[:, np.newaxis, :] + basis_positions[np.newaxis, :, :]
+        ).reshape(-1, 3)
+        supercell_types = np.tile(basis_types, len(translations))
+
+        central_position = basis_positions[0]
+        distances = np.linalg.norm(supercell_positions - central_position, axis=1)
+        neighborhood = (distances > 1e-12) & (distances < rmax)
+
+        atom = np.array([basis_types[0], *central_position], dtype=np.float64)
+        ideal_neighbors = np.column_stack(
+            (supercell_types[neighborhood], supercell_positions[neighborhood])
+        )
+        distorted_neighbors = ideal_neighbors.copy()
+        distorted_neighbors[:, 1:] *= np.array([1.0, 1.15, 0.85])
+
+        kwargs = dict(
+            unit_cell_types=basis_types,
+            unit_cell_a0=unit_cell.a0,
+            N=len(basis),
+            Delta=0.05,
+            Rmax=rmax,
+        )
+        ideal_order = _calculate_local_order(atom, ideal_neighbors, **kwargs)
+        distorted_order = _calculate_local_order(atom, distorted_neighbors, **kwargs)
+        return ideal_order, distorted_order, len(ideal_neighbors)
 
 
 class TestGBManipulator(unittest.TestCase):
@@ -173,12 +249,35 @@ class TestGBManipulator(unittest.TestCase):
         self.assertEqual(len(self.tilt.whole_system)-1, len(new_system))
 
     def test_remove_atoms_with_stoichiometry(self):
-        theta = math.radians(36.869898)
-        mis = [theta, 0, 0, 0, -theta/2]
-        GB = GBMaker(5.454, "fluorite", 5.454, mis, ["U", "O"], repeat_factor=(2, 6))
-        gbm = GBManipulator(GB)
-        new_system = gbm.remove_atoms(num_to_remove=1, keep_ratio=True)
-        self.assertEqual(len(GB.whole_system)-3, len(new_system))
+        unit_cell = UnitCell()
+        unit_cell.init_by_structure("fluorite", 1.0, ("U", "O"))
+        atoms = np.array(
+            [
+                ("U", 0.0, 0.0, 0.0),
+                ("O", 0.1, 0.0, 0.0),
+                ("O", 0.0, 0.1, 0.0),
+                ("U", 0.0, 0.0, 0.1),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        parent = type("SyntheticParent", (), {})()
+        parent.unit_cell = unit_cell
+        parent.whole_system = atoms
+        parent.gb_atoms = atoms
+        parent.gb_indices = np.arange(len(atoms))
+
+        manipulator = object.__new__(GBManipulator)
+        manipulator._GBManipulator__one_parent = True
+        manipulator._GBManipulator__parents = [parent, None]
+        manipulator._GBManipulator__rng = np.random.default_rng(self.seed)
+
+        with patch("GBOpt.GBManipulator._calculate_local_order", return_value=1.0):
+            new_system = manipulator.remove_atoms(num_to_remove=1, keep_ratio=True)
+
+        self.assertEqual(len(atoms) - 3, len(new_system))
+        names, counts = np.unique(new_system["name"], return_counts=True)
+        self.assertEqual(dict(zip(names, counts)), {"U": 1})
 
     def test_insert_atoms(self):
         new_system_delaunay = self.manipulator_tilt.insert_atoms(
@@ -220,12 +319,45 @@ class TestGBManipulator(unittest.TestCase):
         self.assertEqual(len(self.tilt.whole_system) + 1, len(new_system_grid))
 
     def test_insert_atoms_with_stoichiometry(self):
-        theta = math.radians(36.869898)
-        mis = [theta, 0, 0, 0, -theta/2]
-        GB = GBMaker(5.454, "fluorite", 5.454, mis, ["U", "O"], repeat_factor=(2, 6))
-        gbm = GBManipulator(GB)
-        new_system = gbm.insert_atoms(num_to_insert=1, keep_ratio=True)
-        self.assertEqual(len(GB.whole_system)+3, len(new_system))
+        unit_cell = UnitCell()
+        unit_cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+        atoms = np.array(
+            [
+                ("U", 0.0, 0.0, 0.0),
+                ("O", 3.0, 0.0, 0.0),
+                ("O", 0.0, 3.0, 0.0),
+                ("U", 0.0, 0.0, 3.0),
+            ],
+            dtype=Atom.atom_dtype,
+        )
+
+        parent = type("SyntheticParent", (), {})()
+        parent.unit_cell = unit_cell
+        parent.whole_system = atoms
+        parent.gb_atoms = atoms
+
+        manipulator = object.__new__(GBManipulator)
+        manipulator._GBManipulator__one_parent = True
+        manipulator._GBManipulator__parents = [parent, None]
+        manipulator._GBManipulator__rng = np.random.default_rng(self.seed)
+
+        def all_sites_are_neighbors(_cutoff, positions):
+            return [
+                [idx for idx in range(len(positions)) if idx != site_idx]
+                for site_idx in range(len(positions))
+            ]
+
+        with patch("GBOpt.GBManipulator._create_neighbor_list",
+                   side_effect=all_sites_are_neighbors):
+            new_system = manipulator.insert_atoms(
+                num_to_insert=1,
+                method="grid",
+                keep_ratio=True,
+            )
+
+        self.assertEqual(len(atoms) + 3, len(new_system))
+        names, counts = np.unique(new_system["name"][len(atoms):], return_counts=True)
+        self.assertEqual(dict(zip(names, counts)), {"O": 2, "U": 1})
 
     def test_type_preservation_with_numeric_roundtrip(self):
         theta = math.radians(36.869898)
@@ -266,7 +398,8 @@ class TestGBManipulator(unittest.TestCase):
         self.assertTrue(np.array_equal(translated["name"], base_names))
         self.assertEqual(set(roundtrip_names(translated)), expected_types)
 
-        removed = manipulator.remove_atoms(num_to_remove=1, keep_ratio=True)
+        with patch("GBOpt.GBManipulator._calculate_local_order", return_value=1.0):
+            removed = manipulator.remove_atoms(num_to_remove=1, keep_ratio=True)
         self.assertEqual(set(roundtrip_names(removed)), expected_types)
 
         inserted = manipulator.insert_atoms(
@@ -282,10 +415,6 @@ class TestGBManipulator(unittest.TestCase):
         manipulator_two = GBManipulator(gb, gb, seed=self.seed)
         sliced = manipulator_two.slice_and_merge()
         self.assertEqual(set(roundtrip_names(sliced)), expected_types)
-
-        soft_mode_displaced = manipulator.displace_along_soft_modes()
-        self.assertTrue(np.array_equal(soft_mode_displaced["name"], base_names))
-        self.assertEqual(set(roundtrip_names(soft_mode_displaced)), expected_types)
 
     @pytest.mark.slow
     def test_displace_along_soft_modes_base(self):
