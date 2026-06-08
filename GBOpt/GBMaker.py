@@ -659,9 +659,10 @@ class GBMaker:
         right_bounds_eff = right_bounds.copy()
         vacuum0_trim_applied = False
 
+        left_n0_labels = None
         right_n0_labels = None
         if use_exact:
-            self.__left_grain, _ = self.__generate_grain_exact(
+            self.__left_grain, left_n0_labels = self.__generate_grain_exact(
                 self.__R_left,
                 self.__embedding.P,
                 self.__left_x,
@@ -700,6 +701,26 @@ class GBMaker:
                 self.__R_right_approx,
                 right_bounds_eff,
             )
+
+        # High-x overflow removal (exact path only). Basis-atom offsets can
+        # push atoms from the left grain's last crystallographic x-layer past
+        # the GB plane. Remove whole fine x-layers so stoichiometry is
+        # preserved and downstream gap calculations see the trimmed grain.
+        if use_exact and left_n0_labels is not None:
+            current_left_max_x = np.max(self.__left_grain["x"])
+            if current_left_max_x > left_bounds[1] + self.__epsilon:
+                unique_n0_desc = np.sort(np.unique(left_n0_labels))[::-1]
+                while len(unique_n0_desc) > 1:
+                    top_n0 = unique_n0_desc[0]
+                    mask = left_n0_labels != top_n0
+                    trial_grain = self.__left_grain[mask]
+                    trial_labels = left_n0_labels[mask]
+                    new_left_max_x = np.max(trial_grain["x"])
+                    self.__left_grain = trial_grain
+                    left_n0_labels = trial_labels
+                    unique_n0_desc = unique_n0_desc[1:]
+                    if new_left_max_x <= left_bounds[1] + self.__epsilon:
+                        break
 
         # The two grains may have different interplanar x-spacings (asymmetric tilt,
         # mixed tilt/twist, etc.), causing the periodic-edge gap to differ from the
@@ -1090,17 +1111,25 @@ class GBMaker:
             np.meshgrid(*coefficient_ranges, indexing="ij")
         ).reshape(3, -1).T
 
+        basis_size = len(self.__unit_cell.asarray())
         atoms = self.get_supercell(lattice_coefficients @ self.__unit_cell.conventional)
+        origin_ids = np.repeat(
+            np.arange(len(lattice_coefficients), dtype=np.int64), basis_size
+        )
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         rotated_positions = positions @ R_grain.T
         rotated_positions[:, 0] += x_bounds[0]
         atoms["x"], atoms["y"], atoms["z"] = rotated_positions.T
 
         if any(inplane_periodic):
-            atoms = self.__select_atoms_in_box_basis(atoms, primitive_periods, x_bounds)
-        atoms = self.__clip_atoms_to_cartesian_box(atoms, x_bounds)
+            atoms, origin_ids = self.__select_complete_origins_in_box_basis(
+                atoms, origin_ids, primitive_periods, x_bounds, basis_size
+            )
+        atoms, origin_ids = self.__clip_complete_origins_to_cartesian_box(
+            atoms, origin_ids, x_bounds, basis_size
+        )
 
-        return self.__deduplicate_positions(atoms)
+        return self.__deduplicate_complete_origins(atoms, origin_ids, basis_size)
 
     def __set_gb_region(self):
         """
@@ -1404,6 +1433,141 @@ class GBMaker:
         _, unique_indices = np.unique(quantized, axis=0, return_index=True)
         return atoms[np.sort(unique_indices)]
 
+    def __complete_origin_atom_mask(
+        self, atom_mask: np.ndarray, origin_ids: np.ndarray, basis_size: int
+    ) -> np.ndarray:
+        """
+        Promote an atom-level mask to a complete-origin mask.
+
+        An origin is retained only when exactly ``basis_size`` atoms are present for
+        that origin and every atom passes the input mask.
+        """
+        atom_mask = np.asarray(atom_mask, dtype=bool)
+        origin_ids = np.asarray(origin_ids, dtype=np.int64)
+        basis_size = int(basis_size)
+
+        if len(atom_mask) != len(origin_ids):
+            raise GBMakerValueError("atom_mask and origin_ids must have equal length.")
+        if basis_size <= 0:
+            raise GBMakerValueError("basis_size must be strictly positive.")
+        if len(atom_mask) == 0:
+            return atom_mask.copy()
+
+        if len(atom_mask) % basis_size == 0:
+            grouped_ids = origin_ids.reshape(-1, basis_size)
+            if np.all(grouped_ids == grouped_ids[:, :1]):
+                grouped_mask = atom_mask.reshape(-1, basis_size)
+                return np.repeat(np.all(grouped_mask, axis=1), basis_size)
+
+        unique_ids, inverse = np.unique(origin_ids, return_inverse=True)
+        total_counts = np.bincount(inverse, minlength=len(unique_ids))
+        pass_counts = np.bincount(
+            inverse, weights=atom_mask.astype(np.int64), minlength=len(unique_ids)
+        )
+        keep_origin = (total_counts == basis_size) & (pass_counts == basis_size)
+        return keep_origin[inverse]
+
+    def __filter_complete_origins(
+        self,
+        atoms: np.ndarray,
+        origin_ids: np.ndarray,
+        atom_mask: np.ndarray,
+        basis_size: int,
+    ) -> "tuple[np.ndarray, np.ndarray]":
+        """
+        Filter atoms by complete conventional-cell origins.
+        """
+        keep_atoms = self.__complete_origin_atom_mask(
+            atom_mask, origin_ids, basis_size
+        )
+        return atoms[keep_atoms].copy(), origin_ids[keep_atoms].copy()
+
+    def __clip_complete_origins_to_cartesian_box(
+        self,
+        atoms: np.ndarray,
+        origin_ids: np.ndarray,
+        x_bounds: np.ndarray,
+        basis_size: int,
+    ) -> "tuple[np.ndarray, np.ndarray]":
+        """
+        Clip atoms using Cartesian bounds while preserving full origin groups.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        inplane_periodic = self.__inplane_periodic
+        inside_box = (atoms["x"] >= x_bounds[0] -
+                      self.__epsilon) & (atoms["x"] < x_bounds[1] - self.__epsilon)
+
+        axis_names = ("y", "z")
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for axis_name, axis_dim, is_periodic in zip(axis_names, axis_dims, inplane_periodic):
+            if is_periodic:
+                continue
+            inside_box &= (
+                (atoms[axis_name] >= -self.__epsilon) & (atoms[axis_name] < axis_dim)
+            )
+
+        clipped_atoms, clipped_origin_ids = self.__filter_complete_origins(
+            atoms, origin_ids, inside_box, basis_size
+        )
+        for axis_name, is_periodic in zip(axis_names, inplane_periodic):
+            if is_periodic:
+                continue
+            clipped_atoms[axis_name] = np.where(
+                (clipped_atoms[axis_name] < 0.0) & (
+                    clipped_atoms[axis_name] >= -self.__epsilon),
+                0.0,
+                clipped_atoms[axis_name],
+            )
+
+        return clipped_atoms, clipped_origin_ids
+
+    def __deduplicate_complete_origins(
+        self, atoms: np.ndarray, origin_ids: np.ndarray, basis_size: int
+    ) -> np.ndarray:
+        """
+        Remove duplicate complete-origin groups using full basis signatures.
+        """
+        if len(atoms) == 0:
+            return atoms
+
+        basis_size = int(basis_size)
+        if basis_size <= 0:
+            raise GBMakerValueError("basis_size must be strictly positive.")
+        if len(atoms) != len(origin_ids):
+            raise GBMakerValueError("atoms and origin_ids must have equal length.")
+        if len(atoms) % basis_size != 0:
+            raise GBMakerValueError(
+                "Complete-origin deduplication requires full origin groups."
+            )
+
+        n_origins = len(atoms) // basis_size
+        grouped_origin_ids = np.asarray(origin_ids, dtype=np.int64).reshape(
+            n_origins, basis_size
+        )
+        if not np.all(grouped_origin_ids == grouped_origin_ids[:, :1]):
+            raise GBMakerValueError(
+                "Complete-origin deduplication requires contiguous origin groups."
+            )
+
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        quantized = np.round(positions / self.__epsilon).astype(np.int64)
+        signature_dtype = np.dtype(
+            [
+                ("name", atoms.dtype["name"], (basis_size,)),
+                ("position", np.int64, (basis_size, 3)),
+            ]
+        )
+        signatures = np.empty(n_origins, dtype=signature_dtype)
+        signatures["name"] = atoms["name"].reshape(n_origins, basis_size)
+        signatures["position"] = quantized.reshape(n_origins, basis_size, 3)
+
+        _, unique_group_indices = np.unique(signatures, return_index=True)
+        keep_groups = np.zeros(n_origins, dtype=bool)
+        keep_groups[np.sort(unique_group_indices)] = True
+        grouped_atoms = atoms.reshape(n_origins, basis_size)
+        return grouped_atoms[keep_groups].reshape(-1).copy()
+
     def __select_atoms_in_box_basis(
         self,
         atoms: np.ndarray,
@@ -1525,6 +1689,123 @@ class GBMaker:
             return selected_atoms
 
         return self.__deduplicate_positions(selected_atoms)
+
+    def __select_complete_origins_in_box_basis(
+        self,
+        atoms: np.ndarray,
+        origin_ids: np.ndarray,
+        primitive_periods: np.ndarray,
+        x_bounds: np.ndarray,
+        basis_size: int,
+    ) -> "tuple[np.ndarray, np.ndarray]":
+        """
+        Select/wrap atoms in mixed box coordinates while preserving full origins.
+        """
+        x_bounds = np.asarray(x_bounds, dtype=np.float64)
+
+        selection_basis = self.__selection_basis_vectors(primitive_periods)
+        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+        inplane_periodic = self.__inplane_periodic
+
+        if np.allclose(selection_basis[:, 0], 0.0, atol=self.__epsilon, rtol=0.0):
+            inside_box = np.ones(len(atoms), dtype=bool)
+            for row_index, is_periodic in enumerate(inplane_periodic):
+                axis = row_index + 1
+                period = selection_basis[row_index, axis]
+                coord = positions[:, axis]
+                if is_periodic:
+                    tol = self.__reduced_coordinate_tolerance(
+                        selection_basis[row_index])
+                    inside_box &= (coord / period >= -
+                                   tol) & (coord / period < 1.0 + tol)
+
+            selected_atoms, selected_origin_ids = self.__filter_complete_origins(
+                atoms, origin_ids, inside_box, basis_size
+            )
+            if len(selected_atoms) == 0:
+                return selected_atoms, selected_origin_ids
+
+            for row_index, is_periodic in enumerate(inplane_periodic):
+                if not is_periodic:
+                    continue
+                axis = row_index + 1
+                period = selection_basis[row_index, axis]
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                selected_atoms_coord = selected_atoms[("y", "z")[row_index]]
+                wrapped = np.mod(selected_atoms_coord, period)
+                selected_atoms[("y", "z")[row_index]] = np.where(
+                    (wrapped < tol * period) | ((period - wrapped) < tol * period),
+                    0.0,
+                    wrapped,
+                )
+
+            inside_x = (
+                (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
+                & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
+            )
+            return self.__filter_complete_origins(
+                selected_atoms, selected_origin_ids, inside_x, basis_size
+            )
+
+        box_coordinates = self.__reduced_box_coordinates(positions, selection_basis)
+
+        inside_box = np.ones(len(atoms), dtype=bool)
+        axis_dims = (self.__y_dim, self.__z_dim)
+        for row_index, (axis_dim, is_periodic) in enumerate(
+            zip(axis_dims, inplane_periodic)
+        ):
+            reduced_axis = box_coordinates[:, row_index + 1]
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                inside_box &= (
+                    (reduced_axis >= -tol) & (reduced_axis < 1.0 + tol)
+                )
+            else:
+                inside_box &= (
+                    (reduced_axis >= -self.__epsilon) & (reduced_axis < axis_dim)
+                )
+
+        selected_atoms, selected_origin_ids = self.__filter_complete_origins(
+            atoms, origin_ids, inside_box, basis_size
+        )
+        if len(selected_atoms) == 0:
+            return selected_atoms, selected_origin_ids
+
+        selected_mask = self.__complete_origin_atom_mask(
+            inside_box, origin_ids, basis_size
+        )
+        selected_box_coordinates = box_coordinates[selected_mask].copy()
+        for row_index, is_periodic in enumerate(inplane_periodic):
+            coordinate_index = row_index + 1
+            if is_periodic:
+                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
+                selected_box_coordinates[:, coordinate_index] = wrap_reduced_coordinate(
+                    selected_box_coordinates[:, coordinate_index],
+                    tol,
+                )
+                continue
+
+            selected_box_coordinates[:, coordinate_index] = np.where(
+                (
+                    (selected_box_coordinates[:, coordinate_index] < 0.0)
+                    & (selected_box_coordinates[:, coordinate_index] >= -self.__epsilon)
+                ),
+                0.0,
+                selected_box_coordinates[:, coordinate_index],
+            )
+
+        wrapped_positions = self.__cartesian_from_box_coordinates(
+            selected_box_coordinates, selection_basis
+        )
+        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = wrapped_positions.T
+
+        inside_x = (
+            (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
+            & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
+        )
+        return self.__filter_complete_origins(
+            selected_atoms, selected_origin_ids, inside_x, basis_size
+        )
 
     def __apply_strain_accommodation(
         self,

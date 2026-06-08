@@ -1665,6 +1665,52 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             f"Fluorite vacuum=0 bicrystal is not stoichiometric: {c}"
         )
 
+    def test_known_fluorite_vacuum0_trim_regressions_are_stoichiometric(self):
+        """Legacy float-path trimming must preserve complete fluorite origins."""
+        cases = {
+            "sigma29_100_0_7_3bar_0_3bar_7_STGB": np.array(
+                [0.00000000, 0.76101275, 0.00000000, -1.57079633, -1.16590454]
+            ),
+            "sigma3_110_1_1bar_0_1_1bar_4_ATGB": np.array(
+                [-2.35619449, 1.91063324, 2.35619449, 0.00000000, 0.78539816]
+            ),
+            "sigma5_100_0_7bar_1bar_0_5_5bar_ATGB": np.array(
+                [0.00000000, 0.92729522, 0.00000000, -1.57079633, 1.42889927]
+            ),
+            "sigma11_110_3bar_3bar_2_3bar_3bar_2bar_STGB": np.array(
+                [-0.78539816, 2.26057133, 0.78539816, 2.55359005, 0.69398059]
+            ),
+        }
+
+        a0 = 5.454
+        kwargs = dict(
+            atom_types=("U", "O"),
+            vacuum=0,
+            repeat_factor=[2, 3],
+            x_dim_min=60,
+            interaction_distance=11.0,
+        )
+
+        for name, misorientation in cases.items():
+            with self.subTest(boundary=name):
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    probe = GBMaker(a0, "fluorite", a0, misorientation, **kwargs)
+                    gb_thickness = 2 * max(
+                        probe.spacing["x"]["left"],
+                        probe.spacing["x"]["right"],
+                    )
+                    gbm = GBMaker(
+                        a0, "fluorite", gb_thickness, misorientation, **kwargs
+                    )
+
+                names, counts = np.unique(gbm.whole_system["name"], return_counts=True)
+                c = {str(n): int(v) for n, v in zip(names, counts)}
+                self.assertEqual(
+                    c["O"], 2 * c["U"],
+                    f"{name} fluorite vacuum=0 bicrystal is not stoichiometric: {c}",
+                )
+
     def test_gb_region_atoms_lie_within_window(self):
         x_gb = self.gbm.gb_plane_x
         half = self.gbm.gb_thickness / 2.0

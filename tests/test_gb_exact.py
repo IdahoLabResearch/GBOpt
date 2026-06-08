@@ -1122,6 +1122,39 @@ class TestExactPathBoxBounds:
         assert np.all(ws["z"] >= -tol), f"z underflow: min={ws['z'].min():.6f}"
         assert np.all(ws["z"] < gb.z_dim + tol), f"z overflow: max={ws['z'].max():.6f} > z_dim={gb.z_dim:.6f}"
 
+    def test_exact_left_grain_does_not_overflow_gb_plane(self):
+        """Olmsted GB 1 regresses left-grain high-x basis offset overflow."""
+        spec = PQSpec(
+            P=[[3, 1, 0], [0, 0, 2], [1, -3, 0]],
+            Q=[[3, 1, 0], [0, 0, -2], [-1, 3, 0]],
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            gb = GBMaker.from_boundary_spec(
+                3.52,
+                "fcc",
+                "Ni",
+                spec,
+                mode="exact",
+                gb_thickness=0.0,
+                repeat_factor=1,
+                x_dim_min=20.0,
+                vacuum=0.0,
+                interaction_distance=5.0,
+            )
+
+        tol = 1e-4 * gb.a0
+        left_max_x = float(np.max(gb.left_grain["x"]))
+        right_min_x = float(np.min(gb.right_grain["x"]))
+        assert left_max_x <= gb.gb_plane_x + tol, (
+            f"left grain overflows GB plane: max_x={left_max_x:.6f}, "
+            f"gb_plane_x={gb.gb_plane_x:.6f}"
+        )
+        assert right_min_x >= gb.gb_plane_x - tol, (
+            f"right grain underflows GB plane: min_x={right_min_x:.6f}, "
+            f"gb_plane_x={gb.gb_plane_x:.6f}"
+        )
+
     @pytest.mark.parametrize("spec,a0,structure,atom_types,kwargs", [
         (
             PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
