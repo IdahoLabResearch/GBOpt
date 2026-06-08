@@ -30,10 +30,17 @@ class TestStrainAccommodation(unittest.TestCase):
     STRUCTURE = "fluorite"
     ATOM_TYPES = ("U", "O")
     GB_THICKNESS = 0.0
-    # Σ5 [001] 36.87° ATGB: P = identity, Q = [[4,-3,0],[3,4,0],[0,0,1]]
-    # (asymmetric in y because norm(P[1])=1 ≠ norm(Q[1])=5)
+    # Σ5 [001] 36.87° ATGB: P = identity, Q = [[4,-3,0],[3,4,0],[0,0,1]].
+    # With the primitive null basis for plane [1,0,0]:
+    #   row 1 (y-direction): left=[0,1,0] → d_left=a0=5.47 Å
+    #                        right=[3,4,0] → d_right=5·a0=27.35 Å  ← real mismatch
+    #   row 2 (z-direction): left=right=[0,0,1] → d_z=a0  (no mismatch)
+    # Commensurate pair: (n1=5, n2=1) → 5·d_left = 1·d_right = 27.35 Å.
+    # interaction_distance=1.0 keeps box dimensions small and avoids the
+    # "Repeat factor modified to accommodate interaction distance" resize warning.
     from GBOpt.BoundarySpec import CSLApproxSpec as _ApproxSpec
     APPROX_SPEC = _ApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+    INTERACTION_DISTANCE = 1.0
 
     def _build(self, mismatch_tol=None, strain_grain="both"):
         from GBOpt.GBMaker import GBMaker
@@ -43,43 +50,57 @@ class TestStrainAccommodation(unittest.TestCase):
             self.A0, self.STRUCTURE, self.ATOM_TYPES, spec,
             mode="approximate", gb_thickness=self.GB_THICKNESS,
             mismatch_tol=mismatch_tol, strain_grain=strain_grain,
+            interaction_distance=self.INTERACTION_DISTANCE,
         )
 
     def test_default_no_accommodation(self):
-        # Without mismatch_tol, behaviour unchanged: y_dim = repeat * max(d1, d2)
         gb = self._build()
         assert gb.whole_system.size > 0
 
-    def test_mismatch_tol_finds_pair_and_adjusts_y_dim(self):
+    def test_mismatch_tol_adjusts_y_dim_to_commensurate_value(self):
+        # The real mismatch is in the y-direction (d_left=a0, d_right=5·a0).
+        # After accommodation the commensurate pair is (5, 1), so
+        # y_dim = 5·d_left = 1·d_right = 27.35 Å exactly.
         gb = self._build(mismatch_tol=0.005)
-        # The accommodation must yield a y_dim that is within 0.5% of both
-        # grains' in-plane y-periods (n1*d1 and n2*d2)
         a0 = self.A0
-        R_la = gb._GBMaker__R_left_approx[1].astype(float)
-        R_ra = gb._GBMaker__R_right_approx[1].astype(float)
-        d1 = a0 * float(np.linalg.norm(R_la))
-        d2 = a0 * float(np.linalg.norm(R_ra))
+        d_right_y = 5.0 * a0   # right grain y-period = norm([3,4,0])·a0
+        d_left_y = a0           # left  grain y-period = norm([0,1,0])·a0
         y = gb.y_dim
-        # y / d1 and y / d2 should each be within mismatch_tol of an integer
-        for d in (d1, d2):
-            ratio = y / d
-            self.assertAlmostEqual(ratio, round(ratio), delta=0.005 * ratio + 0.01,
-                                   msg=f"y_dim={y:.4f} is not within 0.5% of a "
-                                       f"multiple of d={d:.4f}")
+        self.assertAlmostEqual(y, 1 * d_right_y, delta=1e-4,
+                               msg=f"y_dim={y:.4f} ≠ n2·d_right={d_right_y:.4f}")
+        self.assertAlmostEqual(y, 5 * d_left_y, delta=1e-4,
+                               msg=f"y_dim={y:.4f} ≠ n1·d_left={5*d_left_y:.4f}")
 
-    def test_strain_grain_left_sets_y_dim_to_n2_d2(self):
-        gb_both = self._build(mismatch_tol=0.005, strain_grain="both")
+    def test_strain_grain_modes_y_dim(self):
+        # For strain_grain='left'  the box is set to n2·d_right (right exact).
+        # For strain_grain='right' the box is set to n1·d_left  (left exact).
+        # Both values equal 27.35 Å since the commensurate pair is exact
+        # (5·d_left = 1·d_right exactly), so all three modes agree on y_dim.
+        a0 = self.A0
+        d_left_y = a0
+        d_right_y = 5.0 * a0
+        n1, n2 = 5, 1  # from _find_commensurate_pair(d_left_y, d_right_y, tol=0.005)
         gb_left = self._build(mismatch_tol=0.005, strain_grain="left")
         gb_right = self._build(mismatch_tol=0.005, strain_grain="right")
-        # "left" → box = n2*d2 (right grain exact), "right" → box = n1*d1
-        # All three should still be within tolerance of at least one grain's period.
-        for gb, label in ((gb_left, "left"), (gb_right, "right"), (gb_both, "both")):
-            self.assertGreater(gb.y_dim, 0, msg=f"strain_grain={label}: y_dim <= 0")
+        gb_both = self._build(mismatch_tol=0.005, strain_grain="both")
+        # 'left'  → right grain is unstrained → y_dim = n2·d_right
+        self.assertAlmostEqual(gb_left.y_dim, n2 * d_right_y, delta=1e-4,
+                               msg=f"strain_grain='left': y_dim={gb_left.y_dim:.4f} ≠ {n2*d_right_y:.4f}")
+        # 'right' → left grain is unstrained → y_dim = n1·d_left
+        self.assertAlmostEqual(gb_right.y_dim, n1 * d_left_y, delta=1e-4,
+                               msg=f"strain_grain='right': y_dim={gb_right.y_dim:.4f} ≠ {n1*d_left_y:.4f}")
+        # 'both'  → commensurate value (same as others since pair is exact)
+        self.assertAlmostEqual(gb_both.y_dim, n2 * d_right_y, delta=1e-4,
+                               msg=f"strain_grain='both': y_dim={gb_both.y_dim:.4f} ≠ {n2*d_right_y:.4f}")
 
-    def test_y_and_z_treated_independently(self):
-        # y and z periods differ for the approx spec; both must be accommodated
+    def test_y_and_z_periods_independent(self):
+        # y-direction: genuinely mismatched (d_left=a0, d_right=5·a0)
+        # z-direction: tilt axis [0,0,1], same for both grains → no mismatch
         gb = self._build(mismatch_tol=0.005)
-        self.assertNotEqual(gb.y_dim, gb.z_dim)   # different periods → different dims
+        self.assertAlmostEqual(gb.y_dim, 5.0 * self.A0, delta=1e-4,
+                               msg=f"y_dim={gb.y_dim:.4f} ≠ 5·a0={5*self.A0:.4f} (y mismatch accommodated)")
+        self.assertAlmostEqual(gb.z_dim, self.A0, delta=1e-4,
+                               msg=f"z_dim={gb.z_dim:.4f} ≠ a0={self.A0:.4f} (no z mismatch expected)")
 
     def test_fallback_warning_when_no_pair_found(self):
         # Force _find_commensurate_pair to return None for both axes so the
@@ -111,6 +132,15 @@ class TestStrainAccommodation(unittest.TestCase):
         )
         # bicrystal should still build successfully
         self.assertGreater(gb.whole_system.size, 0)
+
+    def test_invalid_strain_grain_raises(self):
+        from GBOpt.BoundarySpec import CSLApproxSpec
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+        with self.assertRaises(GBMakerValueError):
+            GBMaker.from_boundary_spec(
+                3.615, "fcc", "Cu", spec, mode="approximate",
+                strain_grain="diagonal",
+            )
 
 
 class TestFindCommensurablePair(unittest.TestCase):

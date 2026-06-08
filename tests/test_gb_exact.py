@@ -1017,3 +1017,164 @@ class TestFromBoundarySpecMultispecies:
         assert counts["O"] == 2 * counts["U"], (
             f"Fluorite bicrystal via CSLExactSpec is not stoichiometric: {counts}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Box bounds and vacuum=0 periodic gap
+# ---------------------------------------------------------------------------
+
+class TestExactPathBoxBounds:
+    """All atoms from the exact builder must lie within the simulation box."""
+
+    @pytest.mark.parametrize("spec,a0,structure,atom_types", [
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            3.615, "fcc", "Cu",
+        ),
+        (
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
+            3.615, "fcc", "Cu",
+        ),
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            5.47, "fluorite", ("U", "O"),
+        ),
+    ])
+    def test_atoms_within_yz_box(self, spec, a0, structure, atom_types):
+        gb = GBMaker.from_boundary_spec(
+            a0, structure, atom_types, spec, mode="exact",
+        )
+        ws = gb.whole_system
+        tol = 1e-4
+        assert np.all(ws["y"] >= -tol), f"y underflow: min={ws['y'].min():.6f}"
+        assert np.all(ws["y"] < gb.y_dim + tol), f"y overflow: max={ws['y'].max():.6f} > y_dim={gb.y_dim:.6f}"
+        assert np.all(ws["z"] >= -tol), f"z underflow: min={ws['z'].min():.6f}"
+        assert np.all(ws["z"] < gb.z_dim + tol), f"z overflow: max={ws['z'].max():.6f} > z_dim={gb.z_dim:.6f}"
+
+    @pytest.mark.parametrize("spec,a0,structure,atom_types,kwargs", [
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            3.615, "fcc", "Cu", {},
+        ),
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            5.47, "fluorite", ("U", "O"), {},
+        ),
+        # Small slab: repeat_x=1 for the right grain, so the coarse n0 grouping
+        # would leave atoms outside the box because the only n0 group can't be
+        # removed.  Fine u_num_0 labels allow suffix trimming within the group.
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            5.47, "fluorite", ("U", "O"),
+            {"x_dim_min": 20, "interaction_distance": 1, "repeat_factor": 2},
+        ),
+    ])
+    def test_vacuum0_atoms_within_x_box(self, spec, a0, structure, atom_types, kwargs):
+        gb = GBMaker.from_boundary_spec(
+            a0, structure, atom_types, spec, mode="exact", vacuum=0, **kwargs,
+        )
+        ws = gb.whole_system
+        tol = 1e-4
+        x_dim = gb._GBMaker__x_dim
+        assert np.all(ws["x"] >= -tol), f"x underflow: min={ws['x'].min():.6f}"
+        assert np.all(ws["x"] < x_dim + tol), f"x overflow: max={ws['x'].max():.6f} > x_dim={x_dim:.6f}"
+
+    def test_vacuum0_periodic_gap_matches_central_gap(self):
+        """Exact vacuum=0 build: gap at PBC boundary equals gap at the central GB.
+
+        Fine u_num_0 x-layer labels allow the gap-equalization loop to remove
+        only the minimal crystallographic slices needed to bring both grains
+        within the simulation box, so the periodic gap converges to the central
+        gap rather than overshooting by a full x-period.
+        """
+        spec = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                      Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
+        gb = GBMaker.from_boundary_spec(
+            3.615, "fcc", "Cu", spec, mode="exact", vacuum=0,
+        )
+        x_dim = gb._GBMaker__x_dim
+        rg = gb._GBMaker__right_grain
+        lg = gb._GBMaker__left_grain
+        left_max_x = np.max(lg["x"])
+        right_min_x = np.min(rg["x"])
+        central_gap = right_min_x - left_max_x
+        right_max_x = np.max(rg["x"])
+        left_min_x = np.min(lg["x"])
+        periodic_gap = (x_dim - right_max_x) + left_min_x
+        assert right_max_x < x_dim + 1e-4, (
+            f"vacuum=0 right grain overflows box: max_x={right_max_x:.4f} > x_dim={x_dim:.4f}"
+        )
+        assert abs(periodic_gap - central_gap) < 0.1, (
+            f"vacuum=0 periodic_gap ({periodic_gap:.4f}) ≠ central_gap ({central_gap:.4f})"
+        )
+
+
+class TestExactPathNoCoincidentAtoms:
+    """Exact-path bicrystals must have no coincident left/right interface atoms.
+
+    Multi-atom-basis structures (fluorite, rocksalt) can produce right-grain atoms
+    whose rotated fractional positions land inside the left grain's spatial domain.
+    The low-x fine-layer removal must eliminate those atoms while preserving
+    stoichiometry in both grains and the whole system.
+    """
+
+    @pytest.mark.parametrize("spec,a0,structure,atom_types", [
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            5.47, "fluorite", ("U", "O"),
+        ),
+        (
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
+            5.47, "fluorite", ("U", "O"),
+        ),
+    ])
+    def test_no_coincident_interface_atoms(self, spec, a0, structure, atom_types):
+        from scipy.spatial import cKDTree
+        gb = GBMaker.from_boundary_spec(
+            a0, structure, atom_types, spec, mode="exact", vacuum=0,
+        )
+        lg = gb._GBMaker__left_grain
+        rg = gb._GBMaker__right_grain
+        L = np.column_stack([lg["x"], lg["y"], lg["z"]])
+        R = np.column_stack([rg["x"], rg["y"], rg["z"]])
+        tree = cKDTree(R)
+        dists, _ = tree.query(L, k=1)
+        assert dists.min() > 1e-4, (
+            f"Coincident left/right atoms detected: "
+            f"{(dists < 1e-4).sum()} pairs at zero distance"
+        )
+
+    @pytest.mark.parametrize("spec,a0,structure,atom_types", [
+        (
+            PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]]),
+            5.47, "fluorite", ("U", "O"),
+        ),
+        (
+            CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
+            5.47, "fluorite", ("U", "O"),
+        ),
+    ])
+    def test_stoichiometry_preserved_after_low_x_removal(self, spec, a0, structure, atom_types):
+        gb = GBMaker.from_boundary_spec(
+            a0, structure, atom_types, spec, mode="exact", vacuum=0,
+        )
+        rg = gb._GBMaker__right_grain
+        ws = gb.whole_system
+        u_rg = (rg["name"] == "U").sum()
+        o_rg = (rg["name"] == "O").sum()
+        u_ws = (ws["name"] == "U").sum()
+        o_ws = (ws["name"] == "O").sum()
+        assert u_rg > 0, "Right grain has no U atoms"
+        assert o_rg == 2 * u_rg, (
+            f"Right grain stoichiometry broken: {u_rg} U, {o_rg} O (expected 2:1)"
+        )
+        assert o_ws == 2 * u_ws, (
+            f"Whole-system stoichiometry broken: {u_ws} U, {o_ws} O (expected 2:1)"
+        )

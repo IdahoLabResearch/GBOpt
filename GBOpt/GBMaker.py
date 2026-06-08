@@ -291,7 +291,7 @@ class GBMaker:
         :param mismatch_tol: When not ``None``, search for integer multiples
             ``n1*d1 ≈ n2*d2`` (``approximate`` mode only) to minimize the
             in-plane mismatch strain.  Typical value: ``0.005`` (0.5%).
-            Raises ``NotImplementedError`` for ``mode="exact"`` (exact path
+            Ignored with a ``UserWarning`` for ``mode="exact"`` (the exact path
             already enforces integer commensurability).
         :param mismatch_max_cells: Upper bound on n1 and n2 in the
             commensurability search, default 50.
@@ -305,8 +305,9 @@ class GBMaker:
             boundary type (e.g. ``CSLApproxSpec`` with ``mode="exact"``).
         :raises GBMakerValueError: If ``mode="exact"`` and the shared in-plane
             box is not commensurate with both grains' in-plane periods.
-        :raises NotImplementedError: For unsupported boundary types, modes, or
-            when ``mismatch_tol`` is combined with ``mode="exact"``.
+        :raises NotImplementedError: For unsupported boundary types or modes.
+        :raises GBMakerValueError: If ``strain_grain`` is not one of
+            ``"both"``, ``"left"``, or ``"right"``.
         """
         if mismatch_tol is not None and mode == "exact":
             warnings.warn(
@@ -317,6 +318,13 @@ class GBMaker:
                 stacklevel=2,
             )
             mismatch_tol = None
+
+        _VALID_STRAIN_GRAIN = {"both", "left", "right"}
+        if strain_grain not in _VALID_STRAIN_GRAIN:
+            raise GBMakerValueError(
+                f"Invalid strain_grain={strain_grain!r}. "
+                f"Must be one of {sorted(_VALID_STRAIN_GRAIN)}."
+            )
 
         if isinstance(boundary, PQSpec):
             if mode != "exact":
@@ -556,7 +564,7 @@ class GBMaker:
         P_or_Q: np.ndarray,
         x_length: float,
         x_offset: float,
-    ) -> np.ndarray:
+    ) -> "tuple[np.ndarray, np.ndarray]":
         """Build one grain using the integer membership kernel (exact path).
 
         Enumerates conventional-cell origins via pure-integer arithmetic,
@@ -570,9 +578,13 @@ class GBMaker:
         :param P_or_Q: 3×3 canonical integer orientation matrix.
         :param x_length: Equalized x-slab thickness (Angstroms).
         :param x_offset: Lab x-coordinate of the grain's lower face (Angstroms).
-        :return: Structured atom array in the same format as ``__generate_grain``.
+        :return: Tuple of (atoms, ux_labels) where atoms is the structured atom
+            array and ux_labels[i] is the integer x-layer index of atom i.
         """
-        from GBOpt.Utils.gb_exact import build_supercell_matrix, enumerate_supercell_origins
+        from GBOpt.Utils.gb_exact import (
+            build_supercell_matrix, enumerate_supercell_origins,
+            _int_adj3, _int_det3,
+        )
 
         repeat_x, repeat_y, repeat_z = self.__exact_grain_repeats(P_or_Q, x_length)
         S = build_supercell_matrix(P_or_Q)
@@ -586,6 +598,10 @@ class GBMaker:
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         rotated = positions @ R_grain.T
         rotated[:, 0] += x_offset
+        # Wrap y/z into [0, y_dim) and [0, z_dim) to handle floating-point
+        # overshoot from unit-cell expansions near the periodic boundaries.
+        rotated[:, 1] = rotated[:, 1] % self.__y_dim
+        rotated[:, 2] = rotated[:, 2] % self.__z_dim
         atoms["x"], atoms["y"], atoms["z"] = rotated.T
 
         # Invariant: total atoms = accepted origins × basis size
@@ -594,7 +610,19 @@ class GBMaker:
             f"Exact builder atom count mismatch: expected "
             f"{len(origins) * uc_size}, got {len(atoms)}"
         )
-        return atoms
+
+        # Assign a fine x-layer label to every atom: the integer coordinate
+        # u_num_0 = (origin @ adj(S))[0], which ranges over [0, repeat_x·|det_S|).
+        # Each distinct value identifies the thinnest possible crystallographic
+        # x-slab — one column of origins that share the same x-lattice position.
+        # Using u_num_0 directly (rather than u_num_0 // |det_S|) gives |det_S|-
+        # fold finer resolution, so the gap-equalization loop can remove minimal
+        # slices instead of coarse whole-repeat chunks.
+        S_int = np.round(S).astype(int)
+        adj_S = np.array(_int_adj3(S_int), dtype=int)
+        u_num_0 = origins @ adj_S[:, 0]
+        n0_labels = np.repeat(u_num_0, uc_size)
+        return atoms, n0_labels
 
     def __generate_gb(self) -> None:
         """
@@ -629,14 +657,15 @@ class GBMaker:
         right_bounds_eff = right_bounds.copy()
         vacuum0_trim_applied = False
 
+        right_n0_labels = None
         if use_exact:
-            self.__left_grain = self.__generate_grain_exact(
+            self.__left_grain, _ = self.__generate_grain_exact(
                 self.__R_left,
                 self.__embedding.P,
                 self.__left_x,
                 left_bounds[0],
             )
-            self.__right_grain = self.__generate_grain_exact(
+            self.__right_grain, right_n0_labels = self.__generate_grain_exact(
                 self.__R_right,
                 self.__embedding.Q,
                 self.__right_x,
@@ -686,17 +715,59 @@ class GBMaker:
         # trigger a cascade of unwanted additional equalization passes.
         periodic_gap = ((right_bounds_eff[1] - right_max_x) +
                         (left_min_x - left_bounds[0]))
+        # Pre-initialise n0_labels so both the high-x and low-x exact passes can
+        # share and update the same label array without re-scanning the grain.
+        n0_labels: np.ndarray | None = (
+            right_n0_labels.copy()
+            if (use_exact and right_n0_labels is not None)
+            else None
+        )
+
         if periodic_gap < central_gap - self.__epsilon:
             if use_exact:
-                # Exact grains are filled by whole unit-cell periods; a float
-                # x-threshold would cut partial crystal planes and destroy
-                # stoichiometry. Unit-cell offsets routinely push a few atoms
-                # just past the nominal grain boundary, making the periodic
-                # gap slightly smaller than the central gap. Because the
-                # bicrystal is bracketed by vacuum the atoms remain inside
-                # the LAMMPS box and no close contacts form. Stoichiometry
-                # takes precedence over exact gap symmetry on this path.
-                pass
+                # Remove whole crystallographic x-layers from the right grain's
+                # high-x end until the periodic gap matches the central gap.
+                # Layers are identified by the fine u_num_0 coordinate of each
+                # origin, ensuring stoichiometric completeness regardless of how
+                # the rotation maps those members into Cartesian x-space.
+                assert n0_labels is not None
+                removed_layers = 0
+                unique_n0 = np.sort(np.unique(n0_labels))
+                while len(unique_n0) > 1:
+                    top_n0 = unique_n0[-1]
+                    mask = n0_labels != top_n0
+                    trial_grain = self.__right_grain[mask]
+                    trial_labels = n0_labels[mask]
+                    new_right_max_x = np.max(trial_grain["x"])
+                    new_periodic_gap = (
+                        (right_bounds_eff[1] - new_right_max_x)
+                        + (left_min_x - left_bounds[0])
+                    )
+                    self.__right_grain = trial_grain
+                    n0_labels = trial_labels
+                    removed_layers += 1
+                    unique_n0 = unique_n0[:-1]
+                    within_box = (
+                        new_right_max_x <= right_bounds_eff[1] + self.__epsilon
+                    )
+                    gap_ok = new_periodic_gap >= central_gap - self.__epsilon
+                    if within_box and gap_ok:
+                        break
+                final_max_x = np.max(self.__right_grain["x"])
+                final_periodic_gap = (
+                    (right_bounds_eff[1] - final_max_x)
+                    + (left_min_x - left_bounds[0])
+                )
+                if final_periodic_gap < central_gap - self.__epsilon:
+                    warnings.warn(
+                        f"Exact gap equalization: after removing "
+                        f"{removed_layers} x-layer(s), periodic_gap "
+                        f"({final_periodic_gap:.4f} Å) < central_gap "
+                        f"({central_gap:.4f} Å). Stoichiometry preserved; "
+                        "residual gap mismatch reported.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
             elif self.__vacuum_thickness == 0 and vacuum0_trim_applied:
                 # The period trim already removed one complete x-period (the
                 # stoichiometric PBC fix). Unit-cell positive x-offsets push
@@ -740,6 +811,31 @@ class GBMaker:
             # extra interfacial volume at the x periodic boundary. NPT simulations will
             # relax it away; NVT or static calculations will have structurally
             # inequivalent interfaces on the two sides of the bicrystal.
+
+        # Low-x overlap removal (exact path only).  For rotated multi-atom-basis
+        # structures some basis atoms have large negative frac contributions that
+        # place them at x < left_max_x, coinciding with left-grain atoms.  Remove
+        # the lowest-index u_num_0 fine layers from the right grain until
+        # right_min_x ≥ left_max_x.  Each layer removal eliminates a complete set
+        # of unit cells sharing one crystallographic x-position, so the right
+        # grain's U:O stoichiometry is preserved.
+        if use_exact and n0_labels is not None:
+            current_right_min_x = np.min(self.__right_grain["x"])
+            if current_right_min_x < left_max_x - self.__epsilon:
+                removed_low = 0
+                unique_n0_asc = np.sort(np.unique(n0_labels))
+                while len(unique_n0_asc) > 1:
+                    bot_n0 = unique_n0_asc[0]
+                    mask = n0_labels != bot_n0
+                    trial_grain = self.__right_grain[mask]
+                    trial_labels = n0_labels[mask]
+                    new_right_min_x = np.min(trial_grain["x"])
+                    self.__right_grain = trial_grain
+                    n0_labels = trial_labels
+                    removed_low += 1
+                    unique_n0_asc = unique_n0_asc[1:]
+                    if new_right_min_x >= left_max_x - self.__epsilon:
+                        break
 
         self.__whole_system = np.hstack(
             (self.__left_grain, self.__right_grain))
