@@ -41,6 +41,8 @@ class TestStrainAccommodation(unittest.TestCase):
     from GBOpt.BoundarySpec import CSLApproxSpec as _ApproxSpec
     APPROX_SPEC = _ApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
     INTERACTION_DISTANCE = 1.0
+    INCOMMENSURATE_P = [[0, 2, 5], [0, 5, -2], [-1, 0, 0]]
+    INCOMMENSURATE_Q = [[0, 1, 0], [1, 0, 0], [0, 0, -1]]
 
     def _build(self, mismatch_tol=None, strain_grain="both"):
         from GBOpt.GBMaker import GBMaker
@@ -115,23 +117,119 @@ class TestStrainAccommodation(unittest.TestCase):
             f"Expected a 'No commensurate' warning; got: {msgs}",
         )
 
-    def test_mismatch_tol_with_exact_mode_warns_and_ignores(self):
+    def _build_exact_incommensurate_pq(self, strain_grain="both", **kwargs):
         from GBOpt.BoundarySpec import PQSpec
-        spec = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-                      Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
+        spec = PQSpec(P=self.INCOMMENSURATE_P, Q=self.INCOMMENSURATE_Q)
+        params = dict(
+            gb_thickness=0.0,
+            repeat_factor=[2, 3],
+            x_dim_min=10.0,
+            vacuum=0.0,
+            interaction_distance=self.INTERACTION_DISTANCE,
+            mismatch_tol=0.005,
+            strain_grain=strain_grain,
+        )
+        params.update(kwargs)
+        return GBMaker.from_boundary_spec(
+            3.615, "sc", "Cu", spec, mode="exact", **params
+        )
+
+    def test_exact_mismatch_tol_builds_incommensurate_pqspec(self):
+        gb = self._build_exact_incommensurate_pq()
+        self.assertGreater(gb.whole_system.size, 0)
+        accommodation = gb._GBMaker__strain_accommodation["y"]
+        self.assertEqual(accommodation.left_repeats, 5)
+        self.assertEqual(accommodation.right_repeats, 27)
+        self.assertLessEqual(accommodation.mismatch, 0.005)
+
+    def test_exact_without_mismatch_tol_still_raises_commensurability_error(self):
+        from GBOpt.BoundarySpec import PQSpec
+        spec = PQSpec(P=self.INCOMMENSURATE_P, Q=self.INCOMMENSURATE_Q)
+        with self.assertRaises(GBMakerValueError):
+            GBMaker.from_boundary_spec(
+                3.615, "sc", "Cu", spec, mode="exact",
+                gb_thickness=0.0,
+                repeat_factor=[2, 3],
+                x_dim_min=10.0,
+                vacuum=0.0,
+                interaction_distance=self.INTERACTION_DISTANCE,
+            )
+
+    def test_exact_mismatch_tol_no_pair_raises(self):
+        with self.assertRaisesRegex(GBMakerValueError, "No commensurate y pair"):
+            self._build_exact_incommensurate_pq(
+                mismatch_tol=1e-10,
+                mismatch_max_cells=2,
+            )
+
+    def test_exact_strain_grain_modes_set_expected_scales(self):
+        d_left = 3.615 * np.linalg.norm(np.array(self.INCOMMENSURATE_P[1]))
+        d_right = 3.615 * np.linalg.norm(np.array(self.INCOMMENSURATE_Q[1]))
+        l_left = 5 * d_left
+        l_right = 27 * d_right
+
+        cases = {
+            "both": ((l_left + l_right) / 2.0, (l_left + l_right) / (2.0 * l_left),
+                     (l_left + l_right) / (2.0 * l_right)),
+            "left": (l_right, l_right / l_left, 1.0),
+            "right": (l_left, 1.0, l_left / l_right),
+        }
+        for mode, (expected_y_dim, expected_left_scale, expected_right_scale) in cases.items():
+            with self.subTest(mode=mode):
+                gb = self._build_exact_incommensurate_pq(strain_grain=mode)
+                accommodation = gb._GBMaker__strain_accommodation["y"]
+                self.assertAlmostEqual(gb.y_dim, expected_y_dim, delta=1e-8)
+                self.assertAlmostEqual(
+                    accommodation.left_scale, expected_left_scale, delta=1e-12
+                )
+                self.assertAlmostEqual(
+                    accommodation.right_scale, expected_right_scale, delta=1e-12
+                )
+
+    def test_exact_interaction_resize_preserves_commensurate_pair(self):
+        gb = self._build_exact_incommensurate_pq(interaction_distance=10.0)
+        accommodation = gb._GBMaker__strain_accommodation["z"]
+        self.assertEqual(accommodation.left_repeats, 6)
+        self.assertEqual(accommodation.right_repeats, 6)
+        self.assertAlmostEqual(gb.z_dim, 6 * 3.615, delta=1e-8)
+
+    def test_exact_mismatch_tol_builds_incommensurate_cslexactspec(self):
+        from GBOpt.BoundarySpec import CSLExactSpec
+        spec = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
+
+        with self.assertRaises(GBMakerValueError):
+            GBMaker.from_boundary_spec(
+                3.615, "sc", "Cu", spec, mode="exact",
+                gb_thickness=0.0,
+                repeat_factor=[2, 2],
+                x_dim_min=5.0,
+                vacuum=0.0,
+                interaction_distance=self.INTERACTION_DISTANCE,
+            )
+
+        # This synthetic simple-cubic case intentionally uses a very thin
+        # x-slab relative to the large in-plane repeat pair. The warning
+        # documents that this test validates accommodation metadata, not a
+        # production-quality boundary geometry.
+        with self.assertWarnsRegex(UserWarning, "Exact gap equalization"):
             gb = GBMaker.from_boundary_spec(
-                3.615, "fcc", "Cu", spec, mode="exact",
+                3.615, "sc", "Cu", spec, mode="exact",
+                gb_thickness=0.0,
+                repeat_factor=[2, 2],
+                x_dim_min=5.0,
+                vacuum=0.0,
+                interaction_distance=self.INTERACTION_DISTANCE,
                 mismatch_tol=0.005,
             )
-        msgs = [str(x.message) for x in w]
-        self.assertTrue(
-            any("no effect" in m.lower() or "ignored" in m.lower() for m in msgs),
-            f"Expected a warning about mismatch_tol being ignored; got: {msgs}",
-        )
-        # bicrystal should still build successfully
         self.assertGreater(gb.whole_system.size, 0)
+        accommodation_y = gb._GBMaker__strain_accommodation["y"]
+        accommodation_z = gb._GBMaker__strain_accommodation["z"]
+        self.assertEqual(accommodation_y.left_repeats, 29)
+        self.assertEqual(accommodation_y.right_repeats, 13)
+        self.assertEqual(accommodation_z.left_repeats, 29)
+        self.assertEqual(accommodation_z.right_repeats, 13)
+        self.assertLessEqual(accommodation_y.mismatch, 0.005)
+        self.assertLessEqual(accommodation_z.mismatch, 0.005)
 
     def test_invalid_strain_grain_raises(self):
         from GBOpt.BoundarySpec import CSLApproxSpec

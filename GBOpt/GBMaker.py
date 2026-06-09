@@ -3,6 +3,7 @@
 
 import math
 import warnings
+from dataclasses import dataclass
 from numbers import Number
 from typing import Any, Sequence, Tuple, Union
 
@@ -24,12 +25,12 @@ def _find_commensurate_pair(
     tol: float,
     max_n: int,
 ) -> "tuple[int, int, float, float] | None":
-    """Find the smallest integer pair (n1, n2) such that n1*d1 ≈ n2*d2.
+    """Find the smallest integer pair (n1, n2) such that n1*d1 ~= n2*d2.
 
-    Searches all pairs with 1 ≤ n1, n2 ≤ max_n and returns the one with
+    Searches all pairs with 1 <= n1, n2 <= max_n and returns the one with
     the smallest ``max(n1*d1, n2*d2)`` whose relative mismatch satisfies::
 
-        |n1*d1 - n2*d2| / max(n1*d1, n2*d2) ≤ tol
+        |n1*d1 - n2*d2| / max(n1*d1, n2*d2) <= tol
 
     Returns ``(n1, n2, n1*d1, n2*d2)`` or ``None`` if no pair is found.
 
@@ -55,6 +56,36 @@ def _find_commensurate_pair(
                 best = (n1, n2, l1, l2)
                 best_size = max(l1, l2)
     return best
+
+
+@dataclass(frozen=True)
+class _AxisStrainAccommodation:
+    """Integer repeat pair and lab-axis scale factors for one in-plane axis."""
+
+    left_repeats: int
+    right_repeats: int
+    left_unstrained_length: float
+    right_unstrained_length: float
+    box_length: float
+    left_scale: float
+    right_scale: float
+    mismatch: float
+
+    def resized(self, factor: int) -> "_AxisStrainAccommodation":
+        """Return the same accommodation multiplied by a positive integer factor."""
+        factor = int(factor)
+        if factor <= 0:
+            raise GBMakerValueError("Strain resize factor must be positive.")
+        return _AxisStrainAccommodation(
+            left_repeats=self.left_repeats * factor,
+            right_repeats=self.right_repeats * factor,
+            left_unstrained_length=self.left_unstrained_length * factor,
+            right_unstrained_length=self.right_unstrained_length * factor,
+            box_length=self.box_length * factor,
+            left_scale=self.left_scale,
+            right_scale=self.right_scale,
+            mismatch=self.mismatch,
+        )
 
 
 class GBMakerError(Exception):
@@ -165,6 +196,7 @@ class GBMaker:
         self.__mismatch_tol = _mismatch_tol
         self.__mismatch_max_cells = int(_mismatch_max_cells)
         self.__strain_grain = _strain_grain
+        self.__strain_accommodation: dict[str, _AxisStrainAccommodation] = {}
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
@@ -259,19 +291,14 @@ class GBMaker:
         ============= =========== ===========  ============
 
         **Commensurability requirement (exact mode only):**
-        The shared in-plane simulation box is set to
-        ``repeat_factor × max(grain1_period, grain2_period)`` along each
-        in-plane axis.  For the exact path this box must be an integer
-        multiple of *both* grains' in-plane periods; otherwise a
-        ``GBMakerValueError`` is raised.  For symmetric CSL boundaries
-        (e.g. Σ5 [001] tilt) the two grains share the same in-plane period
-        so the condition is always satisfied.  For asymmetric or mixed
-        tilt/twist boundaries where the two grains have incommensurate
-        in-plane periods, use ``mode="approximate"`` or increase
-        ``repeat_factor`` until the box is commensurate with both grains.
-        A geometrically complete fix — constructing the shared box from the
-        CSL in-plane cell rather than the maximum single-grain period — is
-        not yet implemented.
+        When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is
+        set to ``repeat_factor x max(grain1_period, grain2_period)`` along each
+        in-plane axis.  This box must be an integer multiple of *both* grains'
+        in-plane periods; otherwise a ``GBMakerValueError`` is raised.  When
+        ``mismatch_tol`` is provided, GBMaker searches for integer period pairs
+        ``n_left*d_left ~= n_right*d_right`` within that tolerance, sets the
+        shared box from the chosen pair, and applies the requested lab-frame
+        in-plane strain to the exact grains.
 
         :param a0: Crystal lattice parameter (Angstroms).
         :param structure: Crystal structure string.
@@ -289,10 +316,10 @@ class GBMaker:
         :param interaction_distance: Maximum atom interaction distance, default 15.
         :param gb_id: Grain boundary identifier, default 1.
         :param mismatch_tol: When not ``None``, search for integer multiples
-            ``n1*d1 ≈ n2*d2`` (``approximate`` mode only) to minimize the
-            in-plane mismatch strain.  Typical value: ``0.005`` (0.5%).
-            Ignored with a ``UserWarning`` for ``mode="exact"`` (the exact path
-            already enforces integer commensurability).
+            ``n1*d1 ~= n2*d2`` to minimize the in-plane mismatch strain.
+            Typical value: ``0.005`` (0.5%). Ignored with a ``UserWarning``
+            for ``mode="exact"`` (the exact path already enforces integer
+            commensurability).
         :param mismatch_max_cells: Upper bound on n1 and n2 in the
             commensurability search, default 50.
         :param strain_grain: Which grain absorbs the residual mismatch.
@@ -309,6 +336,7 @@ class GBMaker:
         :raises GBMakerValueError: If ``strain_grain`` is not one of
             ``"both"``, ``"left"``, or ``"right"``.
         """
+<<<<<<< HEAD
         if mismatch_tol is not None and mode == "exact":
             warnings.warn(
                 "mismatch_tol has no effect with mode='exact': the exact path "
@@ -318,6 +346,14 @@ class GBMaker:
                 stacklevel=2,
             )
             mismatch_tol = None
+=======
+        from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
+        from GBOpt.Utils.gb_exact import (
+            csl_approx_spec_to_embedding,
+            csl_spec_to_embedding,
+            pq_spec_to_embedding,
+        )
+>>>>>>> 87f7ddc (Extend exact-path in-plane strain accommodation)
 
         _VALID_STRAIN_GRAIN = {"both", "left", "right"}
         if strain_grain not in _VALID_STRAIN_GRAIN:
@@ -502,6 +538,7 @@ class GBMaker:
         self,
         P_or_Q: np.ndarray,
         x_length: float,
+        grain_side: str,
     ) -> tuple[int, int, int]:
         """Compute integer repeat counts (repeat_x, repeat_y, repeat_z) for an exact grain.
 
@@ -515,8 +552,9 @@ class GBMaker:
         integer multiple of this grain's in-plane periods.  See the
         commensurability note in ``from_boundary_spec`` for guidance.
 
-        :param P_or_Q: 3×3 canonical integer orientation matrix for this grain.
+        :param P_or_Q: 3x3 canonical integer orientation matrix for this grain.
         :param x_length: Equalized x-slab thickness for this grain (Angstroms).
+        :param grain_side: ``"left"`` or ``"right"``.
         :return: (repeat_x, repeat_y, repeat_z) as positive integers.
         :raises GBMakerValueError: If y or z is not commensurate with the box.
         """
@@ -530,14 +568,35 @@ class GBMaker:
         z_period = a0 * float(np.linalg.norm(S[2]))
 
         repeat_x = int(round(x_length / x_period))
-        repeat_y_raw = self.__y_dim / y_period
-        repeat_z_raw = self.__z_dim / z_period
+        if repeat_x <= 0:
+            raise GBMakerValueError(
+                f"Exact construction requires positive x repeats; got {repeat_x}."
+            )
 
-        repeat_y = int(round(repeat_y_raw))
-        repeat_z = int(round(repeat_z_raw))
+        y_accommodation = self.__strain_accommodation.get("y")
+        z_accommodation = self.__strain_accommodation.get("z")
+        if y_accommodation is not None:
+            repeat_y = (
+                y_accommodation.left_repeats
+                if grain_side == "left"
+                else y_accommodation.right_repeats
+            )
+        else:
+            repeat_y_raw = self.__y_dim / y_period
+            repeat_y = int(round(repeat_y_raw))
+
+        if z_accommodation is not None:
+            repeat_z = (
+                z_accommodation.left_repeats
+                if grain_side == "left"
+                else z_accommodation.right_repeats
+            )
+        else:
+            repeat_z_raw = self.__z_dim / z_period
+            repeat_z = int(round(repeat_z_raw))
 
         tol = 1e-6
-        if abs(repeat_y_raw - repeat_y) > tol:
+        if y_accommodation is None and abs(repeat_y_raw - repeat_y) > tol:
             raise GBMakerValueError(
                 f"Exact construction requires the y box ({self.__y_dim:.6f} Å) to be "
                 f"an integer multiple of this grain's y-period ({y_period:.6f} Å), "
@@ -546,7 +605,7 @@ class GBMaker:
                 "in-plane periods divide the shared box exactly. See the "
                 "commensurability note in from_boundary_spec for details."
             )
-        if abs(repeat_z_raw - repeat_z) > tol:
+        if z_accommodation is None and abs(repeat_z_raw - repeat_z) > tol:
             raise GBMakerValueError(
                 f"Exact construction requires the z box ({self.__z_dim:.6f} Å) to be "
                 f"an integer multiple of this grain's z-period ({z_period:.6f} Å), "
@@ -554,6 +613,10 @@ class GBMaker:
                 "Use mode='approximate' or adjust repeat_factor until both grains' "
                 "in-plane periods divide the shared box exactly. See the "
                 "commensurability note in from_boundary_spec for details."
+            )
+        if repeat_y <= 0 or repeat_z <= 0:
+            raise GBMakerValueError(
+                "Exact construction requires positive in-plane repeat counts."
             )
 
         return repeat_x, repeat_y, repeat_z
@@ -564,6 +627,7 @@ class GBMaker:
         P_or_Q: np.ndarray,
         x_length: float,
         x_offset: float,
+        grain_side: str,
     ) -> "tuple[np.ndarray, np.ndarray]":
         """Build one grain using the integer membership kernel (exact path).
 
@@ -575,7 +639,7 @@ class GBMaker:
         ``trim_upper_face`` are **never called** on this path.
 
         :param R_grain: Proper rotation matrix for this grain.
-        :param P_or_Q: 3×3 canonical integer orientation matrix.
+        :param P_or_Q: 3x3 canonical integer orientation matrix.
         :param x_length: Equalized x-slab thickness (Angstroms).
         :param x_offset: Lab x-coordinate of the grain's lower face (Angstroms).
         :return: Tuple of (atoms, ux_labels) where atoms is the structured atom
@@ -586,7 +650,9 @@ class GBMaker:
             _int_adj3, _int_det3,
         )
 
-        repeat_x, repeat_y, repeat_z = self.__exact_grain_repeats(P_or_Q, x_length)
+        repeat_x, repeat_y, repeat_z = self.__exact_grain_repeats(
+            P_or_Q, x_length, grain_side
+        )
         S = build_supercell_matrix(P_or_Q)
         origins = enumerate_supercell_origins(S, repeat_x, repeat_y, repeat_z)
 
@@ -597,6 +663,9 @@ class GBMaker:
 
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         rotated = positions @ R_grain.T
+        y_scale, z_scale = self.__grain_strain_scales(grain_side)
+        rotated[:, 1] *= y_scale
+        rotated[:, 2] *= z_scale
         rotated[:, 0] += x_offset
         # Wrap y/z into [0, y_dim) and [0, z_dim) to handle floating-point
         # overshoot from unit-cell expansions near the periodic boundaries.
@@ -604,7 +673,7 @@ class GBMaker:
         rotated[:, 2] = rotated[:, 2] % self.__z_dim
         atoms["x"], atoms["y"], atoms["z"] = rotated.T
 
-        # Invariant: total atoms = accepted origins × basis size
+        # Invariant: total atoms = accepted origins x basis size
         uc_size = len(self.__unit_cell.asarray())
         expected_atoms = len(origins) * uc_size
         if len(atoms) != expected_atoms:
@@ -614,7 +683,7 @@ class GBMaker:
             )
 
         # Assign a fine x-layer label to every atom: the integer coordinate
-        # u_num_0 = (origin @ adj(S))[0], which ranges over [0, repeat_x·|det_S|).
+        # u_num_0 = (origin @ adj(S))[0], which ranges over [0, repeat_x*|det_S|).
         # Each distinct value identifies the thinnest possible crystallographic
         # x-slab — one column of origins that share the same x-lattice position.
         # Using u_num_0 directly (rather than u_num_0 // |det_S|) gives |det_S|-
@@ -667,12 +736,14 @@ class GBMaker:
                 self.__embedding.P,
                 self.__left_x,
                 left_bounds[0],
+                "left",
             )
             self.__right_grain, right_n0_labels = self.__generate_grain_exact(
                 self.__R_right,
                 self.__embedding.Q,
                 self.__right_x,
                 right_bounds[0],
+                "right",
             )
         else:
             self.__left_grain = self.__generate_grain(
@@ -842,7 +913,7 @@ class GBMaker:
         # structures some basis atoms have large negative frac contributions that
         # place them at x < left_max_x, coinciding with left-grain atoms.  Remove
         # the lowest-index u_num_0 fine layers from the right grain until
-        # right_min_x ≥ left_max_x.  Each layer removal eliminates a complete set
+        # right_min_x >= left_max_x.  Each layer removal eliminates a complete set
         # of unit cells sharing one crystallographic x-position, so the right
         # grain's U:O stoichiometry is preserved.
         if use_exact and n0_labels is not None:
@@ -1807,31 +1878,61 @@ class GBMaker:
             selected_atoms, selected_origin_ids, inside_x, basis_size
         )
 
-    def __apply_strain_accommodation(
+    def __grain_strain_scales(self, grain_side: str) -> tuple[float, float]:
+        """Return lab-frame y/z scale factors for one grain."""
+        if grain_side not in {"left", "right"}:
+            raise GBMakerValueError(
+                f"Invalid grain_side={grain_side!r}; expected 'left' or 'right'."
+            )
+
+        y_accommodation = self.__strain_accommodation.get("y")
+        z_accommodation = self.__strain_accommodation.get("z")
+        y_scale = 1.0
+        z_scale = 1.0
+        if y_accommodation is not None:
+            y_scale = (
+                y_accommodation.left_scale
+                if grain_side == "left"
+                else y_accommodation.right_scale
+            )
+        if z_accommodation is not None:
+            z_scale = (
+                z_accommodation.left_scale
+                if grain_side == "left"
+                else z_accommodation.right_scale
+            )
+        return y_scale, z_scale
+
+    def __build_strain_accommodation(
         self,
         current_dim: float,
         axis_name: str,
         row_left,
         row_right,
-    ) -> float:
-        """Return a commensurate in-plane dimension for one axis.
+        *,
+        require_pair: bool,
+    ) -> "_AxisStrainAccommodation | None":
+        """Return commensurate repeat/scale metadata for one in-plane axis.
 
         Calls ``_find_commensurate_pair`` with ``self.__mismatch_tol`` and
-        ``self.__mismatch_max_cells``.  If a pair is found, the returned
-        dimension is chosen according to ``self.__strain_grain``:
+        ``self.__mismatch_max_cells``.  If a pair is found, the box length is
+        chosen according to ``self.__strain_grain``:
 
         - ``"both"`` — average of n1*d1 and n2*d2 (symmetric strain on each)
         - ``"left"`` — n2*d2 (right grain exact, left grain absorbs strain)
         - ``"right"`` — n1*d1 (left grain exact, right grain absorbs strain)
 
-        If no pair is found, emits a ``UserWarning`` and returns
-        ``current_dim`` unchanged.
+        If no pair is found and ``require_pair`` is false, emits a
+        ``UserWarning`` and returns ``None`` so legacy approximate construction
+        can retain its previous fallback.  Exact construction passes
+        ``require_pair=True`` and fails clearly instead.
 
         :param current_dim: Current box dimension (Angstroms).
         :param axis_name: ``"y"`` or ``"z"`` (used in the warning message).
         :param row_left: Row of ``__R_left_approx`` for this axis.
         :param row_right: Row of ``__R_right_approx`` for this axis.
-        :return: Possibly adjusted box dimension.
+        :param require_pair: Whether failure to find a pair should raise.
+        :return: Accommodation metadata, or ``None`` for legacy fallback.
         """
         d1 = self.__a0 * float(np.linalg.norm(np.asarray(row_left, dtype=float)))
         d2 = self.__a0 * float(np.linalg.norm(np.asarray(row_right, dtype=float)))
@@ -1840,22 +1941,43 @@ class GBMaker:
         )
         if result is None:
             residual = abs(d1 - d2) / max(d1, d2)
-            warnings.warn(
+            msg = (
                 f"No commensurate {axis_name} pair found within "
                 f"mismatch_max_cells={self.__mismatch_max_cells} for "
                 f"mismatch_tol={self.__mismatch_tol}. "
-                f"Residual mismatch: {residual:.4%}. "
+                f"Residual mismatch: {residual:.4%}."
+            )
+            if require_pair:
+                raise GBMakerValueError(
+                    f"{msg} Exact strain accommodation cannot build this "
+                    "boundary within the requested tolerance."
+                )
+            warnings.warn(
+                f"{msg} "
                 f"Falling back to max(d1, d2) * repeat_factor.",
                 UserWarning,
                 stacklevel=4,
             )
-            return current_dim
+            return None
         n1, n2, l1, l2 = result
         if self.__strain_grain == "both":
-            return (l1 + l2) / 2.0
-        if self.__strain_grain == "left":
-            return l2
-        return l1  # "right"
+            box_length = (l1 + l2) / 2.0
+        elif self.__strain_grain == "left":
+            box_length = l2
+        else:
+            box_length = l1  # "right"
+
+        mismatch = abs(l1 - l2) / max(l1, l2)
+        return _AxisStrainAccommodation(
+            left_repeats=n1,
+            right_repeats=n2,
+            left_unstrained_length=l1,
+            right_unstrained_length=l2,
+            box_length=box_length,
+            left_scale=box_length / l1,
+            right_scale=box_length / l2,
+            mismatch=mismatch,
+        )
 
     def __update_dims(self) -> None:
         """
@@ -1865,6 +1987,7 @@ class GBMaker:
         :raises UserWarning: Warning issued when the repeat factors are modified to
             accommodate the interaction distance.
         """
+        self.__strain_accommodation = {}
         self.__y_dim = self.__repeat_factor[0] * self.__spacing["y"]
         self.__z_dim = self.__repeat_factor[1] * self.__spacing["z"]
 
@@ -1873,34 +1996,76 @@ class GBMaker:
             and self.__embedding.exact
             and self.__embedding.P is not None
         )
-        if self.__mismatch_tol is not None and not use_exact:
-            self.__y_dim = self.__apply_strain_accommodation(
+        if self.__mismatch_tol is not None:
+            y_accommodation = self.__build_strain_accommodation(
                 self.__y_dim, "y",
                 self.__R_left_approx[1], self.__R_right_approx[1],
+                require_pair=use_exact,
             )
-            self.__z_dim = self.__apply_strain_accommodation(
+            if y_accommodation is not None:
+                self.__strain_accommodation["y"] = y_accommodation
+                self.__y_dim = y_accommodation.box_length
+                self.__repeat_factor[0] = max(
+                    1, int(round(self.__y_dim / self.__spacing["y"]))
+                )
+
+            z_accommodation = self.__build_strain_accommodation(
                 self.__z_dim, "z",
                 self.__R_left_approx[2], self.__R_right_approx[2],
+                require_pair=use_exact,
             )
+            if z_accommodation is not None:
+                self.__strain_accommodation["z"] = z_accommodation
+                self.__z_dim = z_accommodation.box_length
+                self.__repeat_factor[1] = max(
+                    1, int(round(self.__z_dim / self.__spacing["z"]))
+                )
 
-        repeat_z = self.__repeat_factor[1]
         cutoff = 2 * self.__interaction_distance
         if self.__y_dim < cutoff:
-            repeat_y = math.ceil(cutoff / self.__spacing["y"])
-            self.__y_dim = repeat_y * self.__spacing["y"]
-            warnings.warn(
-                f"Repeat factor in y modified to {repeat_y} to accommodate interaction "
-                f"distance of {cutoff}."
-            )
-            self.__repeat_factor[0] = repeat_y
+            y_accommodation = self.__strain_accommodation.get("y")
+            if y_accommodation is not None:
+                repeat_y = math.ceil(cutoff / y_accommodation.box_length)
+                y_accommodation = y_accommodation.resized(repeat_y)
+                self.__strain_accommodation["y"] = y_accommodation
+                self.__y_dim = y_accommodation.box_length
+                self.__repeat_factor[0] = max(
+                    1, int(round(self.__y_dim / self.__spacing["y"]))
+                )
+                warnings.warn(
+                    f"Commensurate repeat pair in y multiplied by {repeat_y} "
+                    f"to accommodate interaction distance of {cutoff}."
+                )
+            else:
+                repeat_y = math.ceil(cutoff / self.__spacing["y"])
+                self.__y_dim = repeat_y * self.__spacing["y"]
+                warnings.warn(
+                    f"Repeat factor in y modified to {repeat_y} to accommodate "
+                    f"interaction distance of {cutoff}."
+                )
+                self.__repeat_factor[0] = repeat_y
         if self.__z_dim < cutoff:
-            repeat_z = math.ceil(cutoff / self.__spacing["z"])
-            self.__z_dim = repeat_z * self.__spacing["z"]
-            warnings.warn(
-                f"Repeat factor in z modified to {repeat_z} to accommodate interaction "
-                f"distance of {cutoff}."
-            )
-            self.__repeat_factor[1] = repeat_z
+            z_accommodation = self.__strain_accommodation.get("z")
+            if z_accommodation is not None:
+                repeat_z = math.ceil(cutoff / z_accommodation.box_length)
+                z_accommodation = z_accommodation.resized(repeat_z)
+                self.__strain_accommodation["z"] = z_accommodation
+                self.__z_dim = z_accommodation.box_length
+                self.__repeat_factor[1] = max(
+                    1, int(round(self.__z_dim / self.__spacing["z"]))
+                )
+                warnings.warn(
+                    f"Commensurate repeat pair in z multiplied by {repeat_z} "
+                    f"to accommodate interaction distance of {cutoff}."
+                )
+            else:
+                repeat_z = math.ceil(cutoff / self.__spacing["z"])
+                self.__z_dim = repeat_z * self.__spacing["z"]
+                warnings.warn(
+                    f"Repeat factor in z modified to {repeat_z} to accommodate "
+                    f"interaction distance of {cutoff}."
+                )
+                self.__repeat_factor[1] = repeat_z
         self.__box_dims = self.__calculate_box_dimensions()
 
         self.__generate_gb()

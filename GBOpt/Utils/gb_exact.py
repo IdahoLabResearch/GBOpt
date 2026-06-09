@@ -155,13 +155,13 @@ def _canonicalize_matrix(M: np.ndarray) -> np.ndarray:
 # ---------------------------------------------------------------------------
 
 def _require_int_matrix(M, name: str) -> list:
-    """Validate that every entry of a 3×3 matrix is integer-valued and return as a list-of-lists of Python ints.
+    """Validate that every entry of a 3x3 matrix is integer-valued and return as a list-of-lists of Python ints.
 
     Raises ``ValueError`` if any entry deviates from an integer by more than 1e-9.
 
-    :param M: 3×3 array-like.
+    :param M: 3x3 array-like.
     :param name: Name used in the error message.
-    :return: 3×3 list-of-lists of Python int.
+    :return: 3x3 list-of-lists of Python int.
     :raises ValueError: If any entry is not integer-valued.
     """
     result = []
@@ -181,9 +181,9 @@ def _require_int_matrix(M, name: str) -> list:
 
 
 def _int_det3(M) -> int:
-    """Compute the determinant of a 3×3 integer matrix using pure-Python-int arithmetic.
+    """Compute the determinant of a 3x3 integer matrix using pure-Python-int arithmetic.
 
-    :param M: 3×3 array-like with integer-valued entries.
+    :param M: 3x3 array-like with integer-valued entries.
     :return: Integer determinant.
     :raises ValueError: If any entry is not integer-valued.
     """
@@ -196,13 +196,13 @@ def _int_det3(M) -> int:
 
 
 def _int_adj3(M) -> list:
-    """Compute the adjugate (transpose of the cofactor matrix) of a 3×3 integer matrix.
+    """Compute the adjugate (transpose of the cofactor matrix) of a 3x3 integer matrix.
 
     Returns a Python list-of-lists so that ``n @ adj`` (where n is a
     3-element Python list of ints) stays in pure-integer arithmetic.
 
-    :param M: 3×3 array-like with integer-valued entries.
-    :return: 3×3 list-of-lists representing adj(M).
+    :param M: 3x3 array-like with integer-valued entries.
+    :return: 3x3 list-of-lists representing adj(M).
     :raises ValueError: If any entry is not integer-valued.
     """
     a = _require_int_matrix(M, "M")
@@ -228,9 +228,9 @@ def _integer_membership(
 ) -> bool:
     """Test whether integer conventional-cell origin *n* lies inside the repeated supercell.
 
-    Fractional supercell coordinates are ``u = n @ S⁻¹ = (n @ adj(S)) / det(S)``.
-    Origin *n* is accepted when ``0 ≤ u[i] < repeat[i]`` for each axis, which in
-    integer arithmetic becomes ``0 ≤ u_num[i] < repeat[i] * |det(S)|``, where
+    Fractional supercell coordinates are ``u = n @ S^-1 = (n @ adj(S)) / det(S)``.
+    Origin *n* is accepted when ``0 <= u[i] < repeat[i]`` for each axis, which in
+    integer arithmetic becomes ``0 <= u_num[i] < repeat[i] * |det(S)|``, where
     ``u_num = n @ adj(S)`` (sign-flipped when ``det(S) < 0`` so the inequality
     direction is preserved).
 
@@ -238,7 +238,7 @@ def _integer_membership(
     branch supports the general helper for testing purposes.
 
     :param n: Integer 3-vector (conventional-cell coordinates of the origin).
-    :param adj_S: Adjugate of S as a 3×3 list-of-lists (from ``_int_adj3``).
+    :param adj_S: Adjugate of S as a 3x3 list-of-lists (from ``_int_adj3``).
     :param det_S: Integer determinant of S (from ``_int_det3``).
     :param repeat_x: Number of repeats along the x (boundary-normal) direction.
     :param repeat_y: Number of repeats along the y (in-plane) direction.
@@ -273,8 +273,8 @@ def build_supercell_matrix(P: np.ndarray) -> np.ndarray:
 
     A clear error is raised if S is non-integer or singular (det = 0).
 
-    :param P: 3×3 canonical orientation matrix (integer-valued rows).
-    :return: 3×3 integer ndarray S with rows [s0, s1, s2].
+    :param P: 3x3 canonical orientation matrix (integer-valued rows).
+    :return: 3x3 integer ndarray S with rows [s0, s1, s2].
     :raises BoundarySpecError: If P rows are not integer-valued.
     :raises ValueError: If the resulting S is singular (det = 0).
     """
@@ -303,7 +303,7 @@ def enumerate_supercell_origins(
     8 parallelepiped corners, padded by one lattice step.  Membership is tested
     with ``_integer_membership`` — no floating-point selection is used.
 
-    :param S: 3×3 integer supercell matrix (rows = s0, s1, s2).
+    :param S: 3x3 integer supercell matrix (rows = s0, s1, s2).
     :param repeat_x: Number of repeats along s0.
     :param repeat_y: Number of repeats along s1.
     :param repeat_z: Number of repeats along s2.
@@ -348,9 +348,9 @@ def enumerate_supercell_origins(
 def validate_and_normalize_quaternion(quat: np.ndarray) -> np.ndarray:
     """Validate that quat is an integer quaternion and return its normalized form.
 
-    A rotation quaternion encodes a rotation by angle θ about a unit axis
-    n̂ = (nx, ny, nz) in Hamilton scalar-first order ``[w, x, y, z]``,
-    where ``w = cos(θ/2)`` and ``(x, y, z) = sin(θ/2) · n̂``. For a CSL
+    A rotation quaternion encodes a rotation by angle theta about a unit axis
+    n_hat = (nx, ny, nz) in Hamilton scalar-first order ``[w, x, y, z]``,
+    where ``w = cos(theta/2)`` and ``(x, y, z) = sin(theta/2) * n_hat``. For a CSL
     grain boundary the rotation angle is rational, so the quaternion
     components can be exact integers; the unit quaternion is obtained by
     dividing by the norm.
@@ -382,7 +382,7 @@ def validate_and_normalize_quaternion(quat: np.ndarray) -> np.ndarray:
 
 
 def quaternion_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
-    """Convert a unit quaternion [w, x, y, z] to a 3×3 rotation matrix.
+    """Convert a unit quaternion [w, x, y, z] to a 3x3 rotation matrix.
 
     Delegates to ``scipy.spatial.transform.Rotation`` using scalar-last order
     internally; the reordering is handled here so callers always use Hamilton
@@ -416,11 +416,11 @@ def quaternion_to_rotation_matrix(quat: np.ndarray) -> np.ndarray:
 def validate_sigma(quat: np.ndarray, sigma: int) -> None:
     """Validate that sigma derived from quat matches the user-supplied value.
 
-    Sigma (Σ) is the reciprocal density of coincidence sites for a CSL grain
+    Sigma (Sigma) is the reciprocal density of coincidence sites for a CSL grain
     boundary. For an integer quaternion ``q = [w, x, y, z]``, sigma is the
-    odd part of ``N = w² + x² + y² + z²`` — that is, ``N`` divided by its
+    odd part of ``N = w^2 + x^2 + y^2 + z^2`` — that is, ``N`` divided by its
     largest power-of-2 factor. For example: ``q = [2, 0, 0, 1]`` gives
-    ``N = 5``, so ``sigma = 5``; ``q = [3, 0, 0, 1]`` gives ``N = 10 = 2·5``,
+    ``N = 5``, so ``sigma = 5``; ``q = [3, 0, 0, 1]`` gives ``N = 10 = 2*5``,
     so ``sigma = 5``. Validation is an exact integer equality check.
 
     :param quat: Integer quaternion (unnormalized) in Hamilton order
@@ -459,10 +459,10 @@ def validate_sigma(quat: np.ndarray, sigma: int) -> None:
 
 
 def _recover_sigma_from_rotation(R: np.ndarray, max_sigma: int = 10001) -> int:
-    """Return N such that N·R is an integer matrix (N = sigma or a multiple).
+    """Return N such that N*R is an integer matrix (N = sigma or a multiple).
 
     For a rotation matrix produced from an integer quaternion [w,x,y,z] with
-    norm-squared N = w²+x²+y²+z², every entry of R is a rational number whose
+    norm-squared N = w^2+x^2+y^2+z^2, every entry of R is a rational number whose
     denominator (in lowest terms) divides N.  We recover N as the LCM of the
     denominators of all matrix entries, using ``Fraction.limit_denominator`` to
     convert each floating-point entry to its exact rational form.
@@ -470,7 +470,7 @@ def _recover_sigma_from_rotation(R: np.ndarray, max_sigma: int = 10001) -> int:
     This is O(9) — one Fraction call per matrix entry — rather than a linear
     search up to max_sigma.
 
-    :param R: 3×3 rotation matrix whose entries are rationals with denominator ≤ max_sigma.
+    :param R: 3x3 rotation matrix whose entries are rationals with denominator <= max_sigma.
     :param max_sigma: Upper bound passed to ``limit_denominator``; the search
         raises if the true denominator exceeds this value.
     :return: LCM of all entry denominators = the common scaling factor N.
@@ -511,18 +511,18 @@ def _plane_null_basis(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return a **primitive** integer basis for the null space of plane_int.
 
-    Finds e1, e2 ∈ Z³ such that:
+    Finds e1, e2 in Z^3 such that:
 
-    * ``plane_int · e1 = 0`` and ``plane_int · e2 = 0`` (both in-plane), and
-    * ``e1 × e2 = plane_int`` (the basis spans the *full* integer plane lattice,
+    * ``plane_int * e1 = 0`` and ``plane_int * e2 = 0`` (both in-plane), and
+    * ``e1 x e2 = plane_int`` (the basis spans the *full* integer plane lattice,
       not a coarser sublattice).
 
     The construction applies unimodular column operations (Smith-Normal-Form
     style) to ``[h, k, l]`` until it becomes ``[g, 0, 0]`` with g = gcd = 1,
-    tracking the transformations in V ∈ GL₃(Z).  Because V is unimodular,
+    tracking the transformations in V in GL₃(Z).  Because V is unimodular,
     columns 1 and 2 of V are exactly the primitive null vectors.
 
-    The cross-product criterion ``e1 × e2 = ±plane_int`` ensures the 2-D
+    The cross-product criterion ``e1 x e2 = ±plane_int`` ensures the 2-D
     integer lattice in the plane is covered without gaps — the previous
     axis-aligned cross-product formula could return vectors whose span had
     index > 1 (e.g. plane [5,2,3] gave index-5 sublattice, causing
@@ -557,7 +557,7 @@ def _plane_null_basis(
     # V is unimodular, so [h,k,l] @ V[:,1:] == [0,0] and V[:,1:] is primitive.
     e1 = V[:, 1].astype(float)
     e2 = V[:, 2].astype(float)
-    # Guarantee e1 × e2 = +plane_int (not −plane_int) for a consistent orientation.
+    # Guarantee e1 x e2 = +plane_int (not −plane_int) for a consistent orientation.
     if np.dot(np.cross(e1, e2), plane_int) < 0:
         e2 = -e2
     return e1, e2
@@ -574,12 +574,12 @@ def solve_inplane_csl(
     A CSL (Coincidence Site Lattice) vector is an integer lattice vector v of
     grain 1 that is also a lattice vector of grain 2, i.e. ``v @ R`` is an
     integer vector (row-vector convention).  This function finds the two
-    shortest such vectors that lie in the boundary plane ``plane · v = 0``.
+    shortest such vectors that lie in the boundary plane ``plane * v = 0``.
 
     The search works in the 2-D integer lattice spanned by the two null-space
     basis vectors of ``plane`` (see ``_plane_null_basis``).  Every candidate
-    ``v = s·e1 + t·e2`` is tested against the CSL condition
-    ``(v @ M_int) % N == 0`` where ``M_int = round(N·R)`` and N is the sigma
+    ``v = s*e1 + t*e2`` is tested against the CSL condition
+    ``(v @ M_int) % N == 0`` where ``M_int = round(N*R)`` and N is the sigma
     value recovered from R.
 
     :param axis: Integer Miller rotation axis [u v w] (used for documentation
@@ -588,7 +588,7 @@ def solve_inplane_csl(
         crystal frame.
     :param R: Exact rotation matrix from ``quaternion_to_rotation_matrix``.
     :param max_exact_atoms: Guard on cell size.  Raises if the area of the
-        in-plane CSL unit cell (``|v1 × v2|``) exceeds this value, which would
+        in-plane CSL unit cell (``|v1 x v2|``) exceeds this value, which would
         produce an impractically large simulation cell.
     :return: ``(v1, v2)`` — two linearly independent in-plane CSL vectors,
         before Gauss reduction.  Pass to ``reduce_2d_basis`` to get the
@@ -629,7 +629,7 @@ def reduce_2d_basis(
 
     :param v1: First in-plane basis vector (integer-valued).
     :param v2: Second in-plane basis vector (integer-valued).
-    :return: ``(r1, r2)`` — reduced basis, ``‖r1‖ ≤ ‖r2‖``.
+    :return: ``(r1, r2)`` — reduced basis, ``||r1|| <= ||r2||``.
     """
     r1, r2 = _gauss_reduce_2d(v1, v2)
     return r1.astype(float), r2.astype(float)
@@ -727,7 +727,7 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
 
         Q[row i] = gcd_reduce(P[row i] @ M_int)
 
-    where ``M_int = round(N · R)`` and N is recovered from R.  This formula
+    where ``M_int = round(N * R)`` and N is recovered from R.  This formula
     is equivalent to rotating each lab axis from grain 1's crystal frame into
     grain 2's crystal frame — exactly what R_right encodes.  After
     ``canonicalize_pq`` the resulting matrices are identical to what a
@@ -804,7 +804,7 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     )
     r1, _r2 = reduce_2d_basis(v1, v2)
     e1 = _row_gcd_reduce(r1)
-    # e2 = plane_int × e1 is orthogonal to both, keeping P rows mutually
+    # e2 = plane_int x e1 is orthogonal to both, keeping P rows mutually
     # orthogonal so the normalized rows form a proper rotation matrix.
     e2 = _row_gcd_reduce(np.cross(plane_int, e1).astype(int))
     P = np.array([
@@ -822,10 +822,10 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     P_canon, Q_canon = canonicalize_pq(P, Q)
 
     # Re-check the cell size using the actual constructed matrices.
-    # solve_inplane_csl guards |v1 × v2| (the CSL in-plane area), but e2 is
-    # defined as plane × e1 rather than the second CSL vector, so det(P)
-    # equals |plane|²·|e1|², which can exceed the CSL area by a factor of
-    # |plane|² for non-(100) boundaries.
+    # solve_inplane_csl guards |v1 x v2| (the CSL in-plane area), but e2 is
+    # defined as plane x e1 rather than the second CSL vector, so det(P)
+    # equals |plane|^2*|e1|^2, which can exceed the CSL area by a factor of
+    # |plane|^2 for non-(100) boundaries.
     det_P = abs(_int_det3(np.round(P_canon).astype(int)))
     det_Q = abs(_int_det3(np.round(Q_canon).astype(int)))
     if max(det_P, det_Q) > max_exact_atoms:
@@ -885,7 +885,7 @@ def csl_approx_spec_to_embedding(spec) -> BoundaryEmbedding:
     R_mis = Rotation.from_rotvec(axis_unit * angle_rad).as_matrix()
 
     # Build R_left: row 0 = plane unit normal; rows 1–2 = orthogonal in-plane
-    # directions.  e2 = plane × e1 is orthogonal to both by construction.
+    # directions.  e2 = plane x e1 is orthogonal to both by construction.
     plane_int = _row_gcd_reduce(np.round(plane).astype(int))
     e1, _ = _plane_null_basis(plane_int)
     e1 = _row_gcd_reduce(e1)
