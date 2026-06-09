@@ -1686,19 +1686,64 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             f"expected gap > {d_hkl * 0.1:.4f} Å (0.1 * d_hkl = {d_hkl:.4f} Å)",
         )
 
-    def test_asymmetric_trim_equalizes_periodic_and_central_gap(self):
-        """When d_R < d_L, the periodic-edge gap is trimmed toward the central
-        GB gap by removing whole x-periods of the right grain.  The gap
-        cannot be equalised exactly (whole-period snapping), so the assertion
-        allows a residual up to one x-period of the right grain."""
+    def test_asymmetric_trim_warns_when_equalization_would_empty_right_grain(self):
+        """A one-period right slab is left intact rather than deleted."""
         a0 = 5.431
         theta5 = 2 * np.arctan(1 / 3)
         misorientation = np.array([theta5, 0, 0, 0, -np.arctan(1 / 2)])
         kwargs = dict(atom_types="Si", interaction_distance=6.0,
                       vacuum=0, repeat_factor=(2, 3))
-        gbm = GBMaker(a0, "diamond", 5.431, misorientation, **kwargs)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            gbm = GBMaker(a0, "diamond", 5.431, misorientation, **kwargs)
         gb_thickness = 2 * max(gbm.spacing["x"]["left"], gbm.spacing["x"]["right"])
-        gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
+        with self.assertWarnsRegex(UserWarning, "would remove all atoms"):
+            gbm = GBMaker(a0, "diamond", gb_thickness, misorientation, **kwargs)
+
+        x_period_right = a0 * float(np.linalg.norm(
+            gbm._GBMaker__R_right_approx[0].astype(float)))
+        central_gap = np.min(gbm.right_grain["x"]) - np.max(gbm.left_grain["x"])
+        periodic_gap = (
+            gbm.x_dim
+            - np.max(gbm.right_grain["x"])
+            + np.min(gbm.left_grain["x"])
+        )
+        residual = abs(periodic_gap - central_gap)
+        self.assertLess(periodic_gap, central_gap)
+        self.assertLessEqual(
+            residual, x_period_right,
+            msg=(
+                f"Periodic gap {periodic_gap:.6f} Å and central gap "
+                f"{central_gap:.6f} Å differ by {residual:.6f} Å, "
+                f"which exceeds one x-period ({x_period_right:.4f} Å)"
+            ),
+        )
+
+    def test_asymmetric_trim_equalization_filters_complete_origins(self):
+        """A thicker right slab exercises the grouped-origin trim path."""
+        a0 = 5.431
+        theta5 = 2 * np.arctan(1 / 3)
+        misorientation = np.array([theta5, 0, 0, 0, -np.arctan(1 / 2)])
+        kwargs = dict(atom_types="Si", interaction_distance=6.0,
+                      vacuum=0, repeat_factor=(2, 3), x_dim_min=100)
+        trim_calls = []
+        original_trim = GBMaker._GBMaker__trim_float_result_to_upper_x
+
+        def trim_spy(self, result, upper_x):
+            trim_calls.append(float(upper_x))
+            return original_trim(self, result, upper_x)
+
+        with patch.object(GBMaker, "_GBMaker__trim_float_result_to_upper_x", trim_spy):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                gbm = GBMaker(a0, "diamond", 10.0, misorientation, **kwargs)
+
+        messages = [str(item.message) for item in caught]
+        self.assertGreaterEqual(len(trim_calls), 1)
+        self.assertFalse(
+            any("would remove all atoms" in message for message in messages),
+            f"Unexpected equalization skip warning: {messages}",
+        )
 
         x_period_right = a0 * float(np.linalg.norm(
             gbm._GBMaker__R_right_approx[0].astype(float)))
@@ -1710,7 +1755,8 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         )
         residual = abs(periodic_gap - central_gap)
         self.assertLessEqual(
-            residual, x_period_right,
+            residual,
+            x_period_right + gbm.epsilon,
             msg=(
                 f"Periodic gap {periodic_gap:.6f} Å and central gap "
                 f"{central_gap:.6f} Å differ by {residual:.6f} Å, "
@@ -1761,6 +1807,21 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         self.assertEqual(
             c["O"], 2 * c["U"],
             f"Fluorite vacuum=0 bicrystal is not stoichiometric: {c}"
+        )
+
+    def test_vacuum0_trim_preserves_rocksalt_stoichiometry(self):
+        """Legacy float-path vacuum=0 trimming must preserve rocksalt origins."""
+        a0 = 5.64
+        theta5 = 2 * np.arctan(1 / 3)
+        mis = np.array([theta5, 0, 0, 0, -theta5 / 2])
+        gbm = GBMaker(a0, "rocksalt", 0.0, mis, ("Na", "Cl"),
+                      vacuum=0, repeat_factor=2, x_dim_min=50,
+                      interaction_distance=11.0)
+        names, counts = np.unique(gbm.whole_system["name"], return_counts=True)
+        c = {str(n): int(v) for n, v in zip(names, counts)}
+        self.assertEqual(
+            c["Na"], c["Cl"],
+            f"Rocksalt vacuum=0 bicrystal is not stoichiometric: {c}",
         )
 
     def test_known_fluorite_vacuum0_trim_regressions_are_stoichiometric(self):

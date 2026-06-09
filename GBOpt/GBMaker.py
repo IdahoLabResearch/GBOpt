@@ -88,6 +88,15 @@ class _AxisStrainAccommodation:
         )
 
 
+@dataclass(frozen=True)
+class _FloatGrainBuildResult:
+    """Float-path atoms plus the conventional-cell origin metadata behind them."""
+
+    atoms: np.ndarray
+    origin_ids: np.ndarray
+    basis_size: int
+
+
 class GBMakerError(Exception):
     """Base class for Exceptions in the GBMaker class."""
     pass
@@ -730,6 +739,7 @@ class GBMaker:
 
         left_n0_labels = None
         right_n0_labels = None
+        right_float_result: _FloatGrainBuildResult | None = None
         if use_exact:
             self.__left_grain, left_n0_labels = self.__generate_grain_exact(
                 self.__R_left,
@@ -746,32 +756,47 @@ class GBMaker:
                 "right",
             )
         else:
-            self.__left_grain = self.__generate_grain(
+            left_float_result = self.__generate_grain_result(
                 self.__R_left,
                 self.__R_left_approx,
                 left_bounds,
             )
+            self.__left_grain = left_float_result.atoms
             # For vacuum=0 (periodic-in-x), the right grain's last x-period
             # would wrap onto the left grain's first plane under PBC, creating
-            # a spurious double interface. Build one period shorter so the
-            # grain ends before its own upper boundary — stoichiometric because
-            # we exclude a complete origin period rather than float-slicing.
+            # a spurious double interface. Trim one period from the high-x side
+            # by removing complete conventional-cell origins rather than
+            # float-slicing individual atoms.
             # Guard: only trim when at least two x-periods remain after the
             # reduction. If the grain spans only one period the trim would
             # remove all atoms; in that case skip the stoichiometric trim and
             # rely on the gap-equalization step below.
             x_period_right = self.__x_period(self.__R_right_approx)
             vacuum0_trim_applied = False
-            if (self.__vacuum_thickness == 0
-                    and right_bounds_eff[1] - right_bounds_eff[0]
-                    > x_period_right * (1 + self.__epsilon)):
-                right_bounds_eff[1] -= x_period_right
-                vacuum0_trim_applied = True
-            self.__right_grain = self.__generate_grain(
+            right_float_result = self.__generate_grain_result(
                 self.__R_right,
                 self.__R_right_approx,
                 right_bounds_eff,
             )
+            if (self.__vacuum_thickness == 0
+                    and right_bounds_eff[1] - right_bounds_eff[0]
+                    > x_period_right * (1 + self.__epsilon)):
+                new_upper = right_bounds_eff[1] - x_period_right
+                trial_result = self.__trim_float_result_to_upper_x(
+                    right_float_result, new_upper
+                )
+                if len(trial_result.atoms) == 0:
+                    warnings.warn(
+                        "Vacuum=0 trim would remove all atoms from the right "
+                        "grain. Skipping trim to preserve a non-empty grain.",
+                        UserWarning,
+                        stacklevel=3,
+                    )
+                else:
+                    right_float_result = trial_result
+                    right_bounds_eff[1] = new_upper
+                    vacuum0_trim_applied = True
+            self.__right_grain = right_float_result.atoms
 
         # High-x overflow removal (exact path only). Basis-atom offsets can
         # push atoms from the left grain's last crystallographic x-layer past
@@ -877,9 +902,10 @@ class GBMaker:
                 # Period-based equalization: compute how many whole x-periods
                 # of the right grain must be removed so that the periodic gap
                 # grows to match the central gap.  Removing n complete periods
-                # is stoichiometric (adjacent periods overlap in x-coordinate
-                # space for multi-species structures, so no float threshold can
-                # cleanly separate them — see Step 15a rationale).
+                # is implemented by filtering complete conventional-cell
+                # origins from the already-built grain, so multi-species bases
+                # are not split by an atom-level x threshold.
+                assert right_float_result is not None
                 excess = right_max_x - (right_bounds_eff[1] - central_gap)
                 n_remove = max(1, math.ceil(excess / x_period_right))
                 new_upper = right_bounds_eff[1] - n_remove * x_period_right
@@ -898,11 +924,34 @@ class GBMaker:
                             f"({n_remove * x_period_right:.4f} Å) — more than half "
                             "the right grain. The resulting bicrystal may be unusable."
                         )
-                    self.__right_grain = self.__generate_grain(
-                        self.__R_right,
-                        self.__R_right_approx,
-                        np.array([right_bounds_eff[0], new_upper], dtype=np.float64),
+                    trial_result = self.__trim_float_result_to_upper_x(
+                        right_float_result, new_upper
                     )
+                    if len(trial_result.atoms) == 0:
+                        warnings.warn(
+                            f"Gap equalization would remove all atoms from the right "
+                            f"grain ({n_remove} x-periods; right_x = "
+                            f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} Å, "
+                            f"x_period = {x_period_right:.4f} Å). "
+                            "Skipping equalization to preserve non-empty grain."
+                        )
+                    else:
+                        right_float_result = trial_result
+                        self.__right_grain = right_float_result.atoms
+                        final_periodic_gap = (
+                            (right_bounds_eff[1] - np.max(self.__right_grain["x"]))
+                            + (left_min_x - left_bounds[0])
+                        )
+                        if final_periodic_gap < central_gap - self.__epsilon:
+                            warnings.warn(
+                                f"Float gap equalization: periodic_gap "
+                                f"({final_periodic_gap:.4f} Å) < central_gap "
+                                f"({central_gap:.4f} Å). Stoichiometry preserved; "
+                                "matching would require splitting an origin or "
+                                "deleting the right grain.",
+                                UserWarning,
+                                stacklevel=3,
+                            )
             # When d_L < d_R (left grain denser in x), the periodic-edge gap equals d_R
             # which exceeds central_gap, so the fix above does not fire. This leaves
             # extra interfacial volume at the x periodic boundary. NPT simulations will
@@ -1106,19 +1155,19 @@ class GBMaker:
             np.linalg.norm(np.asarray(R_grain_approx[0], dtype=float))
         )
 
-    def __generate_grain(
+    def __generate_grain_result(
         self,
         R_grain: np.ndarray,
         R_grain_approx: np.ndarray,
         x_bounds: np.ndarray,
-    ) -> np.ndarray:
+    ) -> _FloatGrainBuildResult:
         """
         Generate one grain by enumerating lattice coefficients over a bounded slab.
 
         :param R_grain: Rotation matrix for the grain.
         :param R_grain_approx: Integer approximation of ``R_grain``.
         :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
-        :return: Structured atom array for the selected grain.
+        :return: Atoms plus complete-origin metadata for the selected grain.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
 
@@ -1200,7 +1249,31 @@ class GBMaker:
             atoms, origin_ids, x_bounds, basis_size
         )
 
-        return self.__deduplicate_complete_origins(atoms, origin_ids, basis_size)
+        atoms, origin_ids = self.__deduplicate_complete_origins(
+            atoms, origin_ids, basis_size
+        )
+        return _FloatGrainBuildResult(
+            atoms=atoms,
+            origin_ids=origin_ids,
+            basis_size=basis_size,
+        )
+
+    def __generate_grain(
+        self,
+        R_grain: np.ndarray,
+        R_grain_approx: np.ndarray,
+        x_bounds: np.ndarray,
+    ) -> np.ndarray:
+        """
+        Generate one grain and return only the structured atom array.
+
+        This wrapper preserves the historical private-method behavior while the
+        active float construction path uses ``__generate_grain_result`` so later
+        trimming can remove complete conventional-cell origins.
+        """
+        return self.__generate_grain_result(
+            R_grain, R_grain_approx, x_bounds
+        ).atoms
 
     def __set_gb_region(self):
         """
@@ -1595,12 +1668,12 @@ class GBMaker:
 
     def __deduplicate_complete_origins(
         self, atoms: np.ndarray, origin_ids: np.ndarray, basis_size: int
-    ) -> np.ndarray:
+    ) -> "tuple[np.ndarray, np.ndarray]":
         """
         Remove duplicate complete-origin groups using full basis signatures.
         """
         if len(atoms) == 0:
-            return atoms
+            return atoms, origin_ids
 
         basis_size = int(basis_size)
         if basis_size <= 0:
@@ -1637,7 +1710,42 @@ class GBMaker:
         keep_groups = np.zeros(n_origins, dtype=bool)
         keep_groups[np.sort(unique_group_indices)] = True
         grouped_atoms = atoms.reshape(n_origins, basis_size)
-        return grouped_atoms[keep_groups].reshape(-1).copy()
+        grouped_ids = origin_ids.reshape(n_origins, basis_size)
+        return (
+            grouped_atoms[keep_groups].reshape(-1).copy(),
+            grouped_ids[keep_groups].reshape(-1).copy(),
+        )
+
+    def __filter_float_result_complete_origins(
+        self,
+        result: _FloatGrainBuildResult,
+        atom_mask: np.ndarray,
+    ) -> _FloatGrainBuildResult:
+        """
+        Filter a float build result by complete conventional-cell origins.
+        """
+        atoms, origin_ids = self.__filter_complete_origins(
+            result.atoms,
+            result.origin_ids,
+            atom_mask,
+            result.basis_size,
+        )
+        return _FloatGrainBuildResult(
+            atoms=atoms,
+            origin_ids=origin_ids,
+            basis_size=result.basis_size,
+        )
+
+    def __trim_float_result_to_upper_x(
+        self,
+        result: _FloatGrainBuildResult,
+        upper_x: float,
+    ) -> _FloatGrainBuildResult:
+        """
+        Trim a float-path grain to an upper x bound by whole origin groups.
+        """
+        atom_mask = result.atoms["x"] < float(upper_x) - self.__epsilon
+        return self.__filter_float_result_complete_origins(result, atom_mask)
 
     def __select_atoms_in_box_basis(
         self,
