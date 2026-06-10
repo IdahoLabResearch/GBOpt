@@ -203,6 +203,15 @@ def test_integer_quaternion_from_unit_unrecoverable_quaternion_raises():
         integer_quaternion_from_unit(irrational, max_denominator=2)
 
 
+def test_integer_quaternion_from_unit_accepts_numpy_max_denominator():
+    result = integer_quaternion_from_unit(
+        SIGMA5_QUAT_NORM,
+        max_denominator=np.int64(5),
+    )
+
+    assert result == (2, 0, 0, 1)
+
+
 # --------------------------------------------------------------------------------------
 # quaternion_to_rotation_matrix
 # --------------------------------------------------------------------------------------

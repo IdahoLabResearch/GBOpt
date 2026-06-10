@@ -10,6 +10,7 @@ rank-deficient inputs rather than silently rounding.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -65,6 +66,37 @@ def as_int_vector(values: ArrayLike, length: int, name: str) -> tuple[int, ...]:
     return _translate_exact_error(ilinalg.as_int_vector, values, length, name)
 
 
+def as_positive_int(value: object, name: str) -> int:
+    """Return a positive Python integer from an integer scalar.
+
+    Boolean values are rejected even though ``bool`` is a subclass of ``int``.
+
+    :param value: Candidate Python or NumPy integer scalar.
+    :param name: Parameter name used in validation error messages.
+    :return: Validated value converted to a Python ``int``.
+    :raises CrystallographyValueError: If ``value`` is not an integer scalar or is
+        less than or equal to zero.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        )
+
+    try:
+        result = operator.index(value)  # type: ignore[ty:invalid-argument-type]
+    except TypeError as exc:
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        ) from exc
+
+    if result <= 0:
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        )
+
+    return int(result)
+
+
 def row_gcd_reduce(row: np.ndarray) -> np.ndarray:
     """Divide an integer-valued row by the GCD of its absolute components.
 
@@ -116,6 +148,7 @@ def integer_adj3(matrix: ArrayLike) -> list[list[int]]:
 __all__ = [
     "as_int_array",
     "as_int_vector",
+    "as_positive_int",
     "row_gcd_reduce",
     "dot_int",
     "cross_int3",

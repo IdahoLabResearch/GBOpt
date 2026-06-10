@@ -1,5 +1,7 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+from __future__ import annotations
+
 import io
 import json
 import subprocess
@@ -487,26 +489,40 @@ def test_convert_rejects_malformed_json(capsys):
     assert "Expecting property name" in stderr
 
 
-def test_exactify_reports_unavailable_operation_as_error(capsys):
-    stderr = _run_main_error(
-        capsys,
-        "exactify",
-        "--params", 0, 0, 0, 0, 0,
-    )
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param(
+            (
+                "exactify",
+                "--params",
+                0,
+                0,
+                0,
+                0,
+                0,
+            ),
+            id="exactify-command",
+        ),
+        pytest.param(
+            (
+                "convert",
+                "--to",
+                "pq",
+                "--input-json",
+                json.dumps(FIVE_DOF_ZERO_SOURCE),
+            ),
+            id="convert-command",
+        ),
+    ],
+)
+def test_five_dof_exactification_commands_output_identity_pq(
+    capsys,
+    args,
+):
+    payload = _run_main_json(capsys, *args)
 
-    assert "exactification is not implemented" in stderr
-
-
-def test_convert_five_dof_to_pq_reports_exactification_gap(capsys):
-    stderr = _run_main_error(
-        capsys,
-        "convert",
-        "--to", "pq",
-        "--input-json", json.dumps(FIVE_DOF_ZERO_SOURCE),
-    )
-
-    assert "exactification" in stderr
-    assert "not implemented" in stderr
+    assert payload == IDENTITY_PQ_SOURCE
 
 
 def test_convert_rejects_unsupported_csl_target_at_parse_time(capsys):

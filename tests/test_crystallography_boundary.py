@@ -20,7 +20,6 @@ from GBOpt.crystallography.boundary import (
 )
 from GBOpt.crystallography.integer import as_int_array, integer_det3
 from GBOpt.crystallography.pq import (
-    canonicalize_pq,
     recover_exact_row_rotation_from_paired_pq,
 )
 from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
@@ -121,21 +120,25 @@ def test_pq_spec_to_embedding_identity_r_left_r_right(identity_pq_spec):
     np.testing.assert_allclose(emb.R_right, np.eye(3), atol=1e-12, rtol=0.0)
 
 
-def test_pq_spec_to_embedding_sigma5_r_right_matches_canonical(sigma5_supplied_pq_spec):
-    emb = pq_spec_to_embedding(sigma5_supplied_pq_spec)
+def test_pq_spec_to_embedding_sigma5_r_right_matches_expected(
+    sigma5_supplied_pq_spec,
+):
+    embedding = pq_spec_to_embedding(sigma5_supplied_pq_spec)
 
-    P_raw = np.array(SIGMA5_36_P, dtype=float)
-    Q_raw = np.array(SIGMA5_36_Q, dtype=float)
-    _, Q_c = canonicalize_pq(P_raw, Q_raw)
-
-    Q_c_float = np.asarray(Q_c, dtype=float)
-    R_right_expected = Q_c_float / np.linalg.norm(
-        Q_c_float,
-        axis=1,
-        keepdims=True,
+    expected = np.array(
+        [
+            [4.0 / 5.0, -3.0 / 5.0, 0.0],
+            [3.0 / 5.0, 4.0 / 5.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
     )
 
-    np.testing.assert_allclose(emb.R_right, R_right_expected, atol=1e-12, rtol=0.0)
+    np.testing.assert_allclose(
+        embedding.R_right,
+        expected,
+        atol=1.0e-12,
+        rtol=0.0,
+    )
 
 
 def test_pq_spec_to_embedding_sigma5_r_right_is_proper_rotation(

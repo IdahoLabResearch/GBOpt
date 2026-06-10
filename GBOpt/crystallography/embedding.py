@@ -7,6 +7,9 @@ bases, plane covectors, P/Q matrices) and return ``BoundaryEmbedding`` objects.
 Boundary-spec parsing and user-facing validation belong in boundary.py; CSL arithmetic
 belongs in csl.py.
 """
+from __future__ import annotations
+
+import math
 from typing import Literal
 
 import numpy as np
@@ -23,13 +26,93 @@ from .csl import csl_from_scaled_rotation
 from .integer import as_int_array, integer_det3, row_gcd_reduce
 from .orientation import validate_orientation_matrix
 from .plane import inplane_area_index, inplane_basis_from_csl
-from .pq import canonicalize_pq, canonicalize_pq_paired
+from .pq import (
+    canonicalize_pq_paired,
+    recover_exact_row_rotation_from_paired_pq,
+)
 from .reduction import gauss_reduce_2d
 from .rotation import (
+    _minimal_integral_row_pair,
     _scaled_row_images,
     transpose_rotation_convention,
 )
 from .types import CrystallographyValueError, InPlaneBasis, ScaledRotation
+
+
+def _paired_pq_from_direction_rows(
+    direction_rows: np.ndarray,
+    row_rotation: ScaledRotation,
+    *,
+    primitive_area_index: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Build exact paired P/Q orientation matrices from reference directions.
+
+    Each row in ``direction_rows`` is paired with its exact image under
+    ``row_rotation`` by :func:`_exact_paired_row`. The resulting ``P`` and ``Q`` rows
+    therefore satisfy the same exact row-convention rotation without relying on
+    floating-point inversion.
+
+    Primitive ``PQSpec`` re-embedding requires the supplied in-plane area index to be an
+    integer multiple of the primitive CSL area index. When the minimally paired rows do
+    not satisfy that divisibility invariant, the second row of both matrices is enlarged
+    by the smallest common integer factor that makes the input area index divisible by
+    ``primitive_area_index``. Applying the same factor to both rows preserves their
+    exact pairing.
+
+    The completed matrices are required to be proper row-wise orientation frames, and
+    their exactly recovered rotation is compared with ``row_rotation`` by integer cross
+    multiplication so equivalent numerator/denominator representations compare without
+    floating-point error.
+
+    :param direction_rows: Three integer-valued reference-grain directions arranged as
+        a 3 by 3 row matrix. Row 0 is the boundary normal and rows 1 and 2 are in-plane
+        directions forming a proper orientation frame after pairing and any area
+        adjustment.
+    :param row_rotation: Valid exact row-convention scaled rotation mapping each ``P``
+        row to the corresponding ``Q`` row.
+    :param primitive_area_index: Positive primitive CSL in-plane area index that the
+        returned ``P`` matrix must contain as an integer divisor of its own in-plane area
+        index. Keyword argument, required.
+    :return: ``(P, Q)`` as object-dtype 3 by 3 integer matrices with exact row pairing,
+        proper orientation-frame geometry, and a ``P`` in-plane area index divisible by
+        ``primitive_area_index``.
+    :raises CrystallographyValueError: If the input rows cannot be paired exactly, the
+        resulting matrices do not form proper row-wise orientation frames, an in-plane
+        area index cannot be computed, or exact recovery from ``P`` and ``Q`` does not
+        reproduce ``row_rotation``.
+    """
+    paired_rows = [
+        _minimal_integral_row_pair(row, row_rotation)
+        for row in np.asarray(direction_rows, dtype=object)
+    ]
+    P = np.array([pair[0] for pair in paired_rows], dtype=object)
+    Q = np.array([pair[1] for pair in paired_rows], dtype=object)
+
+    input_area_index = inplane_area_index(P)
+    area_factor = primitive_area_index // math.gcd(
+        input_area_index,
+        primitive_area_index,
+    )
+    if area_factor > 1:
+        P[1] *= area_factor
+        Q[1] *= area_factor
+
+    validate_orientation_matrix(P, "P")
+    validate_orientation_matrix(Q, "Q")
+
+    recovered = recover_exact_row_rotation_from_paired_pq(P, Q)
+    recovered_numerator = (
+        np.asarray(recovered.matrix, dtype=object) * row_rotation.denominator
+    )
+    expected_numerator = (
+        np.asarray(row_rotation.matrix, dtype=object) * recovered.denominator
+    )
+    if not np.array_equal(recovered_numerator, expected_numerator):
+        raise CrystallographyValueError(
+            "Internal error: exact paired P/Q rows changed the recovered rotation."
+        )
+
+    return P, Q
 
 
 def _validated_rotation_rows(
@@ -364,7 +447,7 @@ def orthogonal_embedding_from_row_rotation_and_plane(
         dtype=object,
     )
 
-    P_canon, Q_canon = canonicalize_pq(P_int, Q_int)
+    P_canon, Q_canon = canonicalize_pq_paired(P_int, Q_int)
 
     # Validate the returned orientation frames before computing optional metadata
     # from those rows. This preserves BoundarySpecOrthogonalityError for malformed

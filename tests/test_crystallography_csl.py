@@ -91,21 +91,21 @@ def test_sigma_from_snf_diagonal_returns_sigma1_moduli():
 
 
 @pytest.mark.parametrize(
-    ("denominator", "diagonal"),
+    "denominator",
     [
-        pytest.param(0, (1, 1, 1), id="zero"),
-        pytest.param(-5, (1, 1, 5), id="negative"),
+        pytest.param(0, id="zero"),
+        pytest.param(-5, id="negative"),
+        pytest.param(5.5, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param("5", id="string"),
     ],
 )
-def test_sigma_from_snf_diagonal_rejects_nonpositive_denominator(
-    denominator,
-    diagonal,
-):
+def test_sigma_from_snf_diagonal_rejects_invalid_denominator(denominator):
     with pytest.raises(
         CrystallographyValueError,
-        match=f"denominator must be positive; got {denominator}",
+        match="denominator must be a positive integer",
     ):
-        sigma_from_snf_diagonal(denominator, diagonal)
+        sigma_from_snf_diagonal(denominator, (1, 5, 25))
 
 
 # --------------------------------------------------------------------------------------
@@ -225,6 +225,7 @@ def test_verify_coincidence_basis_rejects_sigma_mismatch_by_determinant():
         pytest.param(-1, id="negative"),
         pytest.param(1.5, id="float"),
         pytest.param("5", id="string"),
+        pytest.param(True, id="bool"),
     ],
 )
 def test_verify_coincidence_basis_rejects_invalid_sigma(sigma):
@@ -391,6 +392,7 @@ def test_dsc_basis_rejects_sigma_mismatch():
         pytest.param(-1, id="negative"),
         pytest.param(1.5, id="float"),
         pytest.param("5", id="string"),
+        pytest.param(True, id="bool"),
     ],
 )
 def test_dsc_basis_rejects_invalid_sigma(sigma):

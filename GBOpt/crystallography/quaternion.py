@@ -18,7 +18,7 @@ from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation
 
 from ._guards import _require_cubic
-from .integer import as_int_vector
+from .integer import as_int_vector, as_positive_int
 from .types import (
     CrystallographyValueError,
     Int4,
@@ -107,18 +107,12 @@ def integer_quaternion_from_unit(quat: ArrayLike, *, max_denominator: int = 1000
         integer quaternion does not match the supplied unit quaternion.
     """
     arr = np.asarray(quat, dtype=float)
+    max_denominator = as_positive_int(max_denominator, "max_denominator")
     if arr.shape != (4,):
         raise CrystallographyValueError(f"quat must have shape (4,); got {arr.shape}.")
     if not np.all(np.isfinite(arr)):
         raise CrystallographyValueError("quat must contain only finite values.")
-    if (
-        not isinstance(max_denominator, int)
-        or max_denominator < 1
-        or isinstance(max_denominator, (bool, np.bool_))
-    ):
-        raise CrystallographyValueError(
-            f"max_denominator must be a positive integer, got {max_denominator!r}."
-        )
+
     # 1e-14: numerical zero floor (well below float64 machine epsilon ~2.2e-16 times
     # typical quaternion magnitudes); components smaller than this are treated as
     # exactly zero before computing ratios relative to the largest-magnitude component.

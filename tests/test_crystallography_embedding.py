@@ -10,6 +10,7 @@ from GBOpt.BoundarySpec import (
     BoundarySpecOrthogonalityError,
 )
 from GBOpt.crystallography.embedding import (
+    _paired_pq_from_direction_rows,
     embedding_from_pq,
     embedding_from_rotation_rows,
     orthogonal_embedding_from_row_rotation_and_plane,
@@ -17,6 +18,8 @@ from GBOpt.crystallography.embedding import (
     primitive_metadata,
 )
 from GBOpt.crystallography.integer import as_int_array
+from GBOpt.crystallography.plane import inplane_area_index
+from GBOpt.crystallography.pq import recover_exact_row_rotation_from_paired_pq
 
 # --------------------------------------------------------------------------------------
 # Fixtures
@@ -532,3 +535,137 @@ def test_orthogonal_embedding_records_input_area_reduction_index(
     assert result.metadata.input_area_index == input_area_index
     assert result.metadata.primitive_area_index == primitive_area_index
     assert result.metadata.input_reduction_index == 4
+
+
+def test_orthogonal_embedding_preserves_sigma3_misorientation(
+    sigma3_111_rotation,
+):
+    result = orthogonal_embedding_from_row_rotation_and_plane(
+        sigma3_111_rotation,
+        np.array([1, 1, 1]),
+        source="csl",
+    )
+
+    expected_rotation = (
+        np.asarray(sigma3_111_rotation.matrix, dtype=np.float64)
+        / sigma3_111_rotation.denominator
+    )
+
+    np.testing.assert_allclose(
+        result.R_left.T @ result.R_right,
+        expected_rotation,
+        atol=1.0e-12,
+        rtol=0.0,
+    )
+
+
+def test_orthogonal_embedding_preserves_sigma3_row_image_directions(
+    sigma3_111_rotation,
+):
+    result = orthogonal_embedding_from_row_rotation_and_plane(
+        sigma3_111_rotation,
+        np.array([1, 1, 1]),
+        source="csl",
+    )
+
+    assert result.P is not None
+    assert result.Q is not None
+
+    numerator_matrix = np.asarray(
+        sigma3_111_rotation.matrix,
+        dtype=object,
+    )
+
+    for p_row, q_row in zip(result.P, result.Q, strict=True):
+        image_numerator = (
+            np.asarray(p_row, dtype=object) @ numerator_matrix
+        )
+        q_row = np.asarray(q_row, dtype=object)
+
+        np.testing.assert_array_equal(
+            np.cross(
+                np.asarray(image_numerator, dtype=np.int64),
+                np.asarray(q_row, dtype=np.int64),
+            ),
+            np.zeros(3, dtype=np.int64),
+        )
+        assert int(image_numerator @ q_row) > 0
+
+
+# --------------------------------------------------------------------------------------
+# _paired_pq_from_direction_rows
+# --------------------------------------------------------------------------------------
+
+
+def test_paired_pq_from_direction_rows_builds_expected_sigma5_pair(
+    sigma5_53deg_rotation,
+):
+    P, Q = _paired_pq_from_direction_rows(
+        np.eye(3, dtype=object),
+        sigma5_53deg_rotation,
+        primitive_area_index=5,
+    )
+
+    expected_P = np.array(
+        [
+            [5, 0, 0],
+            [0, 5, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
+    )
+    expected_Q = np.array(
+        [
+            [3, -4, 0],
+            [4, 3, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
+    )
+
+    np.testing.assert_array_equal(P, expected_P)
+    np.testing.assert_array_equal(Q, expected_Q)
+
+
+def test_paired_pq_from_direction_rows_preserves_exact_rotation(
+    sigma5_53deg_rotation,
+):
+    P, Q = _paired_pq_from_direction_rows(
+        np.eye(3, dtype=object),
+        sigma5_53deg_rotation,
+        primitive_area_index=5,
+    )
+
+    recovered = recover_exact_row_rotation_from_paired_pq(P, Q)
+
+    np.testing.assert_array_equal(
+        np.asarray(recovered.matrix, dtype=object)
+        * sigma5_53deg_rotation.denominator,
+        np.asarray(sigma5_53deg_rotation.matrix, dtype=object)
+        * recovered.denominator,
+    )
+
+
+def test_paired_pq_from_direction_rows_enlarges_rows_as_exact_pairs():
+    from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
+
+    identity_rotation = quaternion_to_scaled_rotation((1, 0, 0, 0))
+
+    P, Q = _paired_pq_from_direction_rows(
+        np.eye(3, dtype=object),
+        identity_rotation,
+        primitive_area_index=3,
+    )
+
+    expected = np.array(
+        [
+            [1, 0, 0],
+            [0, 3, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
+    )
+
+    np.testing.assert_array_equal(P, expected)
+    np.testing.assert_array_equal(Q, expected)
+    assert inplane_area_index(P) == 3

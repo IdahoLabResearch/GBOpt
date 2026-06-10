@@ -4,7 +4,7 @@
 
 Import user-facing exact utilities from this package directly, for example::
 
-    from GBOpt.crystallography import csl_exact_spec_to_embedding, ``canonicalize_pq``
+    from GBOpt.crystallography import csl_exact_spec_to_embedding
 """
 
 from .boundary import (
@@ -30,7 +30,6 @@ from .orientation import (
     validate_orientation_matrix,
 )
 from .pq import (
-    canonicalize_pq,
     canonicalize_pq_paired,
     recover_exact_row_rotation_from_paired_pq,
 )
@@ -64,7 +63,6 @@ __all__ = [
     "inclination_from_normal",
     "normalize_direction",
     "validate_orientation_matrix",
-    "canonicalize_pq",
     "canonicalize_pq_paired",
     "recover_exact_row_rotation_from_paired_pq",
     "CoincidenceCheck",
