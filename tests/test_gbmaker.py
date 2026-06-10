@@ -10,6 +10,7 @@ import warnings
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 from scipy.spatial import KDTree
 
 from GBOpt.Atom import Atom, AtomValueError
@@ -21,6 +22,7 @@ from GBOpt.GBMaker import (
     wrap_reduced_coordinate,
 )
 from GBOpt.UnitCell import UnitCell
+from zhang2021_boundaries import BOUNDARIES
 
 
 class TestStrainAccommodation(unittest.TestCase):
@@ -2425,6 +2427,145 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         """
         gbm = self._make_gb(self.sigma3_111_60deg, repeat_factor=(2, 3))
         self._assert_interface_stacking(gbm, d_spacing=self.a0 / np.sqrt(3))
+
+
+@pytest.mark.slow
+class TestZhang2021ExactStoichiometry(unittest.TestCase):
+    """Exact-path stoichiometry sweep over all 178 Zhang 2021 UO₂ boundaries.
+
+    Each boundary is built via ``from_boundary_spec(..., mode='exact')`` using
+    the P/Q matrices from the dataset.  Boundaries whose P/Q leads to an
+    incommensurate shared box (raising ``GBMakerValueError``) are skipped rather
+    than failed; all others must satisfy ``O == 2 * U``.
+    """
+
+    A0 = 5.454
+    BUILD_KWARGS = dict(
+        gb_thickness=0.0,
+        vacuum=0,
+        repeat_factor=[1, 1],
+        x_dim_min=20,
+        interaction_distance=1.0,
+    )
+
+    def test_all_boundaries_exact_stoichiometric(self):
+        from GBOpt.BoundarySpec import PQSpec
+        from zhang2021_boundaries import BOUNDARIES
+
+        for name, entry in BOUNDARIES.items():
+            with self.subTest(boundary=name):
+                spec = PQSpec(P=entry["P"], Q=entry["Q"])
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        gb = GBMaker.from_boundary_spec(
+                            self.A0, "fluorite", ("U", "O"),
+                            spec, mode="exact",
+                            **self.BUILD_KWARGS,
+                        )
+                except GBMakerValueError:
+                    continue
+                names, counts = np.unique(
+                    gb.whole_system["name"], return_counts=True
+                )
+                c = {str(n): int(v) for n, v in zip(names, counts)}
+                self.assertEqual(
+                    c.get("O"), 2 * c.get("U", 0),
+                    f"{name}: O={c.get('O', 0)}, U={c.get('U', 0)}",
+                )
+
+
+@pytest.mark.slow
+class TestOlmsted2009ExactBuild(unittest.TestCase):
+    """Exact-path build-quality sweep over all 388 Olmsted 2009 fcc boundaries.
+
+    Each boundary is built via ``from_boundary_spec(..., mode='exact')`` using
+    the P/Q matrices from the dataset, with ``mismatch_tol=0.005`` to handle
+    incommensurate in-plane periods.  Three quality criteria are checked for
+    every boundary that builds successfully:
+
+    1. Whole-system atom array is non-empty and box dimensions are positive.
+    2. Left-grain atoms do not exceed ``gb_plane_x``; right-grain atoms do not
+       fall below it (no grain overlap in x).
+    3. No two atoms within the same grain are closer than 2 % of the ideal fcc
+       nearest-neighbour distance (degeneracy check).
+
+    Boundaries that raise ``GBMakerValueError`` (e.g. no commensurate pair
+    found within the tolerance) are skipped rather than failed.
+    """
+
+    A0 = 3.52
+    BUILD_KWARGS = dict(
+        gb_thickness=0.0,
+        vacuum=0,
+        repeat_factor=1,
+        x_dim_min=20.0,
+        interaction_distance=1.0,
+        mismatch_tol=0.005,
+        mismatch_max_cells=100,
+    )
+
+    def _quality_issues(self, gb) -> list[str]:
+        issues = []
+        ws = gb.whole_system
+        if ws is None or ws.shape[0] == 0:
+            issues.append("whole_system is empty")
+            return issues
+        for dim_name, dim_val in (("x", gb.x_dim), ("y", gb.y_dim), ("z", gb.z_dim)):
+            if not (np.isfinite(dim_val) and dim_val > 0):
+                issues.append(f"{dim_name}_dim = {dim_val:.6g} (non-positive or non-finite)")
+        eps = 1e-4 * self.A0
+        gb_x = gb.gb_plane_x
+        lg, rg = gb.left_grain, gb.right_grain
+        if lg is not None and lg.shape[0] > 0:
+            max_left_x = float(lg["x"].max())
+            if max_left_x > gb_x + eps:
+                issues.append(
+                    f"left grain atom at x={max_left_x:.6f} exceeds gb_plane_x={gb_x:.6f}"
+                )
+        if rg is not None and rg.shape[0] > 0:
+            min_right_x = float(rg["x"].min())
+            if min_right_x < gb_x - eps:
+                issues.append(
+                    f"right grain atom at x={min_right_x:.6f} below gb_plane_x={gb_x:.6f}"
+                )
+        expected_nn = self.A0 / np.sqrt(2)
+        threshold = 0.02 * expected_nn
+        for label, grain in (("left", lg), ("right", rg)):
+            if grain is None or grain.shape[0] < 2:
+                continue
+            pos = np.column_stack((grain["x"], grain["y"], grain["z"]))
+            tree = KDTree(pos)
+            min_nn = float(tree.query(pos, k=2)[0][:, 1].min())
+            if min_nn < threshold:
+                issues.append(
+                    f"degeneracy in {label} grain: min NN {min_nn:.4f} Å "
+                    f"< 2% of expected {expected_nn:.4f} Å"
+                )
+        return issues
+
+    def test_all_boundaries_build_and_pass_quality(self):
+        from GBOpt.BoundarySpec import PQSpec
+        from olmsted2009_boundaries import BOUNDARIES
+
+        for gb_idx, entry in BOUNDARIES.items():
+            with self.subTest(gb_index=gb_idx, sigma=entry["sigma"]):
+                spec = PQSpec(P=entry["P"], Q=entry["Q"])
+                try:
+                    with warnings.catch_warnings():
+                        warnings.simplefilter("ignore", UserWarning)
+                        gb = GBMaker.from_boundary_spec(
+                            self.A0, "fcc", "Ni",
+                            spec, mode="exact",
+                            **self.BUILD_KWARGS,
+                        )
+                except GBMakerValueError:
+                    continue
+                issues = self._quality_issues(gb)
+                self.assertEqual(
+                    issues, [],
+                    f"GB {gb_idx} (Σ{entry['sigma']}): " + "; ".join(issues),
+                )
 
 
 if __name__ == "__main__":
