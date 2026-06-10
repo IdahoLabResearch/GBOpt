@@ -4,6 +4,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+import GBOpt.crystallography.embedding as embedding_module
 from GBOpt.BoundarySpec import (
     BoundaryEmbedding,
     BoundarySpecError,
@@ -13,6 +14,7 @@ from GBOpt.crystallography.embedding import (
     _paired_pq_from_direction_rows,
     embedding_from_pq,
     embedding_from_rotation_rows,
+    exact_embedding_from_row_rotation_and_plane,
     orthogonal_embedding_from_row_rotation_and_plane,
     primitive_embedding_from_row_rotation,
     primitive_metadata,
@@ -669,3 +671,75 @@ def test_paired_pq_from_direction_rows_enlarges_rows_as_exact_pairs():
     np.testing.assert_array_equal(P, expected)
     np.testing.assert_array_equal(Q, expected)
     assert inplane_area_index(P) == 3
+
+
+# --------------------------------------------------------------------------------------
+# exact_embedding_from_row_rotation_and_plane
+# --------------------------------------------------------------------------------------
+
+
+def test_exact_embedding_uses_primitive_path_for_preserved_plane(
+    sigma5_53deg_rotation,
+):
+    result = exact_embedding_from_row_rotation_and_plane(
+        sigma5_53deg_rotation,
+        np.array([0, 0, 1]),
+        source="csl",
+    )
+
+    assert result.metadata is not None
+    assert result.metadata.plane == (0, 0, 1)
+    assert result.metadata.primitive_area_index == 5
+
+
+def test_exact_embedding_falls_back_when_primitive_rows_are_not_orthogonal(
+    monkeypatch,
+    sigma5_53deg_rotation,
+):
+    expected = object()
+
+    def reject_primitive(*args, **kwargs):
+        raise BoundarySpecOrthogonalityError("not orthogonal")
+
+    def return_orthogonal(*args, **kwargs):
+        return expected
+
+    monkeypatch.setattr(
+        embedding_module,
+        "primitive_embedding_from_row_rotation",
+        reject_primitive,
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "orthogonal_embedding_from_row_rotation_and_plane",
+        return_orthogonal,
+    )
+
+    result = exact_embedding_from_row_rotation_and_plane(
+        sigma5_53deg_rotation,
+        np.array([0, 0, 1]),
+        source="csl",
+    )
+
+    assert result is expected
+
+
+def test_exact_embedding_does_not_fallback_on_cell_size_error(
+    monkeypatch,
+    sigma5_53deg_rotation,
+):
+    def reject_primitive(*args, **kwargs):
+        raise BoundarySpecError("cell too large")
+
+    monkeypatch.setattr(
+        embedding_module,
+        "primitive_embedding_from_row_rotation",
+        reject_primitive,
+    )
+
+    with pytest.raises(BoundarySpecError, match="cell too large"):
+        exact_embedding_from_row_rotation_and_plane(
+            sigma5_53deg_rotation,
+            np.array([0, 0, 1]),
+            source="csl",
+        )

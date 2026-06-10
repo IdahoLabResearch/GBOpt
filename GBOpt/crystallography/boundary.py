@@ -29,13 +29,14 @@ from .csl import csl_from_scaled_rotation
 from .embedding import (
     embedding_from_pq,
     embedding_from_rotation_rows,
+    exact_embedding_from_row_rotation_and_plane,
     orthogonal_embedding_from_row_rotation_and_plane,
     primitive_embedding_from_row_rotation,
     primitive_metadata,
 )
 from .integer import row_gcd_reduce
 from .orientation import orientation_matrices_from_five_dof
-from .plane import inplane_area_index, plane_null_basis, rotation_preserves_plane
+from .plane import inplane_area_index, plane_null_basis
 from .pq import (
     canonicalize_pq_paired,
     recover_exact_row_rotation_from_paired_pq,
@@ -171,24 +172,9 @@ def csl_exact_spec_to_embedding(
                 f"gives {csl_sigma=}, but {spec.sigma=} was provided."
             )
 
-    plane_int = row_gcd_reduce(np.asarray(spec.plane, dtype=object))
-
-    if rotation_preserves_plane(rot, plane_int):
-        try:
-            return primitive_embedding_from_row_rotation(
-                rot,
-                plane_int,
-                source="csl",
-                max_exact_atoms=max_exact_atoms,
-            )
-        except BoundarySpecOrthogonalityError:
-            # Fall through to the orthogonal construction for plane-preserving rotations
-            # whose primitive in-plane CSL basis is not row-orthogonal.
-            pass
-
-    return orthogonal_embedding_from_row_rotation_and_plane(
+    return exact_embedding_from_row_rotation_and_plane(
         rot,
-        plane_int,
+        spec.plane,
         source="csl",
         max_exact_atoms=max_exact_atoms,
     )

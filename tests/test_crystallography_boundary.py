@@ -5,7 +5,6 @@ import pytest
 from GBOpt.BoundarySpec import (
     BoundaryEmbedding,
     BoundarySpecError,
-    BoundarySpecOrthogonalityError,
     CSLApproxSpec,
     CSLExactSpec,
     FiveDOFSpec,
@@ -502,51 +501,6 @@ def test_csl_exact_spec_uses_orthogonal_embedding_when_rotation_does_not_preserv
     assert emb.metadata.input_reduction_index is None
     assert emb.metadata.orientation_area_index == 1
     assert emb.metadata.plane == (1, 0, 0)
-    assert emb.metadata.rotation_denominator == 10
-    assert emb.metadata.conventional_cell_multiplier == 10
-
-
-def test_csl_exact_spec_to_embedding_orthogonality_error_uses_orthogonal_fallback(
-    monkeypatch,
-):
-    primitive_calls = []
-
-    def raise_orthogonality_error(row_rotation, plane, **kwargs):
-        primitive_calls.append(
-            {
-                "plane": tuple(int(x) for x in plane),
-                "source": kwargs.get("source"),
-                "max_exact_atoms": kwargs.get("max_exact_atoms"),
-            }
-        )
-        raise BoundarySpecOrthogonalityError("forced orthogonality failure")
-
-    monkeypatch.setattr(
-        "GBOpt.crystallography.boundary.primitive_embedding_from_row_rotation",
-        raise_orthogonality_error,
-    )
-
-    spec = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
-    emb = csl_exact_spec_to_embedding(spec)
-
-    assert primitive_calls == [
-        {
-            "plane": (0, 0, 1),
-            "source": "csl",
-            "max_exact_atoms": 10_000,
-        }
-    ]
-
-    _assert_embedding_flags(emb, exact=True, coherent=True, source="csl")
-    _assert_proper_rotation_pair(emb)
-
-    assert emb.metadata is not None
-    assert emb.metadata.basis_mode == "primitive"
-    assert emb.metadata.input_area_index is None
-    assert emb.metadata.primitive_area_index == 5
-    assert emb.metadata.input_reduction_index is None
-    assert emb.metadata.orientation_area_index == 5
-    assert emb.metadata.plane == (0, 0, 1)
     assert emb.metadata.rotation_denominator == 10
     assert emb.metadata.conventional_cell_multiplier == 10
 

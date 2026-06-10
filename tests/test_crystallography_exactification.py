@@ -298,3 +298,12 @@ def test_exactify_five_dof_rejects_invalid_bounds(keyword, value):
 def test_exactify_five_dof_rejects_malformed_params():
     with pytest.raises(CrystallographyValueError, match=r"shape \(5,\)"):
         exactify_five_dof(np.zeros(4))
+
+
+def test_exactify_five_dof_zero_parameters_return_identity_pq():
+    P, Q = exactify_five_dof(np.zeros(5))
+
+    expected = np.eye(3, dtype=object)
+
+    np.testing.assert_array_equal(P, expected)
+    np.testing.assert_array_equal(Q, expected)

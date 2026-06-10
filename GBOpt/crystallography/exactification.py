@@ -15,7 +15,7 @@ from ._guards import _require_cubic
 from .csl import csl_from_scaled_rotation
 from .embedding import (
     _paired_pq_from_direction_rows,
-    orthogonal_embedding_from_row_rotation_and_plane,
+    exact_embedding_from_row_rotation_and_plane,
 )
 from .integer import as_positive_int, row_gcd_reduce
 from .orientation import orientation_matrices_from_five_dof
@@ -249,7 +249,7 @@ def exactify_five_dof(
         name="boundary plane normal",
     )
 
-    embedding = orthogonal_embedding_from_row_rotation_and_plane(
+    embedding = exact_embedding_from_row_rotation_and_plane(
         row_rotation,
         plane,
         source="five_dof",

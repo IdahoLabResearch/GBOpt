@@ -10,6 +10,7 @@ Import user-facing exact utilities from this package directly, for example::
 from .boundary import (
     csl_approx_spec_to_embedding,
     csl_exact_spec_to_embedding,
+    five_dof_spec_to_embedding,
     pq_spec_to_embedding,
     primitive_bicrystal_atom_count,
 )
@@ -49,6 +50,7 @@ from .types import (
 __all__ = [
     "csl_approx_spec_to_embedding",
     "csl_exact_spec_to_embedding",
+    "five_dof_spec_to_embedding",
     "pq_spec_to_embedding",
     "primitive_bicrystal_atom_count",
     "csl_from_scaled_rotation",

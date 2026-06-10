@@ -25,7 +25,7 @@ from GBOpt.Utils.integer_linalg import cross_int3, dot_int
 from .csl import csl_from_scaled_rotation
 from .integer import as_int_array, integer_det3, row_gcd_reduce
 from .orientation import validate_orientation_matrix
-from .plane import inplane_area_index, inplane_basis_from_csl
+from .plane import inplane_area_index, inplane_basis_from_csl, rotation_preserves_plane
 from .pq import (
     canonicalize_pq_paired,
     recover_exact_row_rotation_from_paired_pq,
@@ -489,10 +489,68 @@ def orthogonal_embedding_from_row_rotation_and_plane(
     )
 
 
+def exact_embedding_from_row_rotation_and_plane(
+    row_rotation: ScaledRotation,
+    plane: np.ndarray,
+    *,
+    source: str,
+    input_area_index: int | None = None,
+    max_exact_atoms: int | None = None,
+) -> BoundaryEmbedding:
+    """Select an exact embedding path for a row rotation and boundary plane.
+
+    A primitive CSL embedding is attempted when ``row_rotation`` preserves the supplied
+    boundary plane. If the primitive rows do not form proper orthogonal orientation
+    frames, construction falls back to the orthogonal embedding path. Rotations that do
+    not preserve the plane use the orthogonal path directly.
+
+    Cell-size errors raised by either construction path are propagated rather than
+    causing a fallback.
+
+    :param row_rotation: Exact row-convention scaled rotation.
+    :param plane: Integer-valued boundary-plane normal in the reference grain.
+    :param source: Label identifying the upstream boundary representation. Keyword
+        argument, required.
+    :param input_area_index: In-plane area index of caller-supplied ``P`` rows, when
+        available. Keyword argument, optional, defaults to ``None``.
+    :param max_exact_atoms: Upper bound passed to the selected exact embedding
+        constructor. Keyword argument, optional, defaults to ``None``.
+    :return: Exact coherent ``BoundaryEmbedding`` constructed through the primitive path
+        when possible, otherwise through the orthogonal path.
+    :raises BoundarySpecError: If the selected exact embedding exceeds
+        ``max_exact_atoms`` or exact CSL construction otherwise fails.
+    :raises BoundarySpecOrthogonalityError: If the orthogonal fallback cannot produce
+        proper orientation frames.
+    :raises CrystallographyValueError: If ``plane`` is not a valid integer direction.
+    """
+    plane_int = row_gcd_reduce(np.asarray(plane, dtype=object))
+
+    if rotation_preserves_plane(row_rotation, plane_int):
+        try:
+            return primitive_embedding_from_row_rotation(
+                row_rotation,
+                plane_int,
+                source=source,
+                input_area_index=input_area_index,
+                max_exact_atoms=max_exact_atoms,
+            )
+        except BoundarySpecOrthogonalityError:
+            pass
+
+    return orthogonal_embedding_from_row_rotation_and_plane(
+        row_rotation,
+        plane_int,
+        source=source,
+        input_area_index=input_area_index,
+        max_exact_atoms=max_exact_atoms,
+    )
+
+
 __all__ = [
     "primitive_metadata",
     "embedding_from_pq",
     "embedding_from_rotation_rows",
     "primitive_embedding_from_row_rotation",
     "orthogonal_embedding_from_row_rotation_and_plane",
+    "exact_embedding_from_row_rotation_and_plane",
 ]

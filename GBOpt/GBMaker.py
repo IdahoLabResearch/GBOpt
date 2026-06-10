@@ -23,8 +23,11 @@ from GBOpt.BoundarySpec import (
 from GBOpt.crystallography import (
     csl_approx_spec_to_embedding,
     csl_exact_spec_to_embedding,
+    exactify_five_dof,
+    five_dof_spec_to_embedding,
     pq_spec_to_embedding,
 )
+from GBOpt.crystallography.types import CrystallographyError
 from GBOpt.gbmaker_supercell import (
     build_supercell_matrix,
     enumerate_supercell_origins,
@@ -359,7 +362,7 @@ def _miller_row_norm(row: Sequence[object] | np.ndarray) -> float:
 
 
 _VALID_STRAIN_GRAIN = frozenset({"both", "left", "right"})
-_VALID_BOUNDARY_MODES = frozenset({"exact", "approximate"})
+_VALID_BOUNDARY_MODES = frozenset({"exact", "prefer_exact", "approximate"})
 
 
 class GBMaker:
@@ -567,7 +570,7 @@ class GBMaker:
         PQSpec        yes         planned; raises        yes
         CSLExactSpec  yes         planned; raises        yes
         CSLApproxSpec no; raises  yes                    warn -> yes
-        FiveDOFSpec   not yet     yes                    warn -> yes
+        FiveDOFSpec   cubic CSL   yes                    warn -> yes
         ============= =========== ====================== ============
 
         When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is set
@@ -669,19 +672,22 @@ class GBMaker:
             embedding = csl_approx_spec_to_embedding(boundary)
 
         elif isinstance(boundary, FiveDOFSpec):
+            params = np.asarray(boundary.params, dtype=float)
+
             if mode == "exact":
                 try:
-                    P, Q = exactify_five_dof(np.asarray(boundary.params, dtype=float))
-                except NotImplementedError as exc:
-                    raise BoundarySpecError(
-                        "FiveDOFSpec exactification is not yet implemented; "
-                        "use mode='approximate' or mode='prefer_exact'."
-                    ) from exc
-                embedding = pq_spec_to_embedding(PQSpec(P=P, Q=Q))
+                    P, Q = exactify_five_dof(params)
+                except CrystallographyError as exc:
+                    raise BoundarySpecError(str(exc)) from exc
+
+                embedding = pq_spec_to_embedding(
+                    PQSpec(P=P, Q=Q, basis_mode="primitive")
+                )
+
             elif mode == "prefer_exact":
                 try:
-                    P, Q = exactify_five_dof(np.asarray(boundary.params, dtype=float))
-                except (BoundarySpecError, NotImplementedError) as exc:
+                    P, Q = exactify_five_dof(params)
+                except (BoundarySpecError, CrystallographyError) as exc:
                     warnings.warn(
                         "FiveDOFSpec exactification failed; falling back to "
                         f"mode='approximate'. Reason: {exc}",
@@ -690,7 +696,10 @@ class GBMaker:
                     )
                     embedding = five_dof_spec_to_embedding(boundary)
                 else:
-                    embedding = pq_spec_to_embedding(PQSpec(P=P, Q=Q))
+                    embedding = pq_spec_to_embedding(
+                        PQSpec(P=P, Q=Q, basis_mode="primitive")
+                    )
+
             else:
                 embedding = five_dof_spec_to_embedding(boundary)
 
@@ -801,10 +810,10 @@ class GBMaker:
     def __validate_boundary_mode(value: str) -> str:
         """Return a validated boundary-spec construction mode.
 
-        :param value: Boundary-spec construction mode. Supported values are ``"exact"``
-            and ``"approximate"``.
+        :param value: Boundary-spec construction mode. Supported values are
+            ``"exact"``, ``"approximate"``, and ``"prefer_exact"``.
         :return: Validated construction mode.
-        :raises GBMakerValueError: If ``value`` is not ``"exact"`` or ``"approximate"``.
+        :raises GBMakerValueError: If ``value`` is not one of the supported modes.
         """
         if not isinstance(value, str):
             raise GBMakerValueError(
@@ -3375,6 +3384,15 @@ class GBMaker:
     def inplane_periodic(self) -> tuple:
         """Read-only view of the in-plane periodicity flags (y, z)."""
         return tuple(bool(v) for v in self.__inplane_periodic)
+
+    @property
+    def uses_exact_construction(self) -> bool:
+        """Read-only flag indicating exact integer P/Q construction is active."""
+        return bool(
+            self.__embedding is not None
+            and self.__embedding.exact
+            and self.__embedding.P is not None
+        )
 
     @property
     def box_dims(self) -> np.ndarray:
