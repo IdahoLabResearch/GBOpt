@@ -28,6 +28,15 @@ class TestGBParamsCLI(unittest.TestCase):
         )
         return json.loads(result.stdout)
 
+    def run_cli_error(self, *args):
+        return subprocess.run(
+            [sys.executable, str(self.script), *map(str, args)],
+            cwd=self.repo_root,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
     @staticmethod
     def matrix_payload(matrix):
         arr = np.asarray(matrix, dtype=float)
@@ -119,6 +128,33 @@ class TestGBParamsCLI(unittest.TestCase):
 
         self.assertEqual(payload["status"], "not_implemented")
         self.assertIn("Stage E", payload["message"])
+
+    def test_convert_five_dof_to_pq_reports_exactification_gap(self):
+        source = {
+            "format": "five_dof",
+            "params": [0, 0, 0, 0, 0],
+        }
+
+        result = self.run_cli_error(
+            "convert", "--to", "pq", "--input-json", json.dumps(source)
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("five_dof exactification", result.stderr)
+        self.assertIn("not yet implemented", result.stderr)
+
+    def test_convert_rejects_unsupported_csl_target_at_parse_time(self):
+        source = {
+            "format": "five_dof",
+            "params": [0, 0, 0, 0, 0],
+        }
+
+        result = self.run_cli_error(
+            "convert", "--to", "csl", "--input-json", json.dumps(source)
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("invalid choice: 'csl'", result.stderr)
 
     def test_canonicalize_invokes_canonicalize_pq(self):
         P = np.array([[2, 0, 0], [0, 3, 0], [0, 0, 4]], dtype=float)

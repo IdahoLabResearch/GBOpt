@@ -641,10 +641,17 @@ def _convert_payload(
             )
             return _pq_payload(embedding.P, embedding.Q, basis_mode="primitive")
         if source == "five_dof":
-            P, Q = exactify_five_dof(
-                np.asarray(payload["params"], dtype=float),
-                max_exact_atoms=max_exact_atoms,
-            )
+            try:
+                P, Q = exactify_five_dof(
+                    np.asarray(payload["params"], dtype=float),
+                    max_exact_atoms=max_exact_atoms,
+                )
+            except NotImplementedError as exc:
+                raise ValueError(
+                    "Conversion from 'five_dof' to 'pq' requires five_dof "
+                    "exactification, which is not yet implemented. Use the "
+                    "exactify subcommand to query the Stage E hook status."
+                ) from exc
             return _pq_payload(P, Q, basis_mode="primitive")
 
     raise ValueError(f"Conversion from {source!r} to {target!r} is not available.")
@@ -878,7 +885,7 @@ def _build_parser() -> argparse.ArgumentParser:
     conv_in.add_argument("--input-file", help="Path to an input core-format JSON file.")
     conv.add_argument(
         "--to",
-        choices=("five_dof", "pq", "csl"),
+        choices=("five_dof", "pq"),
         required=True,
         help="Target core format.",
     )

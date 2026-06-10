@@ -1658,8 +1658,9 @@ class GBMaker:
         )
 
         if self.__embedding is not None and self.__embedding.source != "five_dof":
-            # Trust the embedding's coherence flag directly; it is set by
-            # the input adapter and reflects the exact construction intent.
+            # Trust non-legacy spec adapters directly. FiveDOFSpec keeps the
+            # legacy threshold heuristic below until exactification replaces
+            # its approximate-only embedding path.
             coherent = self.__embedding.coherent
             self.__inplane_periodic = (coherent, coherent)
             if not coherent:
