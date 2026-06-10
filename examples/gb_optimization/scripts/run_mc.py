@@ -20,6 +20,7 @@ except ImportError:
     import tomli as tomllib
 
 from GBOpt import GBMaker, GBManipulator, GBMinimizer
+from GBOpt.BoundarySpec import FiveDOFSpec
 
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
@@ -50,6 +51,28 @@ def _load_boundaries():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.BOUNDARIES
+
+
+def _build_gb(
+    lattice_parameter: float,
+    structure: str,
+    atom_types: str | List[str],
+    misorientation: np.ndarray,
+    gb_thickness: float,
+    *,
+    x_dim_min: int,
+    repeat_factor: Tuple[int, int],
+    interaction_distance: float,
+) -> GBMaker:
+    return GBMaker.from_boundary_spec(
+        lattice_parameter, structure, atom_types, FiveDOFSpec(misorientation),
+        mode="approximate",
+        gb_thickness=gb_thickness,
+        x_dim_min=x_dim_min,
+        repeat_factor=repeat_factor,
+        interaction_distance=interaction_distance,
+        vacuum=0,
+    )
 
 
 def get_gb_energy(
@@ -186,24 +209,20 @@ def run_mc(
         material=material
     )
 
-    GB0 = GBMaker(
-        lattice_parameter, structure, lattice_parameter, misorientation,
-        atom_types=atom_types,
+    GB0 = _build_gb(
+        lattice_parameter, structure, atom_types, misorientation, lattice_parameter,
         interaction_distance=interaction_distance,
         x_dim_min=x_dim_min,
         repeat_factor=repeat_factor,
-        vacuum=0,
     )
     gb_thickness = 2 * max(GB0.spacing["x"]["left"], GB0.spacing["x"]["right"])
     del GB0
 
-    GB = GBMaker(
-        lattice_parameter, structure, gb_thickness, misorientation,
-        atom_types=atom_types,
+    GB = _build_gb(
+        lattice_parameter, structure, atom_types, misorientation, gb_thickness,
         interaction_distance=interaction_distance,
         x_dim_min=x_dim_min,
         repeat_factor=repeat_factor,
-        vacuum=0,
     )
 
     extra = {"initial_structure": str(

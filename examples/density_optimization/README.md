@@ -81,6 +81,12 @@ Each call produces a two-panel figure:
 
 ## Track 2 — Re-run the optimization
 
+`optimize.py` builds the Σ5[001]{310} starting structure with
+`GBMaker.from_boundary_spec(..., FiveDOFSpec(...), mode="approximate")`.
+This preserves the legacy five-DOF example geometry while avoiding the
+deprecated direct constructor. Exact five-DOF reconstruction is
+not enabled until the future exactification hook is implemented.
+
 ### Requirements
 
 - LAMMPS compiled with the KOKKOS and MANYBODY packages. The results in

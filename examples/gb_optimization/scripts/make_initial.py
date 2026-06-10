@@ -11,6 +11,7 @@ except ImportError:
     import tomli as tomllib
 
 from GBOpt import GBMaker, GBManipulator
+from GBOpt.BoundarySpec import FiveDOFSpec
 
 SCRIPTS_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPTS_DIR.parent
@@ -23,6 +24,27 @@ def _load_boundaries():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod.BOUNDARIES
+
+
+def _build_gb(
+    a0,
+    structure,
+    atom_types,
+    misorientation,
+    gb_thickness,
+    interaction_distance,
+    x_dim_min,
+    repeat_factor,
+):
+    return GBMaker.from_boundary_spec(
+        a0, structure, atom_types, FiveDOFSpec(misorientation),
+        mode="approximate",
+        gb_thickness=gb_thickness,
+        interaction_distance=interaction_distance,
+        x_dim_min=x_dim_min,
+        repeat_factor=repeat_factor,
+        vacuum=0,
+    )
 
 
 def main() -> None:
@@ -50,23 +72,14 @@ def main() -> None:
     r = mat["interaction_distance"]
     x_dim_min = mat.get("x_dim_min", 60)
 
-    GB = GBMaker(
-        a0, structure, a0, misorientation,
-        atom_types=atom_types,
-        interaction_distance=r,
-        x_dim_min=x_dim_min,
-        repeat_factor=repeat_factor,
-        vacuum=0,
+    GB = _build_gb(
+        a0, structure, atom_types, misorientation, a0, r, x_dim_min, repeat_factor,
     )
     gb_thickness = 2 * max(GB.spacing["x"]["left"], GB.spacing["x"]["right"])
 
-    GB = GBMaker(
-        a0, structure, gb_thickness, misorientation,
-        atom_types=atom_types,
-        interaction_distance=r,
-        x_dim_min=x_dim_min,
-        repeat_factor=repeat_factor,
-        vacuum=0,
+    GB = _build_gb(
+        a0, structure, atom_types, misorientation, gb_thickness, r, x_dim_min,
+        repeat_factor,
     )
 
     manip = GBManipulator(GB)
