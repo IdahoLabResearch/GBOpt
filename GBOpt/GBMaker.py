@@ -32,6 +32,10 @@ from GBOpt.gbmaker_supercell import (
 )
 from GBOpt.UnitCell import UnitCell
 
+_LEGACY_CONSTRUCTOR_DEPRECATION = (
+    "GBMaker(...) is deprecated; use GBMaker.from_boundary_spec(...)."
+)
+
 
 class GBMakerError(Exception):
     """Base class for Exceptions in the GBMaker class."""
@@ -414,6 +418,13 @@ class GBMaker:
                  repeat_factor: int | Sequence[int] = 2, x_dim_min: float = 50,
                  vacuum: float = 10, interaction_distance: float = 15.0,
                  gb_id: int = 1, epsilon: float = 1e-10):
+        if _embedding is None:
+            warnings.warn(
+                _LEGACY_CONSTRUCTOR_DEPRECATION,
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         self.__a0 = self.__validate(a0, Number, "a0", positive=True)
         self.__structure = self.__validate(structure, str, "structure")
         self.__gb_thickness = self.__validate(

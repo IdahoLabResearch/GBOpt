@@ -713,6 +713,56 @@ def test_find_commensurate_pair_rejects_invalid_max_n(max_n):
         _find_commensurate_pair(1.0, 1.0, max_n=max_n)
 
 
+class TestGBMakerConstructorDeprecation(unittest.TestCase):
+    def _legacy_kwargs(self):
+        theta = math.radians(36.869898)
+        return {
+            "a0": 3.61,
+            "structure": "fcc",
+            "gb_thickness": 10.0,
+            "misorientation": np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0]),
+            "atom_types": "Cu",
+            "repeat_factor": 2,
+            "x_dim_min": 30.0,
+            "vacuum": 10.0,
+            "interaction_distance": 1.0,
+            "gb_id": 1,
+        }
+
+    def test_legacy_constructor_emits_single_deprecation_warning(self):
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gbm = GBMaker(**self._legacy_kwargs())
+
+        deprecations = [
+            warning for warning in caught
+            if issubclass(warning.category, DeprecationWarning)
+            and "GBMaker(...)" in str(warning.message)
+        ]
+        self.assertEqual(len(deprecations), 1)
+        self.assertTrue(gbm.whole_system.size > 0)
+
+    def test_from_boundary_spec_does_not_emit_legacy_deprecation_warning(self):
+        from GBOpt.BoundarySpec import CSLApproxSpec
+
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gbm = GBMaker.from_boundary_spec(
+                3.61, "fcc", "Cu", spec, mode="approximate",
+                gb_thickness=10.0, repeat_factor=2, x_dim_min=30.0,
+                vacuum=10.0, interaction_distance=1.0, gb_id=1,
+            )
+
+        deprecations = [
+            warning for warning in caught
+            if issubclass(warning.category, DeprecationWarning)
+            and "GBMaker(...)" in str(warning.message)
+        ]
+        self.assertEqual(deprecations, [])
+        self.assertTrue(gbm.whole_system.size > 0)
+
+
 class TestGBMaker(unittest.TestCase):
     def setUp(self):
         # Common test setup
