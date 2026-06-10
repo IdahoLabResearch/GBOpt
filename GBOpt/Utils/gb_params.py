@@ -60,7 +60,7 @@ from GBOpt.crystallography.orientation import (
     validate_orientation_matrix,
 )
 from GBOpt.crystallography.pq import canonicalize_pq_paired
-from GBOpt.crystallography.types import CrystallographyValueError
+from GBOpt.crystallography.types import CrystallographyError
 
 if __package__ in (None, ""):
     repo_root = Path(__file__).resolve().parents[2]
@@ -660,19 +660,19 @@ def _convert_payload(
             )
             if embedding.P is None or embedding.Q is None:
                 raise ValueError("Exact CSL embedding did not provide P/Q matrices.")
-            return _pq_payload(PQSpec(embedding.P, embedding.Q, basis_mode="primitive"))
+            return _pq_payload(
+                PQSpec(
+                    embedding.P,
+                    embedding.Q,
+                    basis_mode="primitive"
+                )
+            )
 
         if isinstance(spec, FiveDOFSpec):
-            try:
-                P, Q = exactify_five_dof(
-                    np.asarray(spec.params, dtype=np.float64),
-                    max_exact_atoms=max_exact_atoms,
-                )
-            except NotImplementedError as exc:
-                raise ValueError(
-                    "Conversion from 'five_dof' to 'pq' requires five_dof "
-                    "exactification, which is not implemented."
-                ) from exc
+            P, Q = exactify_five_dof(
+                np.asarray(spec.params, dtype=np.float64),
+                max_exact_atoms=max_exact_atoms,
+            )
             return _pq_payload(PQSpec(P, Q, basis_mode="primitive"))
 
     raise ValueError(f"Conversion from {source!r} to {target!r} is not available.")
@@ -815,13 +815,10 @@ def _command_exactify(args: argparse.Namespace) -> int:
         exactification is not implemented.
     """
     five_dof = FiveDOFSpec(args.params)
-    try:
-        P, Q = exactify_five_dof(
-            np.asarray(five_dof.params, dtype=np.float64),
-            max_exact_atoms=args.max_exact_atoms,
-        )
-    except NotImplementedError as exc:
-        raise ValueError("five_dof exactification is not implemented.") from exc
+    P, Q = exactify_five_dof(
+        np.asarray(five_dof.params, dtype=np.float64),
+        max_exact_atoms=args.max_exact_atoms,
+    )
 
     _print_payload(_pq_payload(PQSpec(P, Q, basis_mode="primitive")))
     return 0
@@ -978,7 +975,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     exactify = subparsers.add_parser(
         "exactify",
-        help="Exactify five_dof parameters through the exactification hook.",
+        help="Exactify five_dof parameters to canonical P/Q when they describe a cubic CSL.",
     )
     exactify.add_argument(
         "--params",
@@ -1033,7 +1030,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(args.handler(args))
     except (
         BoundarySpecError,
-        CrystallographyValueError,
+        CrystallographyError,
         KeyError,
         OSError,
         ValueError,
