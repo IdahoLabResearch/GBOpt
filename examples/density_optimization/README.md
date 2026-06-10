@@ -84,8 +84,10 @@ Each call produces a two-panel figure:
 `optimize.py` builds the $\Sigma 5$5[001]{310} starting structure with
 `GBMaker.from_boundary_spec(..., FiveDOFSpec(...), mode="approximate")`.
 This preserves the legacy five-DOF example geometry while avoiding the
-deprecated direct constructor. Exact five-DOF reconstruction is
-not enabled until the future exactification hook is implemented.
+deprecated direct constructor. Exact five-DOF reconstruction is available for
+cubic CSL inputs; new workflows can switch this construction to
+`mode="prefer_exact"` or `mode="exact"` when exact stoichiometric construction
+is desired.
 
 ### Requirements
 

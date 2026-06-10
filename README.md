@@ -13,8 +13,9 @@ rather than the deprecated direct `GBMaker(...)` constructor. Supported core
 input formats are:
 
 - `FiveDOFSpec(params)` for the legacy `[alpha, beta, gamma, theta, phi]`
-  ZXZ-plus-inclination parameterization. This currently builds in
-  `mode="approximate"`; exactification is reserved for a future Stage E hook.
+  ZXZ-plus-inclination parameterization. `mode="exact"` rationalizes inputs
+  that correspond to cubic CSL boundaries; use `mode="approximate"` for
+  arbitrary or intentionally legacy-equivalent floating inputs.
 - `PQSpec(P, Q)` for exact row-wise orientation matrices, where rows give
   the crystal directions aligned with lab x, y, and z for the left and right
   grains.
@@ -25,10 +26,10 @@ input formats are:
 
 Construction modes are:
 
-- `mode="exact"` for exact integer P/Q construction. This requires `PQSpec` or
-  `CSLExactSpec` until five-DOF exactification is implemented.
+- `mode="exact"` for exact integer P/Q construction. This requires `PQSpec`,
+  `CSLExactSpec`, or a `FiveDOFSpec` that can be rationalized to a cubic CSL.
 - `mode="prefer_exact"` to use exact construction when available and warn
-  before falling back where exactification is not implemented.
+  before falling back when exactification fails.
 - `mode="approximate"` for the floating-point builder. This is the intended
   mode for incoherent or arbitrary-angle interfaces, not just a fallback.
 

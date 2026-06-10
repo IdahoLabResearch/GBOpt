@@ -94,8 +94,10 @@ python scripts/plot_mc_comparison.py --material Fe --boundary sigma5_310_STGB \
 The run scripts construct initial structures with
 `GBMaker.from_boundary_spec(..., FiveDOFSpec(...), mode="approximate")`.
 The boundary table below is still stored as legacy five-DOF misorientation
-arrays in `config/boundaries.py`; until five-DOF exactification is implemented,
-these examples intentionally use the approximate path.
+arrays in `config/boundaries.py`. These examples intentionally keep the
+approximate path for legacy reproducibility; new runs that should use exact
+stoichiometric construction can switch to `mode="prefer_exact"` or
+`mode="exact"` for five-DOF entries that rationalize to cubic CSL boundaries.
 
 ### Requirements
 
