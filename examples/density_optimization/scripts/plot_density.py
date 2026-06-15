@@ -7,7 +7,7 @@ Plot density-optimization progress using the Zhu et al. (2018) [n] metric:
     [n] = (n_gb_core / n_perfect) mod 1
 
 where n_gb_core is the number of atoms in the GB core slab and n_perfect = 45
-is the number of primitive 2D unit cells in the GB plane (5×9 supercell).
+is the number of primitive 2D unit cells in the GB plane (5x9 supercell).
 These values are stored directly in density_gbe_log.json as the `density`
 field (= n_gb_core / n_perfect); [n] is recovered at plot time via % 1.0.
 

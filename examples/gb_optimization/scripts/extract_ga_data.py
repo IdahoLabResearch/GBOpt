@@ -89,7 +89,7 @@ def extract(pkl_path, dry_run=False):
 
     if dry_run:
         print(f"  would write: {out_path}")
-        print(f"    pkl={pkl_kb:.0f} KB  ->  json≈{json_kb:.0f} KB  "
+        print(f"    pkl={pkl_kb:.0f} KB  ->  json~={json_kb:.0f} KB  "
               f"({100*json_kb/pkl_kb:.0f}% of original)")
         return pkl_kb, json_kb
 

@@ -42,8 +42,8 @@ PENALTY_THRESHOLD = 1.0e29
 # Candidate attribute names for per-candidate atom counts, tried in order.
 # The first one found on the GA object is used.
 # Each entry is either:
-#   - a string  → obj.<name>  is expected to be list[list[int]]
-#   - a tuple   → obj.<outer>.<inner>  (one level of nesting)
+#   - a string  -> obj.<name>  is expected to be list[list[int]]
+#   - a tuple   -> obj.<outer>.<inner>  (one level of nesting)
 # Add or reorder entries to match your GA class.
 ATOM_COUNT_ATTRS = [
     "atom_counts",      # e.g. obj.atom_counts
@@ -202,7 +202,7 @@ def extract(pkl_path: str, dry_run: bool = False):
 
     if dry_run:
         print(f"  would write: {out_path}")
-        print(f"    pkl={pkl_kb:.0f} KB  ->  json≈{json_kb:.0f} KB  "
+        print(f"    pkl={pkl_kb:.0f} KB  ->  json~={json_kb:.0f} KB  "
               f"({100 * json_kb / pkl_kb:.0f}% of original)")
         print(f"    atom_counts present: {atom_counts is not None}")
         return pkl_kb, json_kb

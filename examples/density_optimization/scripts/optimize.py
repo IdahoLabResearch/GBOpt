@@ -1,7 +1,7 @@
 """
 optimize.py
 -----------
-Maximize the density of GB core atoms for a Σ5[001]{310} GB using
+Maximize the density of GB core atoms for a Sigma5[001]{310} GB using
 GeneticAlgorithmMinimizer.
 
 Optimization metric  : raw GB core atom count (negated, so the GA minimizes)
@@ -449,7 +449,7 @@ def run_density_optimization(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Density optimization for a Σ5[001]{310} GB")
+        description="Density optimization for a Sigma5[001]{310} GB")
     parser.add_argument(
         "--material", required=True, choices=list(MATERIAL_PARAMS),
         help="Material to optimize (e.g. Fe, Ni)",

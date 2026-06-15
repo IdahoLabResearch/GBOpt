@@ -182,7 +182,7 @@ class TestGBMaker(unittest.TestCase):
         self.assertTrue(all(isinstance(v, bool) for v in result))
 
     def test_inplane_periodic_fully_periodic_for_csl_boundary(self):
-        # Sigma5 [001] 36.87° boundary is a fully coherent CSL — both in-plane
+        # Sigma5 [001] 36.87 deg boundary is a fully coherent CSL — both in-plane
         # directions must be periodic.
         self.assertEqual(self.gbm.inplane_periodic, (True, True))
 
