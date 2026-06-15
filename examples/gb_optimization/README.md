@@ -156,14 +156,14 @@ python scripts/extract_ga_data.py
 
 The following boundaries are included:
 
-| Name | Σ | Misorientation axis | Angle | Type |
-|------|---|---------------------|-------|------|
-| `sigma3_coherent_twin` | 3 | [111] | 60° | Symmetric tilt |
-| `sigma5_310_STGB` | 5 | [001] | 36.87° | Symmetric tilt |
-| `sigma5_twist` | 5 | [001] | 36.87° | Twist |
-| `sigma5_210_11_2bar_0_ATGB` | 5 | [001] | 36.87° | Asymmetric tilt |
-| `sigma5_mixed` | 5 | [001] | 36.87° | Mixed |
-| `sigma13_510_STGB` | 13 | [001] | 22.62° | Symmetric tilt |
+| Name | $\Sigma$ | Misorientation axis | Angle | Type |
+|------|----------|---------------------|-------|------|
+| `sigma3_coherent_twin` | 3 | [111] | $60^\circ$ | Symmetric tilt |
+| `sigma5_310_STGB` | 5 | [001] | $36.87^\circ$ | Symmetric tilt |
+| `sigma5_twist` | 5 | [001] | $36.87^\circ$ | Twist |
+| `sigma5_210_11_2bar_0_ATGB` | 5 | [001] | $36.87^\circ$ | Asymmetric tilt |
+| `sigma5_mixed` | 5 | [001] | $36.87^\circ$ | Mixed |
+| `sigma13_510_STGB` | 13 | [001] | $22.62^\circ$ | Symmetric tilt |
 
 ## Literature reference values
 

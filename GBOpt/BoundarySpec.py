@@ -140,8 +140,8 @@ class CSLExactSpec(_CSLSpecBase):
     :param quat: Integer quaternion in Hamilton scalar-first order ``[w, x, y, z]``
         where w = cos(theta/2) and (x, y, z) = sin(theta/2)*n_hat.  All four components must
         be integers (the actual unit quaternion is derived by dividing by the norm).
-        Example — Σ5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
-    :param sigma: Optional sigma value for the CSL boundary (e.g. ``5`` for Σ5).
+        Example — Sigma5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
+    :param sigma: Optional sigma value for the CSL boundary (e.g. ``5`` for Sigma5).
         When provided it is validated against the quaternion; mismatches raise
         ``BoundarySpecError``.  Sigma equals the odd part of w^2+x^2+y^2+z^2.
     """

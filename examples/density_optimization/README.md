@@ -1,7 +1,7 @@
 # Density Optimization Example
 
 This example demonstrates the use of GBOpt to maximize the density of
-grain boundary (GB) core atoms for the Σ5[001]{310} boundary in Fe and Ni.
+grain boundary (GB) core atoms for the $\Sigma 5$[001]{310} boundary in Fe and Ni.
 The optimization uses the genetic algorithm (GA) with a custom objective
 function based on the GB core atom count metric of Zhu *et al.* (2018).
 
@@ -42,7 +42,7 @@ defined following Zhu *et al.* (2018) as:
 
 where *N*_total is the total atom count of the simulation cell and
 *N*_bulk\_plane is the number of atoms in one bulk plane parallel to the
-GB (45 atoms for both Fe BCC and Ni FCC in the 5×9 (310) supercell used
+GB (45 atoms for both Fe BCC and Ni FCC in the $5 \times 9$ (310) supercell used
 here).
 
 ## Track 1 — Reproduce manuscript figures
@@ -68,7 +68,7 @@ python scripts/plot_density.py --material Ni
 ```
 
 Each call produces a two-panel figure:
-- **Left panel:** mean [*n*] ± IQR across the population per generation
+- **Left panel:** mean [*n*] $\pm$ IQR across the population per generation
 - **Right panel:** GB energy vs [*n*] scatter coloured by generation,
   with lower envelope and identified local minima
 

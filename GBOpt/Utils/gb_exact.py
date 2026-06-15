@@ -522,7 +522,7 @@ def _plane_null_basis(
     tracking the transformations in V in GL₃(Z).  Because V is unimodular,
     columns 1 and 2 of V are exactly the primitive null vectors.
 
-    The cross-product criterion ``e1 x e2 = ±plane_int`` ensures the 2-D
+    The cross-product criterion ``e1 x e2 = +/-plane_int`` ensures the 2-D
     integer lattice in the plane is covered without gaps — the previous
     axis-aligned cross-product formula could return vectors whose span had
     index > 1 (e.g. plane [5,2,3] gave index-5 sublattice, causing
@@ -557,7 +557,7 @@ def _plane_null_basis(
     # V is unimodular, so [h,k,l] @ V[:,1:] == [0,0] and V[:,1:] is primitive.
     e1 = V[:, 1].astype(float)
     e2 = V[:, 2].astype(float)
-    # Guarantee e1 x e2 = +plane_int (not −plane_int) for a consistent orientation.
+    # Guarantee e1 x e2 = +plane_int (not -plane_int) for a consistent orientation.
     if np.dot(np.cross(e1, e2), plane_int) < 0:
         e2 = -e2
     return e1, e2

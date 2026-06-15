@@ -51,7 +51,7 @@ class TestIntDet3:
         assert _int_det3([[0, 1, 0], [1, 0, 0], [0, 0, 1]]) == -1
 
     def test_sigma5_right_S(self):
-        # Σ5 36.87° right grain: Q = [[4,-3,0],[3,4,0],[0,0,1]], det = 25
+        # Sigma5 36.87 deg right grain: Q = [[4,-3,0],[3,4,0],[0,0,1]], det = 25
         assert _int_det3([[4, -3, 0], [3, 4, 0], [0, 0, 1]]) == 25
 
     def test_non_integer_raises(self):
@@ -77,7 +77,7 @@ class TestIntAdj3:
 
 
 class TestIntegerMembership:
-    # Use Σ5 right-grain matrix: det=25, so each unit cell maps to 25 cosets.
+    # Use Sigma5 right-grain matrix: det=25, so each unit cell maps to 25 cosets.
     _Q = [[4, -3, 0], [3, 4, 0], [0, 0, 1]]
 
     def setup_method(self):
@@ -88,7 +88,7 @@ class TestIntegerMembership:
         assert _integer_membership([0, 0, 0], self.adj_S, self.det_S, 1, 1, 1)
 
     def test_count_via_identity_S(self):
-        # Identity S, repeat 3×2×1: only origins in [0,3)×[0,2)×[0,1) accepted
+        # Identity S, repeat 3x2x1: only origins in [0,3)x[0,2)x[0,1) accepted
         adj_I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
         det_I = 1
         accepted = sum(
@@ -101,7 +101,7 @@ class TestIntegerMembership:
 
     def test_upper_boundary_rejected(self):
         # repeat_x=1, det=25: accepted x-numerator must be in [0,25)
-        # n=[1,0,0]: u_num = [1,0,0] @ adj_Q → adj_Q column 0 row 0 = cofactor(Q,0,0)
+        # n=[1,0,0]: u_num = [1,0,0] @ adj_Q -> adj_Q column 0 row 0 = cofactor(Q,0,0)
         # Should land outside [0,25) * 1 for at least one axis or inside —
         # rather than hard-coding the value, verify via count invariant instead.
         Q_int = np.array(self._Q)
@@ -181,7 +181,7 @@ def _make_identity_pair():
 # ---------------------------------------------------------------------------
 
 class TestValidateAndNormalizeQuaternion:
-    # Σ5 [001] 53.13 deg — integer quaternion [2, 0, 0, 1], N = 5
+    # Sigma5 [001] 53.13 deg — integer quaternion [2, 0, 0, 1], N = 5
     SIGMA5_QUAT = [2, 0, 0, 1]
 
     def test_valid_returns_unit_quaternion(self):
@@ -221,7 +221,7 @@ class TestValidateAndNormalizeQuaternion:
 
 
 class TestQuaternionToRotationMatrix:
-    # Σ5 [001] 53.13 deg — quat [2, 0, 0, 1] (Hamilton [w,x,y,z]),
+    # Sigma5 [001] 53.13 deg — quat [2, 0, 0, 1] (Hamilton [w,x,y,z]),
     # expected R = [[3/5, -4/5, 0], [4/5, 3/5, 0], [0, 0, 1]]
     SIGMA5_QUAT_NORM = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
     SIGMA5_R_EXPECTED = np.array([
@@ -240,13 +240,13 @@ class TestQuaternionToRotationMatrix:
         assert abs(np.linalg.det(R) - 1.0) < 1e-12
 
     def test_identity_quaternion_gives_identity_matrix(self):
-        # [w=1, x=0, y=0, z=0] → identity rotation
+        # [w=1, x=0, y=0, z=0] -> identity rotation
         q_id = np.array([1.0, 0.0, 0.0, 0.0])
         R = quaternion_to_rotation_matrix(q_id)
         np.testing.assert_allclose(R, np.eye(3), atol=1e-12)
 
     def test_sigma5_36deg_quat(self):
-        # Σ5 [001] 36.87 deg — quat [3, 0, 0, 1], N = 10
+        # Sigma5 [001] 36.87 deg — quat [3, 0, 0, 1], N = 10
         # expected R = [[4/5, -3/5, 0], [3/5, 4/5, 0], [0, 0, 1]]
         q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
         R = quaternion_to_rotation_matrix(q)
@@ -263,19 +263,19 @@ class TestQuaternionToRotationMatrix:
 # ---------------------------------------------------------------------------
 
 class TestValidateSigma:
-    # Σ5: quat [2, 0, 0, 1], |q|² = 5 (already odd) → sigma = 5
-    # Σ5: quat [3, 0, 0, 1], |q|² = 10 = 2×5 → sigma = 5
-    # Σ13: quat [3, 2, 0, 0], |q|² = 13 → sigma = 13
+    # Sigma5: quat [2, 0, 0, 1], |q|^2 = 5 (already odd) -> sigma = 5
+    # Sigma5: quat [3, 0, 0, 1], |q|^2 = 10 = 2x5 -> sigma = 5
+    # Sigma13: quat [3, 2, 0, 0], |q|^2 = 13 -> sigma = 13
 
     def test_sigma5_quat_2001_correct(self):
         validate_sigma([2, 0, 0, 1], 5)  # must not raise
 
     def test_sigma5_quat_3001_correct(self):
-        # |q|² = 10, divided by 2 once → sigma = 5
+        # |q|^2 = 10, divided by 2 once -> sigma = 5
         validate_sigma([3, 0, 0, 1], 5)  # must not raise
 
     def test_sigma13_correct(self):
-        # |q|² = 9+4 = 13 (odd) → sigma = 13
+        # |q|^2 = 9+4 = 13 (odd) -> sigma = 13
         validate_sigma([3, 2, 0, 0], 13)  # must not raise
 
     def test_wrong_sigma_raises(self):
@@ -287,7 +287,7 @@ class TestValidateSigma:
             validate_sigma([2, 0, 0, 1], 4)
 
     def test_power_of_two_stripped_correctly(self):
-        # quat [2, 2, 0, 0]: |q|² = 8 = 2³ → sigma = 1
+        # quat [2, 2, 0, 0]: |q|^2 = 8 = 2^3 -> sigma = 1
         validate_sigma([2, 2, 0, 0], 1)  # must not raise; would raise if sigma=8
 
     def test_power_of_two_stripped_wrong_sigma_raises(self):
@@ -317,13 +317,13 @@ class TestValidateSigma:
 # ---------------------------------------------------------------------------
 
 def _sigma5_53deg_R():
-    """R for Σ5 [001] 53.13 deg boundary (quat=[2,0,0,1], N=5)."""
+    """R for Sigma5 [001] 53.13 deg boundary (quat=[2,0,0,1], N=5)."""
     q = np.array([2, 0, 0, 1], dtype=float) / np.sqrt(5)
     return quaternion_to_rotation_matrix(q)
 
 
 def _sigma5_36deg_R():
-    """R for Σ5 [001] 36.87 deg boundary (quat=[3,0,0,1], N=10)."""
+    """R for Sigma5 [001] 36.87 deg boundary (quat=[3,0,0,1], N=10)."""
     q = np.array([3, 0, 0, 1], dtype=float) / np.sqrt(10)
     return quaternion_to_rotation_matrix(q)
 
@@ -359,9 +359,9 @@ class TestSolveInplaneCSL:
         # Regression for the non-primitive null-basis bug on general planes.
         # For plane [5,2,3] the old cross-product formula produced e1=[-3,0,5],
         # e2=[2,-5,0] whose 2-D span has index 5 in the full plane lattice
-        # (e1×e2 = 5*[5,2,3]).  solve_inplane_csl therefore searched only an
-        # index-5 sublattice, saw area ≈ 154 and raised with max_exact_atoms=100
-        # even though a valid in-plane CSL basis with area ≈ 30.82 exists.
+        # (e1xe2 = 5*[5,2,3]).  solve_inplane_csl therefore searched only an
+        # index-5 sublattice, saw area ~= 154 and raised with max_exact_atoms=100
+        # even though a valid in-plane CSL basis with area ~= 30.82 exists.
         R = _sigma5_36deg_R()
         v1, v2 = solve_inplane_csl(
             [0, 0, 1], [5, 2, 3], R, max_exact_atoms=100
@@ -378,12 +378,12 @@ class TestSolveInplaneCSL:
         # Regression: plane [2,1,0] has l=0 so the cross-product basis formula
         # previously produced [0,0,2] (gcd=2, non-primitive).  After the fix,
         # the basis must be primitive: [0,0,1] is in-plane and a CSL vector for
-        # the [001] rotation, so the solver must find it and report area ≈ 11.18,
+        # the [001] rotation, so the solver must find it and report area ~= 11.18,
         # not the doubled 22.36 that the non-primitive lattice gave.
         R = _sigma5_36deg_R()
         v1, v2 = solve_inplane_csl([0, 0, 1], [2, 1, 0], R)
         r1, _r2 = reduce_2d_basis(v1, v2)
-        # Shortest in-plane CSL vector must be primitive (length 1, i.e. [0,0,±1])
+        # Shortest in-plane CSL vector must be primitive (length 1, i.e. [0,0,+/-1])
         assert abs(np.linalg.norm(r1) - 1.0) < 1e-9, (
             f"Expected primitive in-plane CSL vector of length 1, got {r1} "
             f"(norm={np.linalg.norm(r1):.4f})"
@@ -393,7 +393,7 @@ class TestSolveInplaneCSL:
             f"CSL cell area ({area:.4f}) too large; non-primitive basis suspected"
         )
         # Must also pass with a tight max_exact_atoms limit that would have
-        # failed on the old doubled basis (area ≈ 22.36 > 20 would have raised)
+        # failed on the old doubled basis (area ~= 22.36 > 20 would have raised)
         v1b, v2b = solve_inplane_csl(
             [0, 0, 1], [2, 1, 0], R, max_exact_atoms=20
         )
@@ -408,7 +408,7 @@ class TestReduce2DBasis:
         assert np.linalg.norm(r1) <= np.linalg.norm(r2) + 1e-10
 
     def test_spans_same_lattice(self):
-        # Area |v1×v2| must be preserved after reduction.
+        # Area |v1xv2| must be preserved after reduction.
         v1 = np.array([0, 5, 0], dtype=float)
         v2 = np.array([0, 0, 1], dtype=float)
         r1, r2 = reduce_2d_basis(v1, v2)
@@ -682,7 +682,7 @@ class TestCSLExactSpecValidation:
             CSLExactSpec(axis=[1, 0, 0], plane=[1, 0, 0], quat=[2, 0, 0, 1])
 
     def test_sigma_mismatch_raises(self):
-        # quat [2,0,0,1] → sigma=5, not 3
+        # quat [2,0,0,1] -> sigma=5, not 3
         with pytest.raises(BoundarySpecError):
             csl_spec_to_embedding(
                 CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0],
@@ -691,12 +691,14 @@ class TestCSLExactSpecValidation:
 
 
 class TestCSLSpecToEmbedding:
-    # Σ5 [001] 36.87 deg — quat [3,0,0,1], plane [1,0,0]
+    # Sigma5 [001] 36.87 deg — quat [3,0,0,1], plane [1,0,0]
     SPEC_36 = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
     # Equivalent PQSpec for the cross-format round-trip assertion
     PQ_36 = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                    Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
-    # Σ3 [111] 60 deg twin — quat [3,1,1,1], plane [1,1,1]; non-(100) regression
+    PQ_TWIST = PQSpec(P=[[0, 0, 1], [3, 1, 0], [-1, 3, 0]],
+                      Q=[[0, 0, 1], [3, -1, 0], [1, 3, 0]])
+    # Sigma3 [111] 60 deg twin — quat [3,1,1,1], plane [1,1,1]; non-(100) regression
     SPEC_SIGMA3 = CSLExactSpec(axis=[1, 1, 1], plane=[1, 1, 1], quat=[3, 1, 1, 1])
 
     def test_embedding_flags_and_proper_rotations(self):
@@ -726,16 +728,109 @@ class TestCSLSpecToEmbedding:
         assert emb.coherent is True
 
     def test_sigma3_111_plane_gives_proper_rotations(self):
-        # Non-(100) regression: [111] plane requires e2 = plane×e1 to keep
+        # Non-(100) regression: [111] plane requires e2 = planexe1 to keep
         # P rows mutually orthogonal; the null-basis e1,e2 pair is not enough.
         emb = csl_spec_to_embedding(self.SPEC_SIGMA3)
         for label, R in [("R_left", emb.R_left), ("R_right", emb.R_right)]:
             np.testing.assert_allclose(
                 R @ R.T, np.eye(3), atol=1e-10,
-                err_msg=f"{label} is not orthogonal for Σ3 [111] boundary")
+                err_msg=f"{label} is not orthogonal for Sigma3 [111] boundary")
             assert abs(np.linalg.det(R) - 1.0) < 1e-10, \
-                f"{label} det ≠ 1 for Σ3 [111] boundary"
+                f"{label} det != 1 for Sigma3 [111] boundary"
 
+    def test_twist_matches_equivalent_primitive_pqspec(self):
+        emb_csl = csl_spec_to_embedding(self.SPEC_TWIST)
+        emb_pq = pq_spec_to_embedding(self.PQ_TWIST)
+
+        np.testing.assert_array_equal(emb_csl.P, emb_pq.P)
+        np.testing.assert_array_equal(emb_csl.Q, emb_pq.Q)
+        assert _int_det3(emb_csl.P) == 5
+        assert _int_det3(emb_csl.Q) == 5
+
+    def test_twist_rotations_derive_from_final_paired_pq(self):
+        emb = csl_spec_to_embedding(self.SPEC_TWIST)
+        expected_left = emb.P / np.linalg.norm(emb.P, axis=1, keepdims=True)
+        expected_right = emb.Q / np.linalg.norm(emb.Q, axis=1, keepdims=True)
+
+        np.testing.assert_allclose(emb.R_left, expected_left, atol=1e-12, rtol=0)
+        np.testing.assert_allclose(emb.R_right, expected_right, atol=1e-12, rtol=0)
+        assert not np.allclose(emb.R_left, emb.R_right, atol=1e-12, rtol=0)
+        for label, R in [("R_left", emb.R_left), ("R_right", emb.R_right)]:
+            np.testing.assert_allclose(
+                R @ R.T,
+                np.eye(3),
+                atol=1e-10,
+                rtol=0,
+                err_msg=f"{label} is not orthogonal for primitive Sigma5 twist",
+            )
+            assert abs(np.linalg.det(R) - 1.0) < 1e-10
+        assert emb.metadata is not None
+        assert emb.metadata.basis_mode == "primitive"
+        assert emb.metadata.primitive_area_index == 5
+
+
+class TestPrimitiveCellReporting:
+    TWIST_SPEC = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
+
+    def test_sigma5_fluorite_primitive_bicrystal_atom_count(self):
+        emb = csl_spec_to_embedding(self.TWIST_SPEC)
+
+        assert primitive_bicrystal_atom_count(emb, 12) == 120
+
+    def test_reporting_requires_metadata(self):
+        emb = BoundaryEmbedding(
+            P=None,
+            Q=None,
+            R_left=np.eye(3),
+            R_right=np.eye(3),
+            exact=False,
+            coherent=False,
+            source="five_dof",
+        )
+
+        with pytest.raises(BoundarySpecError):
+            primitive_bicrystal_atom_count(emb, 12)
+
+    def test_primitive_metadata_requires_divisible_area_indices(self):
+        with pytest.raises(BoundarySpecError, match="integer multiple"):
+            _primitive_metadata(
+                basis_mode="primitive",
+                supplied_area_index=7,
+                primitive_area_index=5,
+                plane=np.array([0, 0, 1]),
+                rotation_denominator=10,
+            )
+
+    def test_primitive_metadata_does_not_shrink_expanded_gbmaker_cell(self):
+        emb = csl_spec_to_embedding(self.TWIST_SPEC)
+        primitive_atoms = primitive_bicrystal_atom_count(emb, 12)
+        a0 = 5.47
+        repeat_factor = [2, 3]
+        x_dim_min = 30.0
+        interaction_distance = 11.0
+
+        gb = GBMaker.from_boundary_spec(
+            a0,
+            "fluorite",
+            ("U", "O"),
+            self.TWIST_SPEC,
+            mode="exact",
+            gb_thickness=0.0,
+            repeat_factor=repeat_factor,
+            x_dim_min=x_dim_min,
+            vacuum=0.0,
+            interaction_distance=interaction_distance,
+        )
+
+        y_period = a0 * np.linalg.norm(emb.P[1])
+        z_period = a0 * np.linalg.norm(emb.P[2])
+        assert gb.whole_system.size > primitive_atoms
+        assert gb._GBMaker__left_x >= x_dim_min - 1e-9
+        assert gb._GBMaker__right_x >= x_dim_min - 1e-9
+        assert gb.y_dim >= repeat_factor[0] * y_period - 1e-9
+        assert gb.z_dim >= repeat_factor[1] * z_period - 1e-9
+        assert gb.y_dim >= 2.0 * interaction_distance - 1e-9
+        assert gb.z_dim >= 2.0 * interaction_distance - 1e-9
 
 # ---------------------------------------------------------------------------
 # Step 14b — per-grain repeats and commensurability guard
@@ -749,7 +844,7 @@ class TestExactGrainRepeats:
     ATOM_TYPES = "Cu"
     GB_THICKNESS = 0.0
 
-    # Σ5 [001] 36.87°: P identity, Q = [[4,-3,0],[3,4,0],[0,0,1]]
+    # Sigma5 [001] 36.87 deg: P identity, Q = [[4,-3,0],[3,4,0],[0,0,1]]
     P = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
     Q = [[4, -3, 0], [3, 4, 0], [0, 0, 1]]
 
@@ -792,7 +887,7 @@ class TestExactGrainBuilder:
     ATOM_TYPES = "Cu"
     GB_THICKNESS = 0.0
 
-    # Σ5 [001] 36.87°
+    # Sigma5 [001] 36.87 deg
     EXACT_SPEC = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
     PQ_SPEC = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                      Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
@@ -872,7 +967,7 @@ class TestFromBoundaryEmbedding:
         )
 
     # ------------------------------------------------------------------
-    # Σ5 [001] 36.87° — exact path produces a valid fcc bicrystal.
+    # Sigma5 [001] 36.87 deg — exact path produces a valid fcc bicrystal.
     # ------------------------------------------------------------------
 
     def test_sigma5_exact_builds_valid_fcc_bicrystal(self):
@@ -990,7 +1085,7 @@ class TestFromBoundarySpecCSL:
     ATOM_TYPES = "Cu"
     GB_THICKNESS = 5.0
 
-    # Σ5 [001] 36.87 deg exact spec and its equivalent PQSpec
+    # Sigma5 [001] 36.87 deg exact spec and its equivalent PQSpec
     EXACT_SPEC = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
     PQ_SPEC = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
                      Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
@@ -1067,7 +1162,7 @@ class TestFromBoundarySpecMultispecies:
     def test_cslexactspec_rocksalt_stoichiometric(self):
         # CSLExactSpec exact path must produce the same stoichiometric result
         # as the equivalent PQSpec — catches any multi-species regression in
-        # the csl_spec_to_embedding → _from_boundary_embedding path.
+        # the csl_spec_to_embedding -> _from_boundary_embedding path.
         counts = self._species_counts_csl(4.0, "rocksalt", ("Na", "Cl"))
         assert counts["Na"] == counts["Cl"], (
             f"Rocksalt bicrystal via CSLExactSpec is not stoichiometric: {counts}"
@@ -1212,7 +1307,7 @@ class TestExactPathBoxBounds:
             f"vacuum=0 right grain overflows box: max_x={right_max_x:.4f} > x_dim={x_dim:.4f}"
         )
         assert abs(periodic_gap - central_gap) < 0.1, (
-            f"vacuum=0 periodic_gap ({periodic_gap:.4f}) ≠ central_gap ({central_gap:.4f})"
+            f"vacuum=0 periodic_gap ({periodic_gap:.4f}) != central_gap ({central_gap:.4f})"
         )
 
 

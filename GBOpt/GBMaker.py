@@ -326,9 +326,9 @@ class GBMaker:
         :param gb_id: Grain boundary identifier, default 1.
         :param mismatch_tol: When not ``None``, search for integer multiples
             ``n1*d1 ~= n2*d2`` to minimize the in-plane mismatch strain.
-            Typical value: ``0.005`` (0.5%). Ignored with a ``UserWarning``
-            for ``mode="exact"`` (the exact path already enforces integer
-            commensurability).
+            Typical value: ``0.005`` (0.5%). On ``mode="exact"``, raises
+            ``GBMakerValueError`` if no commensurate pair is found within
+            ``mismatch_max_cells``.
         :param mismatch_max_cells: Upper bound on n1 and n2 in the
             commensurability search, default 50.
         :param strain_grain: Which grain absorbs the residual mismatch.
@@ -345,25 +345,6 @@ class GBMaker:
         :raises GBMakerValueError: If ``strain_grain`` is not one of
             ``"both"``, ``"left"``, or ``"right"``.
         """
-<<<<<<< HEAD
-        if mismatch_tol is not None and mode == "exact":
-            warnings.warn(
-                "mismatch_tol has no effect with mode='exact': the exact path "
-                "already enforces integer-commensurate in-plane periods via the "
-                "membership kernel. mismatch_tol will be ignored.",
-                UserWarning,
-                stacklevel=2,
-            )
-            mismatch_tol = None
-=======
-        from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
-        from GBOpt.Utils.gb_exact import (
-            csl_approx_spec_to_embedding,
-            csl_spec_to_embedding,
-            pq_spec_to_embedding,
-        )
->>>>>>> 87f7ddc (Extend exact-path in-plane strain accommodation)
-
         _VALID_STRAIN_GRAIN = {"both", "left", "right"}
         if strain_grain not in _VALID_STRAIN_GRAIN:
             raise GBMakerValueError(
@@ -460,7 +441,7 @@ class GBMaker:
         """
         Find the smallest-norm integer vector that points within *angle_tol_deg* of
         *row*. LLL lattice reduction was considered but not adopted: for CSL boundaries
-        the correct scale factor k equals ||g|| <= √Sigma (typically < 10), so the loop exits
+        the correct scale factor k equals ||g|| <= sqrt(Sigma) (typically < 10), so the loop exits
         in a handful of iterations. The LLL selection step also requires enumerating
         signed combinations of reduced basis rows — adding ~60 lines for no practical
         gain.

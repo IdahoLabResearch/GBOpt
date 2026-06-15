@@ -4,17 +4,17 @@ Zhang 2021 UO₂ grain boundary dataset for use in GBOpt tests.
 
 Static reference data extracted from:
   Zhang et al., J. Am. Ceram. Soc. (2021)
-197 boundaries across ST/AT/TW/MX × 100/110/111 axes
+197 boundaries across ST/AT/TW/MX x 100/110/111 axes
 (178 active entries; 19 omitted as incommensurate with the legacy float builder).
 
-Key format:  sigma{Σ}_{axis}_{left_normal}_{right_normal}_{type}
+Key format:  sigma{Sigma}_{axis}_{left_normal}_{right_normal}_{type}
   left_normal  = P[0]  (GB-plane normal, left-grain crystal frame)
   right_normal = -Q[0] (outward normal, right-grain crystal frame)
   bar suffix denotes a negative index: 1bar = -1
 
 Each entry contains:
   misorientation  — 5-DOF ZXZ+yz angles for the legacy GBMaker constructor
-  P, Q            — integer 3×3 orientation matrices for PQSpec (exact path)
+  P, Q            — integer 3x3 orientation matrices for PQSpec (exact path)
   angles_deg      — human-readable angle breakdown
   ref_energy_J_m2 — reference GB energies from the literature
   zhang_uo2_energy — UO₂ energy from the Zhang 2021 source paper

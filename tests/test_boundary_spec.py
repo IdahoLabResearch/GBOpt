@@ -139,7 +139,7 @@ class TestCSLSpecBase:
 
 
 class TestCSLExactSpec:
-    # Σ5 [001] 36.87 deg: quat=[3,0,0,1] has vector part [0,0,1] ∥ axis=[0,0,1].
+    # Sigma5 [001] 36.87 deg: quat=[3,0,0,1] has vector part [0,0,1] || axis=[0,0,1].
     VALID_QUAT = [3, 0, 0, 1]
 
     def test_frozen(self):
@@ -201,7 +201,7 @@ class TestCSLApproxSpec:
 
     def test_non_numeric_angle_raises(self):
         with pytest.raises(BoundarySpecTypeError):
-            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg="45")
+            CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg="not_a_number")
 
     def test_nan_angle_raises(self):
         with pytest.raises(BoundarySpecValueError):
