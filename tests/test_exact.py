@@ -18,16 +18,6 @@ from GBOpt.BoundarySpec import (
 from GBOpt.GBMaker import GBMaker
 from GBOpt.Utils.exact import (
     ExactCSLValueError,
-    csl_from_scaled_rotation,
-    dsc_basis,
-    inplane_basis_from_csl,
-    lll_reduce,
-    normalize_integer_quaternion,
-    pq_from_csl_plane,
-    quaternion_to_scaled_rotation,
-    verify_coincidence_basis,
-)
-from GBOpt.Utils.exact import (
     _canonicalize_pq_paired,
     _dot_int,
     _gauss_reduce_2d_paired,
@@ -41,17 +31,24 @@ from GBOpt.Utils.exact import (
     _row_gcd_reduce,
     build_supercell_matrix,
     canonicalize_pq,
+    csl_from_scaled_rotation,
     csl_spec_to_embedding,
+    dsc_basis,
     enumerate_supercell_origins,
-    primitive_bicrystal_atom_count,
+    inplane_basis_from_csl,
+    lll_reduce,
+    normalize_integer_quaternion,
+    pq_from_csl_plane,
     pq_spec_to_embedding,
+    primitive_bicrystal_atom_count,
+    quaternion_to_scaled_rotation,
     quaternion_to_rotation_matrix,
     reduce_2d_basis,
     solve_inplane_csl,
     validate_and_normalize_quaternion,
     validate_sigma,
+    verify_coincidence_basis,
 )
-
 from GBOpt.Utils.integer_normal_forms import (
     _det3,
     column_hnf_3x3,
@@ -873,6 +870,16 @@ class TestCSLExactSpecValidation:
     def test_valid_spec_instantiates(self):
         CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[2, 0, 0, 1])
 
+    def test_identity_quaternion_instantiates(self):
+        spec = CSLExactSpec(
+            axis=[0, 0, 1],
+            plane=[1, 0, 0],
+            quat=[1, 0, 0, 0],
+            sigma=1,
+        )
+
+        assert list(spec.quat) == [1, 0, 0, 0]
+
     def test_missing_or_malformed_quat_raises(self):
         with pytest.raises(BoundarySpecError):
             CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0])
@@ -927,6 +934,19 @@ class TestCSLSpecToEmbedding:
         for R in (emb.R_left, emb.R_right):
             np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
             assert abs(np.linalg.det(R) - 1.0) < 1e-10
+
+    def test_identity_quaternion_embedding_is_zero_misorientation(self):
+        spec = CSLExactSpec(
+            axis=[0, 0, 1],
+            plane=[1, 0, 0],
+            quat=[1, 0, 0, 0],
+            sigma=1,
+        )
+
+        emb = csl_spec_to_embedding(spec)
+
+        assert emb.exact is True
+        np.testing.assert_allclose(emb.R_left, emb.R_right, atol=1e-12, rtol=0)
 
     def test_cross_format_round_trip(self):
         # CSLExactSpec and the equivalent PQSpec
@@ -1133,22 +1153,6 @@ class TestExactGrainBuilder:
             self.A0, self.STRUCTURE, self.ATOM_TYPES, spec,
             mode="exact", gb_thickness=self.GB_THICKNESS,
         )
-
-    def test_exact_path_does_not_call_float_selection(self):
-        targets = [
-            "_GBMaker__select_atoms_in_box_basis",
-            "_GBMaker__clip_atoms_to_cartesian_box",
-            "_GBMaker__deduplicate_positions",
-        ]
-        with (
-            patch.object(GBMaker, targets[0]) as spy0,
-            patch.object(GBMaker, targets[1]) as spy1,
-            patch.object(GBMaker, targets[2]) as spy2,
-        ):
-            self._build(self.PQ_SPEC)
-            spy0.assert_not_called()
-            spy1.assert_not_called()
-            spy2.assert_not_called()
 
     def test_output_dtype_and_atom_count_are_valid(self):
         from GBOpt.Atom import Atom
@@ -1461,7 +1465,7 @@ class TestExactPathBoxBounds:
         )
 
     def test_exact_left_grain_does_not_overflow_gb_plane(self):
-        """Olmsted GB 1 covers left-grain high-x basis offset overflow."""
+        """Olmsted GB 1 stays partitioned after exact x-bound filtering."""
         spec = PQSpec(
             P=[[3, 1, 0], [0, 0, 2], [1, -3, 0]],
             Q=[[3, 1, 0], [0, 0, -2], [-1, 3, 0]],
@@ -1600,8 +1604,8 @@ class TestExactPathNoCoincidentAtoms:
 
     Multi-atom-basis structures (fluorite, rocksalt) can produce right-grain atoms
     whose rotated fractional positions land inside the left grain's spatial domain.
-    The low-x fine-layer removal must eliminate those atoms while preserving
-    stoichiometry in both grains and the whole system.
+    Exact complete-origin filtering must preserve stoichiometry in both grains and
+    the whole system while keeping the two grains spatially separated.
     """
 
     @pytest.mark.parametrize("spec,a0,structure,atom_types", [
@@ -1642,7 +1646,7 @@ class TestExactPathNoCoincidentAtoms:
             5.47, "fluorite", ("U", "O"),
         ),
     ])
-    def test_stoichiometry_preserved_after_low_x_removal(
+    def test_vacuum0_stoichiometry_preserved(
         self, spec, a0, structure, atom_types
     ):
         gb = GBMaker.from_boundary_spec(

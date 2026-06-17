@@ -111,7 +111,7 @@ def _find_atom_counts(obj) -> list[list[int]] | None:
 
         if candidate is not None:
             print(f"    atom counts: using obj.{attr}")
-            # Normalise to list[list[int]]
+            # Normalize to list[list[int]]
             try:
                 return [[int(x) for x in gen] for gen in candidate]
             except (TypeError, ValueError) as exc:

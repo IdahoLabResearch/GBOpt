@@ -133,7 +133,7 @@ class PQSpec:
             )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class _CSLSpecBase:
     axis: Sequence[int]
     plane: Sequence[int]
@@ -147,7 +147,7 @@ class _CSLSpecBase:
                 raise BoundarySpecValueError("sigma must be a positive integer")
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CSLExactSpec(_CSLSpecBase):
     """Exact CSL boundary specified by axis, plane, and integer quaternion.
 
@@ -158,7 +158,8 @@ class CSLExactSpec(_CSLSpecBase):
     :param quat: Integer quaternion in Hamilton scalar-first order
         ``[w, x, y, z]`` where w = cos(theta/2) and (x, y, z) =
         sin(theta/2)*n_hat. All four components must be integers (the actual
-        unit quaternion is derived by dividing by the norm).
+        unit quaternion is derived by dividing by the norm). The identity
+        quaternion is valid and represents a zero-misorientation Sigma 1 case.
         Example: Sigma5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
     :param sigma: Optional sigma value for the CSL boundary (e.g. ``5`` for Sigma5).
         When provided it is validated against the quaternion; mismatches raise
@@ -176,29 +177,23 @@ class CSLExactSpec(_CSLSpecBase):
         if self.quat is None:
             raise BoundarySpecValueError("CSLExactSpec.quat is required.")
         _validate_nonzero_int_vector(self.quat, "quat", length=4)
-        # The quaternion vector part [x, y, z] (indices 1-3) encodes the
-        # rotation axis.  A zero vector part means the identity rotation,
-        # which has no meaningful misorientation axis and cannot define a GB.
         quat_vec = np.array(self.quat[1:], dtype=float)
-        if np.linalg.norm(quat_vec) < 1e-10:
-            raise BoundarySpecValueError(
-                "CSLExactSpec.quat vector part [x, y, z] must not be all-zero; "
-                "the identity quaternion [w, 0, 0, 0] encodes no misorientation "
-                "and cannot define a grain boundary."
-            )
-        # The vector part must be parallel to the user-supplied axis field.
-        axis_vec = np.asarray(self.axis, dtype=float)
-        cross = np.cross(quat_vec, axis_vec)
-        denom = np.linalg.norm(quat_vec) * np.linalg.norm(axis_vec)
-        if np.linalg.norm(cross) > 1e-9 * denom:
-            raise BoundarySpecValueError(
-                f"Quaternion vector part {quat_vec.tolist()} is not parallel to "
-                f"axis {list(self.axis)}. The axis must match the rotation axis "
-                "encoded in the quaternion (components [x, y, z] in Hamilton order)."
-            )
+        quat_vec_norm = np.linalg.norm(quat_vec)
+        if quat_vec_norm > 1e-10:
+            # The vector part must be parallel to the user-supplied axis field.
+            axis_vec = np.asarray(self.axis, dtype=float)
+            cross = np.cross(quat_vec, axis_vec)
+            denom = quat_vec_norm * np.linalg.norm(axis_vec)
+            if np.linalg.norm(cross) > 1e-9 * denom:
+                raise BoundarySpecValueError(
+                    f"Quaternion vector part {quat_vec.tolist()} is not parallel to "
+                    f"axis {list(self.axis)}. The axis must match the rotation axis "
+                    "encoded in the quaternion (components [x, y, z] in Hamilton "
+                    "order)."
+                )
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CSLApproxSpec(_CSLSpecBase):
     """Approximate CSL boundary specified by rotation axis, boundary plane, and angle.
 

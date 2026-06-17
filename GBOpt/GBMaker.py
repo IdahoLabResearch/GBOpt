@@ -47,16 +47,70 @@ def _find_commensurate_pair(
     :param max_n: Upper bound on n1 and n2, default 50.
     :return: Best commensurate pair or ``None``.
     """
+    d1 = float(d1)
+    d2 = float(d2)
+    tol = float(tol)
+    max_n = int(max_n)
+    if not math.isfinite(d1) or d1 <= 0.0:
+        raise ValueError(f"d1 must be a finite positive period; got {d1!r}.")
+    if not math.isfinite(d2) or d2 <= 0.0:
+        raise ValueError(f"d2 must be a finite positive period; got {d2!r}.")
+    if not math.isfinite(tol) or tol < 0.0:
+        raise ValueError(f"tol must be finite and non-negative; got {tol!r}.")
+    if max_n < 1:
+        raise ValueError(f"max_n must be at least 1; got {max_n!r}.")
+
     best: "tuple[int, int, float, float] | None" = None
-    best_size = float("inf")
-    for n1 in range(1, int(max_n) + 1):
-        for n2 in range(1, int(max_n) + 1):
-            l1, l2 = n1 * d1, n2 * d2
-            size = max(l1, l2)
-            mismatch = abs(l1 - l2) / size
-            if mismatch <= tol and size < best_size:
-                best = (n1, n2, l1, l2)
-                best_size = size
+    best_key: "tuple[float, float, int, int, int] | None" = None
+    seen: set[tuple[int, int]] = set()
+
+    def consider(n1: int, n2: int) -> None:
+        nonlocal best, best_key
+        if n1 < 1 or n2 < 1 or n1 > max_n or n2 > max_n:
+            return
+        pair = (int(n1), int(n2))
+        if pair in seen:
+            return
+        seen.add(pair)
+        l1, l2 = pair[0] * d1, pair[1] * d2
+        size = max(l1, l2)
+        mismatch = abs(l1 - l2) / size
+        if mismatch <= tol:
+            key = (size, mismatch, pair[0] + pair[1], pair[0], pair[1])
+            if best_key is None or key < best_key:
+                best = (pair[0], pair[1], l1, l2)
+                best_key = key
+
+    ratio = d2 / d1
+    x = ratio
+    p_prev2, q_prev2 = 0, 1
+    p_prev1, q_prev1 = 1, 0
+    for _ in range(256):
+        a = int(math.floor(x))
+        if p_prev1 == 0:
+            k_limit_p = max_n if p_prev2 <= max_n else 0
+        else:
+            k_limit_p = (max_n - p_prev2) // p_prev1
+        if q_prev1 == 0:
+            k_limit_q = max_n if q_prev2 <= max_n else 0
+        else:
+            k_limit_q = (max_n - q_prev2) // q_prev1
+        k_limit = min(a, k_limit_p, k_limit_q)
+        for k in range(1, k_limit + 1):
+            consider(k * p_prev1 + p_prev2, k * q_prev1 + q_prev2)
+
+        p_next = a * p_prev1 + p_prev2
+        q_next = a * q_prev1 + q_prev2
+        consider(p_next, q_next)
+
+        frac = x - a
+        if frac <= 1e-15 * max(1.0, abs(x)):
+            break
+        p_prev2, q_prev2 = p_prev1, q_prev1
+        p_prev1, q_prev1 = p_next, q_next
+        if p_prev1 > max_n and q_prev1 > max_n:
+            break
+        x = 1.0 / frac
 
     return best
 
@@ -647,10 +701,8 @@ class GBMaker:
 
         Enumerates conventional-cell origins via pure-integer arithmetic,
         expands each accepted origin to the full ``UnitCell.asarray()`` basis,
-        rotates to the lab frame, and translates by ``x_offset``.  The float
-        selection/clipping/deduplication routines (``__select_atoms_in_box_basis``,
-        ``__clip_atoms_to_cartesian_box``, ``__deduplicate_positions``) and
-        ``trim_upper_face`` are **never called** on this path.
+        rotates to the lab frame, translates by ``x_offset``, wraps periodic y/z,
+        and filters complete origins into the x slab.
 
         :param R_grain: Proper rotation matrix for this grain.
         :param P_or_Q: 3x3 canonical integer orientation matrix.
@@ -751,11 +803,10 @@ class GBMaker:
         right_bounds_eff = right_bounds.copy()
         vacuum0_trim_applied = False
 
-        left_n0_labels = None
         right_n0_labels = None
         right_float_result: _FloatGrainBuildResult | None = None
         if use_exact:
-            self.__left_grain, left_n0_labels = self.__generate_grain_exact(
+            self.__left_grain, _ = self.__generate_grain_exact(
                 self.__R_left,
                 self.__embedding.P,
                 self.__left_x,
@@ -812,26 +863,6 @@ class GBMaker:
                     vacuum0_trim_applied = True
             self.__right_grain = right_float_result.atoms
 
-        # High-x overflow removal (exact path only). Basis-atom offsets can
-        # push atoms from the left grain's last crystallographic x-layer past
-        # the GB plane. Remove whole fine x-layers so stoichiometry is
-        # preserved and downstream gap calculations see the trimmed grain.
-        if use_exact and left_n0_labels is not None:
-            current_left_max_x = np.max(self.__left_grain["x"])
-            if current_left_max_x > left_bounds[1] + self.__epsilon:
-                unique_n0_desc = np.sort(np.unique(left_n0_labels))[::-1]
-                while len(unique_n0_desc) > 1:
-                    top_n0 = unique_n0_desc[0]
-                    mask = left_n0_labels != top_n0
-                    trial_grain = self.__left_grain[mask]
-                    trial_labels = left_n0_labels[mask]
-                    new_left_max_x = np.max(trial_grain["x"])
-                    self.__left_grain = trial_grain
-                    left_n0_labels = trial_labels
-                    unique_n0_desc = unique_n0_desc[1:]
-                    if new_left_max_x <= left_bounds[1] + self.__epsilon:
-                        break
-
         # The two grains may have different interplanar x-spacings (asymmetric tilt,
         # mixed tilt/twist, etc.), causing the periodic-edge gap to differ from the
         # central GB gap. When the periodic gap is smaller, close-contact atom pairs
@@ -848,8 +879,6 @@ class GBMaker:
         # trigger a cascade of unwanted additional equalization passes.
         periodic_gap = ((right_bounds_eff[1] - right_max_x) +
                         (left_min_x - left_bounds[0]))
-        # Pre-initialize n0_labels so both the high-x and low-x exact passes can
-        # share and update the same label array without re-scanning the grain.
         n0_labels: np.ndarray | None = (
             right_n0_labels.copy()
             if (use_exact and right_n0_labels is not None)
@@ -976,31 +1005,6 @@ class GBMaker:
             # extra interfacial volume at the x periodic boundary. NPT simulations will
             # relax it away; NVT or static calculations will have structurally
             # inequivalent interfaces on the two sides of the bicrystal.
-
-        # Low-x overlap removal (exact path only).  For rotated multi-atom-basis
-        # structures some basis atoms have large negative frac contributions that
-        # place them at x < left_max_x, coinciding with left-grain atoms.  Remove
-        # the lowest-index u_num_0 fine layers from the right grain until
-        # right_min_x >= left_max_x.  Each layer removal eliminates a complete set
-        # of unit cells sharing one crystallographic x-position, so the right
-        # grain's stoichiometry is preserved.
-        if use_exact and n0_labels is not None:
-            current_right_min_x = np.min(self.__right_grain["x"])
-            if current_right_min_x < left_max_x - self.__epsilon:
-                removed_low = 0
-                unique_n0_asc = np.sort(np.unique(n0_labels))
-                while len(unique_n0_asc) > 1:
-                    bot_n0 = unique_n0_asc[0]
-                    mask = n0_labels != bot_n0
-                    trial_grain = self.__right_grain[mask]
-                    trial_labels = n0_labels[mask]
-                    new_right_min_x = np.min(trial_grain["x"])
-                    self.__right_grain = trial_grain
-                    n0_labels = trial_labels
-                    removed_low += 1
-                    unique_n0_asc = unique_n0_asc[1:]
-                    if new_right_min_x >= left_max_x - self.__epsilon:
-                        break
 
         self.__whole_system = np.hstack(
             (self.__left_grain, self.__right_grain))
@@ -1541,65 +1545,6 @@ class GBMaker:
         )
         return cartesian_coordinates
 
-    def __clip_atoms_to_cartesian_box(
-        self, atoms: np.ndarray, x_bounds: np.ndarray
-    ) -> np.ndarray:
-        """
-        Clip atoms to Cartesian box bounds on non-periodic axes.
-
-        X is always clipped to the slab bounds. Y and Z are only clipped when the
-        corresponding in-plane axis is non-periodic. Small negative y/z values within
-        epsilon are snapped to zero after filtering.
-
-        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
-        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
-        :return: Filtered atom array, with lower-face y/z values clamped to zero on
-            non-periodic axes.
-        """
-
-        x_bounds = np.asarray(x_bounds, dtype=np.float64)
-
-        inplane_periodic = self.__inplane_periodic
-        inside_box = (atoms["x"] >= x_bounds[0] -
-                      self.__epsilon) & (atoms["x"] < x_bounds[1] - self.__epsilon)
-
-        axis_names = ("y", "z")
-        axis_dims = (self.__y_dim, self.__z_dim)
-        for axis_name, axis_dim, is_periodic in zip(
-            axis_names, axis_dims, inplane_periodic
-        ):
-            if is_periodic:
-                continue
-            inside_box &= (
-                (atoms[axis_name] >= -self.__epsilon) & (atoms[axis_name] < axis_dim)
-            )
-
-        clipped_atoms = atoms[inside_box].copy()
-        for axis_name, is_periodic in zip(axis_names, inplane_periodic):
-            if is_periodic:
-                continue
-            clipped_atoms[axis_name] = np.where(
-                (clipped_atoms[axis_name] < 0.0) & (
-                    clipped_atoms[axis_name] >= -self.__epsilon),
-                0.0,
-                clipped_atoms[axis_name],
-            )
-
-        return clipped_atoms
-
-    def __deduplicate_positions(self, atoms: np.ndarray) -> np.ndarray:
-        """
-        Remove duplicate atoms using epsilon-quantized Cartesian positions.
-        Keeps the first occurrence of each position.
-        """
-        if len(atoms) == 0:
-            return atoms
-
-        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
-        quantized = np.round(positions / self.__epsilon).astype(np.int64)
-        _, unique_indices = np.unique(quantized, axis=0, return_index=True)
-        return atoms[np.sort(unique_indices)]
-
     def __complete_origin_atom_mask(
         self, atom_mask: np.ndarray, origin_ids: np.ndarray, basis_size: int
     ) -> np.ndarray:
@@ -1776,129 +1721,6 @@ class GBMaker:
         """
         atom_mask = result.atoms["x"] < float(upper_x) - self.__epsilon
         return self.__filter_float_result_complete_origins(result, atom_mask)
-
-    def __select_atoms_in_box_basis(
-        self,
-        atoms: np.ndarray,
-        primitive_periods: np.ndarray,
-        x_bounds: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Select atoms using mixed box coordinates for in-plane boundary handling.
-
-        Periodic in-plane axes are filtered in reduced coordinates on the half-open
-        interval ``[0, 1)`` up to tolerance, wrapped back into the canonical cell, then
-        mapped back to Cartesian coordinates. Non-periodic axes remain Cartesian in the
-        mixed basis and are clipped against the box dimensions directly.
-
-        :param atoms: Structured atom array containing ``x``, ``y``, and ``z`` fields.
-        :param primitive_periods: 2x3 array containing primitive y/z period vectors.
-        :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
-        :return: Filtered structured atom array with wrapped in-plane coordinates.
-        """
-        x_bounds = np.asarray(x_bounds, dtype=np.float64)
-
-        selection_basis = self.__selection_basis_vectors(primitive_periods)
-        positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
-        inplane_periodic = self.__inplane_periodic
-
-        # Fast path: orthogonal box (no tilt). In-plane basis vectors have zero
-        # x-projection so reduced coordinates are simple ratios; skip the full solve.
-        if np.allclose(selection_basis[:, 0], 0.0, atol=self.__epsilon, rtol=0.0):
-            inside_box = np.ones(len(atoms), dtype=bool)
-            for row_index, is_periodic in enumerate(inplane_periodic):
-                axis = row_index + 1  # 1=y, 2=z
-                period = selection_basis[row_index, axis]
-                coord = positions[:, axis]
-                if is_periodic:
-                    tol = self.__reduced_coordinate_tolerance(
-                        selection_basis[row_index])
-                    inside_box &= (coord / period >= -
-                                   tol) & (coord / period < 1.0 + tol)
-                # non-periodic handled by __clip_atoms_to_cartesian_box
-            selected_atoms = atoms[inside_box].copy()
-            if len(selected_atoms) == 0:
-                return selected_atoms
-
-            for row_index, is_periodic in enumerate(inplane_periodic):
-                if not is_periodic:
-                    continue
-                axis = row_index + 1
-                period = selection_basis[row_index, axis]
-                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
-                selected_atoms_coord = selected_atoms[("y", "z")[row_index]]
-                wrapped = np.mod(selected_atoms_coord, period)
-                selected_atoms[("y", "z")[row_index]] = np.where(
-                    (wrapped < tol * period) | ((period - wrapped) < tol * period),
-                    0.0,
-                    wrapped,
-                )
-            inside_x = (
-                (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
-                & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
-            )
-            selected_atoms = selected_atoms[inside_x]
-            if len(selected_atoms) == 0:
-                return selected_atoms
-            return self.__deduplicate_positions(selected_atoms)
-
-        box_coordinates = self.__reduced_box_coordinates(positions, selection_basis)
-
-        inside_box = np.ones(len(atoms), dtype=bool)
-        axis_dims = (self.__y_dim, self.__z_dim)
-        for row_index, (axis_dim, is_periodic) in enumerate(
-            zip(axis_dims, inplane_periodic)
-        ):
-            reduced_axis = box_coordinates[:, row_index + 1]
-            if is_periodic:
-                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
-                inside_box &= (
-                    (reduced_axis >= -tol) & (reduced_axis < 1.0 + tol)
-                )
-            else:
-                inside_box &= (
-                    (reduced_axis >= -self.__epsilon) & (reduced_axis < axis_dim)
-                )
-
-        selected_atoms = atoms[inside_box].copy()
-        if len(selected_atoms) == 0:
-            return selected_atoms
-
-        selected_box_coordinates = box_coordinates[inside_box].copy()
-        for row_index, is_periodic in enumerate(inplane_periodic):
-            coordinate_index = row_index + 1
-            if is_periodic:
-                tol = self.__reduced_coordinate_tolerance(selection_basis[row_index])
-                selected_box_coordinates[:, coordinate_index] = wrap_reduced_coordinate(
-                    selected_box_coordinates[:, coordinate_index],
-                    tol,
-                )
-                continue
-
-            selected_box_coordinates[:, coordinate_index] = np.where(
-                (
-                    (selected_box_coordinates[:, coordinate_index] < 0.0)
-                    & (selected_box_coordinates[:, coordinate_index] >= -self.__epsilon)
-                ),
-                0.0,
-                selected_box_coordinates[:, coordinate_index],
-            )
-
-        wrapped_positions = self.__cartesian_from_box_coordinates(
-            selected_box_coordinates, selection_basis
-        )
-        x, y, z = wrapped_positions.T
-        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = x, y, z
-
-        inside_x = (
-            (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
-            & (selected_atoms["x"] < x_bounds[1] - self.__epsilon)
-        )
-        selected_atoms = selected_atoms[inside_x]
-        if len(selected_atoms) == 0:
-            return selected_atoms
-
-        return self.__deduplicate_positions(selected_atoms)
 
     def __select_complete_origins_in_box_basis(
         self,

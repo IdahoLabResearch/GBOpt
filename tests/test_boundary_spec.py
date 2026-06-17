@@ -173,13 +173,31 @@ def test_csl_exact_spec_stores_quat_and_sigma(csl_exact_kwargs):
     assert spec.sigma == 5
 
 
+def test_csl_exact_spec_allows_identity_quaternion():
+    spec = CSLExactSpec(axis=VALID_AXIS, plane=VALID_PLANE, quat=[1, 0, 0, 0])
+
+    assert list(spec.quat) == [1, 0, 0, 0]
+
+
+@pytest.mark.parametrize(
+    ("cls", "args"),
+    [
+        (CSLExactSpec, (VALID_AXIS, VALID_PLANE, VALID_QUAT)),
+        (CSLApproxSpec, (VALID_AXIS, VALID_PLANE, VALID_ANGLE_DEG)),
+    ],
+    ids=["exact", "approx"],
+)
+def test_csl_specs_reject_positional_construction(cls, args):
+    with pytest.raises(TypeError):
+        cls(*args)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [
         _csl_kwargs(),
         _csl_kwargs(quat=[1.5, 0.0, 0.0, 1.0]),
         _csl_kwargs(quat=[1, 0, 0]),
-        _csl_kwargs(quat=[1, 0, 0, 0]),
         _csl_kwargs(axis=[1, 0, 0], plane=[0, 0, 1], quat=VALID_QUAT),
         _csl_kwargs(axis=[0, 0, 0], quat=VALID_QUAT),
     ],
@@ -187,7 +205,6 @@ def test_csl_exact_spec_stores_quat_and_sigma(csl_exact_kwargs):
         "missing_quat",
         "non_integer_quat",
         "wrong_quat_length",
-        "identity_quat",
         "axis_quat_mismatch",
         "zero_axis",
     ],
