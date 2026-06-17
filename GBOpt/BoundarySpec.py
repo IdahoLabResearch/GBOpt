@@ -24,6 +24,14 @@ class BoundarySpecValueError(BoundarySpecError, ValueError):
     """Raised when a boundary-spec field has an invalid value."""
 
 
+class BoundarySpecOrthogonalityError(BoundarySpecError):
+    """Raised when a derived rotation matrix is not orthogonal (R @ R.T != I).
+
+    Distinct from the base ``BoundarySpecError`` so callers can catch it
+    specifically without matching on error-message text.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Boundary-format dataclasses
 # ---------------------------------------------------------------------------
@@ -33,7 +41,11 @@ class FiveDOFSpec:
     """Five-degree-of-freedom boundary specified by Euler-angle parameters.
 
     :param params: Five-element sequence ``[alpha, beta, gamma, theta, phi]``
-        (ZXZ Euler angles plus inclination), all as finite floats.
+        where ``alpha``, ``beta``, and ``gamma`` are ZXZ Euler angles (radians)
+        defining the misorientation rotation between the two grains; ``theta``
+        is an additional inclination rotation about the y-axis (the tilt angle,
+        radians); and ``phi`` is an additional inclination rotation about the
+        z-axis (radians).  All entries must be finite floats.
     """
 
     params: Sequence[float]
@@ -56,8 +68,8 @@ class FiveDOFSpec:
             )
 
 
-def _validate_miller(seq, name: str, length: int = 3) -> None:
-    """Raise BoundarySpecError if seq is not a non-zero integer sequence of the given length."""
+def _validate_nonzero_int_vector(seq, name: str, length: int = 3) -> None:
+    """Raise if ``seq`` is not a non-zero integer sequence of ``length``."""
     try:
         arr = np.asarray(seq, dtype=float)
     except (ValueError, TypeError) as e:
@@ -109,10 +121,16 @@ def _validate_pq_matrix(m, name: str) -> None:
 class PQSpec:
     P: Sequence[Sequence[int | float]]
     Q: Sequence[Sequence[int | float]]
+    basis_mode: Literal["primitive", "supplied"] = "primitive"
 
     def __post_init__(self):
         _validate_pq_matrix(self.P, "P")
         _validate_pq_matrix(self.Q, "Q")
+        if self.basis_mode not in ("primitive", "supplied"):
+            raise BoundarySpecValueError(
+                "PQSpec.basis_mode must be either 'primitive' or 'supplied'; "
+                f"got {self.basis_mode!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -122,8 +140,8 @@ class _CSLSpecBase:
     sigma: int | None = None
 
     def __post_init__(self):
-        _validate_miller(self.axis, "axis")
-        _validate_miller(self.plane, "plane")
+        _validate_nonzero_int_vector(self.axis, "axis")
+        _validate_nonzero_int_vector(self.plane, "plane")
         if self.sigma is not None:
             if not isinstance(self.sigma, int) or self.sigma <= 0:
                 raise BoundarySpecValueError("sigma must be a positive integer")
@@ -131,16 +149,17 @@ class _CSLSpecBase:
 
 @dataclass(frozen=True)
 class CSLExactSpec(_CSLSpecBase):
-    """Exact CSL boundary specified by rotation axis, boundary plane, and integer quaternion.
+    """Exact CSL boundary specified by axis, plane, and integer quaternion.
 
-    :param axis: Rotation axis as integer Miller indices [u v w], e.g. ``[0, 0, 1]``
-        for a [001]-axis tilt boundary.
-    :param plane: Boundary-plane normal as integer Miller indices [h k l] in grain 1's
-        crystal frame, e.g. ``[1, 0, 0]`` for a symmetric (100) tilt boundary.
-    :param quat: Integer quaternion in Hamilton scalar-first order ``[w, x, y, z]``
-        where w = cos(theta/2) and (x, y, z) = sin(theta/2)*n_hat.  All four components must
-        be integers (the actual unit quaternion is derived by dividing by the norm).
-        Example — Sigma5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
+    :param axis: Rotation axis as integer Miller indices [u v w], e.g.
+        ``[0, 0, 1]`` for a [001]-axis tilt boundary.
+    :param plane: Boundary-plane normal as integer Miller indices [h k l] in
+        grain 1's crystal frame, e.g. ``[1, 0, 0]`` for a (100) boundary plane.
+    :param quat: Integer quaternion in Hamilton scalar-first order
+        ``[w, x, y, z]`` where w = cos(theta/2) and (x, y, z) =
+        sin(theta/2)*n_hat. All four components must be integers (the actual
+        unit quaternion is derived by dividing by the norm).
+        Example: Sigma5 [001] 53.13 deg tilt: ``quat=[2, 0, 0, 1]``.
     :param sigma: Optional sigma value for the CSL boundary (e.g. ``5`` for Sigma5).
         When provided it is validated against the quaternion; mismatches raise
         ``BoundarySpecError``.  Sigma equals the odd part of w^2+x^2+y^2+z^2.
@@ -156,20 +175,27 @@ class CSLExactSpec(_CSLSpecBase):
         super().__post_init__()
         if self.quat is None:
             raise BoundarySpecValueError("CSLExactSpec.quat is required.")
-        _validate_miller(self.quat, "quat", length=4)
-        # The quaternion vector part [x, y, z] (indices 1–3) encodes the
-        # rotation axis; it must be parallel to the user-supplied axis field.
+        _validate_nonzero_int_vector(self.quat, "quat", length=4)
+        # The quaternion vector part [x, y, z] (indices 1-3) encodes the
+        # rotation axis.  A zero vector part means the identity rotation,
+        # which has no meaningful misorientation axis and cannot define a GB.
         quat_vec = np.array(self.quat[1:], dtype=float)
+        if np.linalg.norm(quat_vec) < 1e-10:
+            raise BoundarySpecValueError(
+                "CSLExactSpec.quat vector part [x, y, z] must not be all-zero; "
+                "the identity quaternion [w, 0, 0, 0] encodes no misorientation "
+                "and cannot define a grain boundary."
+            )
+        # The vector part must be parallel to the user-supplied axis field.
         axis_vec = np.asarray(self.axis, dtype=float)
-        if np.linalg.norm(quat_vec) > 1e-10:  # skip identity quaternion [1,0,0,0]
-            cross = np.cross(quat_vec, axis_vec)
-            denom = np.linalg.norm(quat_vec) * np.linalg.norm(axis_vec)
-            if np.linalg.norm(cross) > 1e-9 * denom:
-                raise BoundarySpecValueError(
-                    f"Quaternion vector part {quat_vec.tolist()} is not parallel to "
-                    f"axis {list(self.axis)}. The axis must match the rotation axis "
-                    "encoded in the quaternion (components [x, y, z] in Hamilton order)."
-                )
+        cross = np.cross(quat_vec, axis_vec)
+        denom = np.linalg.norm(quat_vec) * np.linalg.norm(axis_vec)
+        if np.linalg.norm(cross) > 1e-9 * denom:
+            raise BoundarySpecValueError(
+                f"Quaternion vector part {quat_vec.tolist()} is not parallel to "
+                f"axis {list(self.axis)}. The axis must match the rotation axis "
+                "encoded in the quaternion (components [x, y, z] in Hamilton order)."
+            )
 
 
 @dataclass(frozen=True)
@@ -195,7 +221,8 @@ class CSLApproxSpec(_CSLSpecBase):
             val = float(self.angle_deg)
         except (TypeError, ValueError) as e:
             raise BoundarySpecTypeError(
-                f"CSLApproxSpec.angle_deg must be a finite float; got {self.angle_deg!r}"
+                "CSLApproxSpec.angle_deg must be a finite float; "
+                f"got {self.angle_deg!r}"
             ) from e
         if not np.isfinite(val):
             raise BoundarySpecValueError(
@@ -208,14 +235,34 @@ class CSLApproxSpec(_CSLSpecBase):
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
+class PrimitiveCellMetadata:
+    """Primitive boundary-defining cell metadata for exact embeddings.
+
+    Stores boundary-topology quantities produced by the CSL or PQ adapter, not
+    crystal structure data. ``UnitCell`` holds the atomic basis and lattice
+    parameter; this class holds boundary-level geometry (area indices, rotation
+    denominator, boundary-plane normal, and sigma-type information) that
+    ``UnitCell`` has no concept of.
+    """
+
+    basis_mode: Literal["primitive", "supplied"]
+    supplied_area_index: int
+    primitive_area_index: int
+    reduction_index: int
+    plane: tuple[int, int, int]
+    rotation_denominator: int
+    conventional_cell_multiplier: int
+
+
+@dataclass(frozen=True)
 class BoundaryEmbedding:
     """Canonical internal representation produced by every input adapter.
 
     P and Q are the exact row-wise orientation matrices (None for
     approximate-only paths). R_left and R_right are floating-point rotation
-    matrices matching GBMaker's internal convention. exact and coherent flag
-    the construction path and interface type. source names the originating
-    format ("pq", "csl", "five_dof").
+    matrices matching GBMaker's internal convention. exact and coherent flag the
+    construction path and interface type. source names the originating format
+    ("pq", "csl", "five_dof").
     """
     P: np.ndarray | None
     Q: np.ndarray | None
@@ -224,3 +271,4 @@ class BoundaryEmbedding:
     exact: bool
     coherent: bool
     source: str
+    metadata: PrimitiveCellMetadata | None = None

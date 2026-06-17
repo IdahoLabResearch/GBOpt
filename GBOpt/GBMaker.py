@@ -12,9 +12,13 @@ from scipy.spatial.transform import Rotation
 
 from GBOpt.UnitCell import UnitCell
 from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
-from GBOpt.Utils.gb_exact import (
+from GBOpt.Utils.exact import (
+    _int_adj3,
+    _int_det3,
+    build_supercell_matrix,
     csl_approx_spec_to_embedding,
     csl_spec_to_embedding,
+    enumerate_supercell_origins,
     pq_spec_to_embedding,
 )
 
@@ -22,45 +26,61 @@ from GBOpt.Utils.gb_exact import (
 def _find_commensurate_pair(
     d1: float,
     d2: float,
-    tol: float,
-    max_n: int,
+    *,
+    tol: float = 0.005,
+    max_n: int = 50,
 ) -> "tuple[int, int, float, float] | None":
     """Find the smallest integer pair (n1, n2) such that n1*d1 ~= n2*d2.
 
-    Searches all pairs with 1 <= n1, n2 <= max_n and returns the one with
-    the smallest ``max(n1*d1, n2*d2)`` whose relative mismatch satisfies::
+    Returns ``(n1, n2, n1*d1, n2*d2)`` -- the pair with the smallest
+    ``max(n1*d1, n2*d2)`` whose relative mismatch satisfies::
 
         |n1*d1 - n2*d2| / max(n1*d1, n2*d2) <= tol
 
-    Returns ``(n1, n2, n1*d1, n2*d2)`` or ``None`` if no pair is found.
+    Returns ``None`` if no such pair exists within ``max_n``.
 
     :param d1: Period of the first grain (Angstroms).
     :param d2: Period of the second grain (Angstroms).
-    :param tol: Maximum allowed relative mismatch (e.g. ``0.005`` for 0.5%).
-    :param max_n: Upper bound on n1 and n2.
+    :param tol: Maximum allowed relative mismatch, default 0.005 (0.5%).
+        Should not be set smaller than the relative precision of the input
+        lattice parameters, or the search may match floating-point noise.
+    :param max_n: Upper bound on n1 and n2, default 50.
     :return: Best commensurate pair or ``None``.
-
-    .. todo::
-        For non-cubic structures with oblique in-plane cells, the period
-        lengths depend on the full metric tensor and the two in-plane axes
-        may need to be treated jointly when the cell is not rectangular.
     """
     best: "tuple[int, int, float, float] | None" = None
     best_size = float("inf")
-    for n1 in range(1, max_n + 1):
-        l1 = n1 * d1
-        for n2 in range(1, max_n + 1):
-            l2 = n2 * d2
-            mismatch = abs(l1 - l2) / max(l1, l2)
-            if mismatch <= tol and max(l1, l2) < best_size:
+    for n1 in range(1, int(max_n) + 1):
+        for n2 in range(1, int(max_n) + 1):
+            l1, l2 = n1 * d1, n2 * d2
+            size = max(l1, l2)
+            mismatch = abs(l1 - l2) / size
+            if mismatch <= tol and size < best_size:
                 best = (n1, n2, l1, l2)
-                best_size = max(l1, l2)
+                best_size = size
+
     return best
 
 
 @dataclass(frozen=True)
 class _AxisStrainAccommodation:
-    """Integer repeat pair and lab-axis scale factors for one in-plane axis."""
+    """Integer repeat pair and lab-axis scale factors for one in-plane axis.
+
+    Produced by ``_find_commensurate_pair`` for a single in-plane axis (y or z)
+    when mismatch accommodation is requested.
+
+    :param left_repeats: Number of left-grain unit-cell repeats along this axis.
+    :param right_repeats: Number of right-grain unit-cell repeats along this axis.
+    :param left_unstrained_length: Unstrained length of left grain slab
+        (left_repeats * left period, Angstroms).
+    :param right_unstrained_length: Unstrained length of right grain slab
+        (right_repeats * right period, Angstroms).
+    :param box_length: Shared simulation box length along this axis (Angstroms).
+        Chosen from the unstrained lengths according to the ``strain_grain`` policy.
+    :param left_scale: Factor by which left-grain atom coordinates are scaled
+        along this axis to fit the shared box (box_length / left_unstrained_length).
+    :param right_scale: Same for the right grain.
+    :param mismatch: Relative mismatch |l1-l2| / max(l1, l2) before scaling.
+    """
 
     left_repeats: int
     right_repeats: int
@@ -205,6 +225,8 @@ class GBMaker:
         self.__mismatch_tol = _mismatch_tol
         self.__mismatch_max_cells = int(_mismatch_max_cells)
         self.__strain_grain = _strain_grain
+        # Maps axis name ("y" or "z") to commensurate repeat metadata when
+        # mismatch accommodation is active; empty when mismatch_tol is None.
         self.__strain_accommodation: dict[str, _AxisStrainAccommodation] = {}
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
@@ -290,14 +312,13 @@ class GBMaker:
 
         Supported boundary types and modes:
 
-        ============= =========== ===========  ============
-        Boundary type exact        approximate  prefer_exact
-        ============= =========== ===========  ============
-        PQSpec        ✓            ✗            ✗
-        CSLExactSpec  ✓            ✗            ✗
-        CSLApproxSpec ✗ (raises)   ✓            ✗
-        FiveDOFSpec   not yet      not yet      not yet
-        ============= =========== ===========  ============
+        ============= =========== ===========
+        Boundary type exact        approximate
+        ============= =========== ===========
+        PQSpec        yes          no (raises)
+        CSLExactSpec  yes          no (raises)
+        CSLApproxSpec no (raises)  yes
+        ============= =========== ===========
 
         **Commensurability requirement (exact mode only):**
         When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is
@@ -314,7 +335,7 @@ class GBMaker:
         :param atom_types: Atom type string or tuple of strings.
         :param boundary: A boundary-spec dataclass (``PQSpec``,
             ``CSLExactSpec``, or ``CSLApproxSpec``).
-        :param mode: Construction mode — ``"exact"`` uses exact integer P/Q
+        :param mode: Construction mode -- ``"exact"`` uses exact integer P/Q
             matrices (requires ``PQSpec`` or ``CSLExactSpec``);
             ``"approximate"`` uses floating-point rotation matrices
             (required for ``CSLApproxSpec``).
@@ -363,8 +384,8 @@ class GBMaker:
         elif isinstance(boundary, CSLExactSpec):
             if mode != "exact":
                 raise NotImplementedError(
-                    f"Construction mode '{mode}' is not yet supported for CSLExactSpec; "
-                    f"only mode='exact' is currently implemented."
+                    f"Construction mode {mode!r} is not supported for CSLExactSpec; "
+                    "only mode='exact' is implemented."
                 )
             embedding = csl_spec_to_embedding(boundary)
 
@@ -377,7 +398,8 @@ class GBMaker:
                 )
             if mode != "approximate":
                 raise NotImplementedError(
-                    f"Construction mode '{mode}' is not yet supported for CSLApproxSpec."
+                    f"Construction mode {mode!r} is not supported for CSLApproxSpec; "
+                    "only mode='approximate' is implemented."
                 )
             embedding = csl_approx_spec_to_embedding(boundary)
 
@@ -441,10 +463,10 @@ class GBMaker:
         """
         Find the smallest-norm integer vector that points within *angle_tol_deg* of
         *row*. LLL lattice reduction was considered but not adopted: for CSL boundaries
-        the correct scale factor k equals ||g|| <= sqrt(Sigma) (typically < 10), so the loop exits
-        in a handful of iterations. The LLL selection step also requires enumerating
-        signed combinations of reduced basis rows — adding ~60 lines for no practical
-        gain.
+        the correct scale factor k satisfies k = ||g|| <= sqrt(Sigma) (typically < 10),
+        so the loop exits in a handful of iterations. The LLL selection step also
+        requires enumerating signed combinations of reduced basis rows -- adding ~60
+        lines for no practical gain.
 
         :param row: A single float row from a rotation matrix.
         :param angle_tol_deg: Maximum allowed angular error in degrees.
@@ -461,7 +483,10 @@ class GBMaker:
                 candidate = self.__reduce_integer_row(
                     np.round(row * k).astype(int))
                 err = self.__row_angle_error_deg(row, candidate)
-                if err < best_err or (err == best_err and np.linalg.norm(candidate) < np.linalg.norm(best)):
+                if err < best_err or (
+                    err == best_err
+                    and np.linalg.norm(candidate) < np.linalg.norm(best)
+                ):
                     best_err = err
                     best = candidate
                 if best_err <= angle_tol_deg:
@@ -530,7 +555,8 @@ class GBMaker:
         x_length: float,
         grain_side: str,
     ) -> tuple[int, int, int]:
-        """Compute integer repeat counts (repeat_x, repeat_y, repeat_z) for an exact grain.
+        """Compute integer repeat counts (repeat_x, repeat_y, repeat_z) for an exact
+        grain.
 
         Derives how many times the supercell period fits into the box along each
         axis.  The x count is derived from the already-equalized grain thickness
@@ -548,8 +574,6 @@ class GBMaker:
         :return: (repeat_x, repeat_y, repeat_z) as positive integers.
         :raises GBMakerValueError: If y or z is not commensurate with the box.
         """
-        from GBOpt.Utils.gb_exact import build_supercell_matrix
-
         S = build_supercell_matrix(P_or_Q)
         a0 = self.__a0
 
@@ -588,8 +612,8 @@ class GBMaker:
         tol = 1e-6
         if y_accommodation is None and abs(repeat_y_raw - repeat_y) > tol:
             raise GBMakerValueError(
-                f"Exact construction requires the y box ({self.__y_dim:.6f} Å) to be "
-                f"an integer multiple of this grain's y-period ({y_period:.6f} Å), "
+                f"Exact construction requires the y box ({self.__y_dim:.6f} A) to be "
+                f"an integer multiple of this grain's y-period ({y_period:.6f} A), "
                 f"but got repeat_y = {repeat_y_raw:.8f}.  "
                 "Use mode='approximate' or adjust repeat_factor until both grains' "
                 "in-plane periods divide the shared box exactly. See the "
@@ -597,8 +621,8 @@ class GBMaker:
             )
         if z_accommodation is None and abs(repeat_z_raw - repeat_z) > tol:
             raise GBMakerValueError(
-                f"Exact construction requires the z box ({self.__z_dim:.6f} Å) to be "
-                f"an integer multiple of this grain's z-period ({z_period:.6f} Å), "
+                f"Exact construction requires the z box ({self.__z_dim:.6f} A) to be "
+                f"an integer multiple of this grain's z-period ({z_period:.6f} A), "
                 f"but got repeat_z = {repeat_z_raw:.8f}.  "
                 "Use mode='approximate' or adjust repeat_factor until both grains' "
                 "in-plane periods divide the shared box exactly. See the "
@@ -635,11 +659,6 @@ class GBMaker:
         :return: Tuple of (atoms, ux_labels) where atoms is the structured atom
             array and ux_labels[i] is the integer x-layer index of atom i.
         """
-        from GBOpt.Utils.gb_exact import (
-            build_supercell_matrix, enumerate_supercell_origins,
-            _int_adj3, _int_det3,
-        )
-
         repeat_x, repeat_y, repeat_z = self.__exact_grain_repeats(
             P_or_Q, x_length, grain_side
         )
@@ -650,6 +669,10 @@ class GBMaker:
         cart_origins = origins.astype(np.float64) * self.__a0
 
         atoms = self.get_supercell(cart_origins)
+        uc_size = len(self.__unit_cell.asarray())
+        origin_ids = np.repeat(
+            np.arange(len(origins), dtype=np.int64), uc_size
+        )
 
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         rotated = positions @ R_grain.T
@@ -663,26 +686,36 @@ class GBMaker:
         rotated[:, 2] = rotated[:, 2] % self.__z_dim
         atoms["x"], atoms["y"], atoms["z"] = rotated.T
 
-        # Invariant: total atoms = accepted origins x basis size
-        uc_size = len(self.__unit_cell.asarray())
-        expected_atoms = len(origins) * uc_size
-        if len(atoms) != expected_atoms:
+        x_upper = float(x_offset + x_length)
+        inside_x = (
+            (atoms["x"] >= float(x_offset) - self.__epsilon)
+            & (atoms["x"] < x_upper - self.__epsilon)
+        )
+        atoms, origin_ids = self.__filter_complete_origins(
+            atoms, origin_ids, inside_x, uc_size
+        )
+        if len(atoms) == 0:
             raise GBMakerValueError(
-                f"Exact builder atom count mismatch: expected "
-                f"{expected_atoms}, got {len(atoms)}"
+                "Exact builder x-bound filtering removed all complete unit-cell "
+                f"origins for the {grain_side} grain."
+            )
+        if len(atoms) % uc_size != 0:
+            raise GBMakerValueError(
+                "Exact builder x-bound filtering produced incomplete unit-cell "
+                f"origins: {len(atoms)} atoms is not divisible by {uc_size}."
             )
 
         # Assign a fine x-layer label to every atom: the integer coordinate
         # u_num_0 = (origin @ adj(S))[0], which ranges over [0, repeat_x*|det_S|).
         # Each distinct value identifies the thinnest possible crystallographic
-        # x-slab — one column of origins that share the same x-lattice position.
+        # x-slab -- one column of origins that share the same x-lattice position.
         # Using u_num_0 directly (rather than u_num_0 // |det_S|) gives |det_S|-
         # fold finer resolution, so the gap-equalization loop can remove minimal
         # slices instead of coarse whole-repeat chunks.
         S_int = np.round(S).astype(int)
         adj_S = np.array(_int_adj3(S_int), dtype=int)
         u_num_0 = origins @ adj_S[:, 0]
-        n0_labels = np.repeat(u_num_0, uc_size)
+        n0_labels = u_num_0[origin_ids]
         return atoms, n0_labels
 
     def __generate_gb(self) -> None:
@@ -815,7 +848,7 @@ class GBMaker:
         # trigger a cascade of unwanted additional equalization passes.
         periodic_gap = ((right_bounds_eff[1] - right_max_x) +
                         (left_min_x - left_bounds[0]))
-        # Pre-initialise n0_labels so both the high-x and low-x exact passes can
+        # Pre-initialize n0_labels so both the high-x and low-x exact passes can
         # share and update the same label array without re-scanning the grain.
         n0_labels: np.ndarray | None = (
             right_n0_labels.copy()
@@ -865,8 +898,8 @@ class GBMaker:
                     warnings.warn(
                         f"Exact gap equalization: after removing "
                         f"{removed_layers} x-layer(s), periodic_gap "
-                        f"({final_periodic_gap:.4f} Å) < central_gap "
-                        f"({central_gap:.4f} Å). Stoichiometry preserved; "
+                        f"({final_periodic_gap:.4f} A) < central_gap "
+                        f"({central_gap:.4f} A). Stoichiometry preserved; "
                         "residual gap mismatch reported.",
                         UserWarning,
                         stacklevel=3,
@@ -875,7 +908,7 @@ class GBMaker:
                 # The period trim already removed one complete x-period (the
                 # stoichiometric PBC fix). Unit-cell positive x-offsets push
                 # right_max_x slightly past right_bounds_eff[1], making
-                # periodic_gap look negative — physically harmless because all
+                # periodic_gap look negative -- physically harmless because all
                 # atoms are inside the LAMMPS box. An additional equalization
                 # pass would over-trim and break stoichiometry.
                 pass
@@ -886,7 +919,11 @@ class GBMaker:
                 # is implemented by filtering complete conventional-cell
                 # origins from the already-built grain, so multi-species bases
                 # are not split by an atom-level x threshold.
-                assert right_float_result is not None
+                if right_float_result is None:
+                    raise GBMakerValueError(
+                        "Float gap equalization requires a float grain build result, "
+                        "but right_float_result is None on the float path."
+                    )
                 excess = right_max_x - (right_bounds_eff[1] - central_gap)
                 n_remove = max(1, math.ceil(excess / x_period_right))
                 new_upper = right_bounds_eff[1] - n_remove * x_period_right
@@ -894,15 +931,16 @@ class GBMaker:
                     warnings.warn(
                         f"Gap equalization would remove all atoms from the right "
                         f"grain ({n_remove} x-periods; right_x = "
-                        f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} Å, "
-                        f"x_period = {x_period_right:.4f} Å). "
+                        f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} A, "
+                        f"x_period = {x_period_right:.4f} A). "
                         "Skipping equalization to preserve non-empty grain."
                     )
                 else:
-                    if n_remove * x_period_right > (right_bounds_eff[1] - right_bounds_eff[0]) / 2:
+                    grain_width = right_bounds_eff[1] - right_bounds_eff[0]
+                    if n_remove * x_period_right > grain_width / 2:
                         warnings.warn(
                             f"Gap equalization removed {n_remove} x-period(s) "
-                            f"({n_remove * x_period_right:.4f} Å) — more than half "
+                            f"({n_remove * x_period_right:.4f} A) -- more than half "
                             "the right grain. The resulting bicrystal may be unusable."
                         )
                     trial_result = self.__trim_float_result_to_upper_x(
@@ -912,8 +950,8 @@ class GBMaker:
                         warnings.warn(
                             f"Gap equalization would remove all atoms from the right "
                             f"grain ({n_remove} x-periods; right_x = "
-                            f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} Å, "
-                            f"x_period = {x_period_right:.4f} Å). "
+                            f"{right_bounds_eff[1] - right_bounds_eff[0]:.4f} A, "
+                            f"x_period = {x_period_right:.4f} A). "
                             "Skipping equalization to preserve non-empty grain."
                         )
                     else:
@@ -926,8 +964,8 @@ class GBMaker:
                         if final_periodic_gap < central_gap - self.__epsilon:
                             warnings.warn(
                                 f"Float gap equalization: periodic_gap "
-                                f"({final_periodic_gap:.4f} Å) < central_gap "
-                                f"({central_gap:.4f} Å). Stoichiometry preserved; "
+                                f"({final_periodic_gap:.4f} A) < central_gap "
+                                f"({central_gap:.4f} A). Stoichiometry preserved; "
                                 "matching would require splitting an origin or "
                                 "deleting the right grain.",
                                 UserWarning,
@@ -945,7 +983,7 @@ class GBMaker:
         # the lowest-index u_num_0 fine layers from the right grain until
         # right_min_x >= left_max_x.  Each layer removal eliminates a complete set
         # of unit cells sharing one crystallographic x-position, so the right
-        # grain's U:O stoichiometry is preserved.
+        # grain's stoichiometry is preserved.
         if use_exact and n0_labels is not None:
             current_right_min_x = np.min(self.__right_grain["x"])
             if current_right_min_x < left_max_x - self.__epsilon:
@@ -1081,7 +1119,8 @@ class GBMaker:
             )
 
         # Use grain with larger y-period, consistent with how spacing["y"] is chosen
-        if np.linalg.norm(self.__R_left_approx[1]) >= np.linalg.norm(self.__R_right_approx[1]):
+        if (np.linalg.norm(self.__R_left_approx[1])
+                >= np.linalg.norm(self.__R_right_approx[1])):
             R_grain = self.__R_left
             R_grain_approx = self.__R_left_approx
         else:
@@ -1148,7 +1187,8 @@ class GBMaker:
         :param R_grain: Rotation matrix for the grain.
         :param R_grain_approx: Integer approximation of ``R_grain``.
         :param x_bounds: Length-2 array-like containing ``[x_min, x_max]``.
-        :return: Atoms plus complete-origin metadata for the selected grain.
+        :return: ``_FloatGrainBuildResult`` containing the atom array, origin
+            ID array, and basis size for the selected grain.
         """
         x_bounds = np.asarray(x_bounds, dtype=np.float64)
 
@@ -1525,7 +1565,9 @@ class GBMaker:
 
         axis_names = ("y", "z")
         axis_dims = (self.__y_dim, self.__z_dim)
-        for axis_name, axis_dim, is_periodic in zip(axis_names, axis_dims, inplane_periodic):
+        for axis_name, axis_dim, is_periodic in zip(
+            axis_names, axis_dims, inplane_periodic
+        ):
             if is_periodic:
                 continue
             inside_box &= (
@@ -1600,7 +1642,12 @@ class GBMaker:
         basis_size: int,
     ) -> "tuple[np.ndarray, np.ndarray]":
         """
-        Filter atoms by complete conventional-cell origins.
+        Promote an atom-level mask to origin level, then filter both arrays.
+
+        Calls ``__complete_origin_atom_mask`` to convert ``atom_mask`` into a
+        complete-origin mask (an origin is kept only when every one of its
+        ``basis_size`` atoms passes), then returns copies of ``atoms`` and
+        ``origin_ids`` filtered by that mask.
         """
         keep_atoms = self.__complete_origin_atom_mask(
             atom_mask, origin_ids, basis_size
@@ -1625,7 +1672,9 @@ class GBMaker:
 
         axis_names = ("y", "z")
         axis_dims = (self.__y_dim, self.__z_dim)
-        for axis_name, axis_dim, is_periodic in zip(axis_names, axis_dims, inplane_periodic):
+        for axis_name, axis_dim, is_periodic in zip(
+            axis_names, axis_dims, inplane_periodic
+        ):
             if is_periodic:
                 continue
             inside_box &= (
@@ -1753,8 +1802,8 @@ class GBMaker:
         positions = np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
         inplane_periodic = self.__inplane_periodic
 
-        # Fast path: orthogonal box - no tilt, so in-plane basis vectors have zero
-        # x-projection. Reduced coordinates are simple ratios; skip the solve round trip.
+        # Fast path: orthogonal box (no tilt). In-plane basis vectors have zero
+        # x-projection so reduced coordinates are simple ratios; skip the full solve.
         if np.allclose(selection_basis[:, 0], 0.0, atol=self.__epsilon, rtol=0.0):
             inside_box = np.ones(len(atoms), dtype=bool)
             for row_index, is_periodic in enumerate(inplane_periodic):
@@ -1838,7 +1887,8 @@ class GBMaker:
         wrapped_positions = self.__cartesian_from_box_coordinates(
             selected_box_coordinates, selection_basis
         )
-        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = wrapped_positions.T
+        x, y, z = wrapped_positions.T
+        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = x, y, z
 
         inside_x = (
             (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
@@ -1957,7 +2007,8 @@ class GBMaker:
         wrapped_positions = self.__cartesian_from_box_coordinates(
             selected_box_coordinates, selection_basis
         )
-        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = wrapped_positions.T
+        x, y, z = wrapped_positions.T
+        selected_atoms["x"], selected_atoms["y"], selected_atoms["z"] = x, y, z
 
         inside_x = (
             (selected_atoms["x"] >= x_bounds[0] - self.__epsilon)
@@ -1994,39 +2045,42 @@ class GBMaker:
 
     def __build_strain_accommodation(
         self,
-        current_dim: float,
         axis_name: str,
-        row_left,
-        row_right,
         *,
         require_pair: bool,
     ) -> "_AxisStrainAccommodation | None":
         """Return commensurate repeat/scale metadata for one in-plane axis.
 
-        Calls ``_find_commensurate_pair`` with ``self.__mismatch_tol`` and
-        ``self.__mismatch_max_cells``.  If a pair is found, the box length is
-        chosen according to ``self.__strain_grain``:
+        Derives the left and right grain periods from ``self.__R_left_approx``
+        and ``self.__R_right_approx`` using ``axis_name`` (``"y"`` -> row 1,
+        ``"z"`` -> row 2).  Calls ``_find_commensurate_pair`` with
+        ``self.__mismatch_tol`` and ``self.__mismatch_max_cells``.
 
-        - ``"both"`` — average of n1*d1 and n2*d2 (symmetric strain on each)
-        - ``"left"`` — n2*d2 (right grain exact, left grain absorbs strain)
-        - ``"right"`` — n1*d1 (left grain exact, right grain absorbs strain)
+        If a pair is found, the box length is chosen according to
+        ``self.__strain_grain``:
+
+        - ``"both"`` -- average of n1*d1 and n2*d2 (symmetric strain on each)
+        - ``"left"`` -- n2*d2 (right grain exact, left grain absorbs strain)
+        - ``"right"`` -- n1*d1 (left grain exact, right grain absorbs strain)
 
         If no pair is found and ``require_pair`` is false, emits a
         ``UserWarning`` and returns ``None`` so legacy approximate construction
         can retain its previous fallback.  Exact construction passes
         ``require_pair=True`` and fails clearly instead.
 
-        :param current_dim: Current box dimension (Angstroms).
-        :param axis_name: ``"y"`` or ``"z"`` (used in the warning message).
-        :param row_left: Row of ``__R_left_approx`` for this axis.
-        :param row_right: Row of ``__R_right_approx`` for this axis.
+        :param axis_name: ``"y"`` or ``"z"``.
         :param require_pair: Whether failure to find a pair should raise.
         :return: Accommodation metadata, or ``None`` for legacy fallback.
         """
-        d1 = self.__a0 * float(np.linalg.norm(np.asarray(row_left, dtype=float)))
-        d2 = self.__a0 * float(np.linalg.norm(np.asarray(row_right, dtype=float)))
+        axis_row = {"y": 1, "z": 2}[axis_name]
+        d1 = self.__a0 * float(
+            np.linalg.norm(np.asarray(self.__R_left_approx[axis_row], dtype=float))
+        )
+        d2 = self.__a0 * float(
+            np.linalg.norm(np.asarray(self.__R_right_approx[axis_row], dtype=float))
+        )
         result = _find_commensurate_pair(
-            d1, d2, self.__mismatch_tol, self.__mismatch_max_cells
+            d1, d2, tol=self.__mismatch_tol, max_n=self.__mismatch_max_cells
         )
         if result is None:
             residual = abs(d1 - d2) / max(d1, d2)
@@ -2087,9 +2141,7 @@ class GBMaker:
         )
         if self.__mismatch_tol is not None:
             y_accommodation = self.__build_strain_accommodation(
-                self.__y_dim, "y",
-                self.__R_left_approx[1], self.__R_right_approx[1],
-                require_pair=use_exact,
+                "y", require_pair=use_exact,
             )
             if y_accommodation is not None:
                 self.__strain_accommodation["y"] = y_accommodation
@@ -2099,9 +2151,7 @@ class GBMaker:
                 )
 
             z_accommodation = self.__build_strain_accommodation(
-                self.__z_dim, "z",
-                self.__R_left_approx[2], self.__R_right_approx[2],
-                require_pair=use_exact,
+                "z", require_pair=use_exact,
             )
             if z_accommodation is not None:
                 self.__strain_accommodation["z"] = z_accommodation
@@ -2181,8 +2231,8 @@ class GBMaker:
             defaults to False.
         :param expected_length: Specific to sequences or arrays. The expected length of
             the sequence or array, optional, defaults to None.
-        :param strictly_positive: Supercedes `positive` by enforcing value > 0. Optional,
-            defaults to False.
+        :param strictly_positive: Supercedes ``positive`` by enforcing value > 0.
+            Optional, defaults to False.
         :raises GBMakerTypeError: Exception raised if the type of the value does not
             match the expected type(s).
         :raises GBMakerValueError: Exception raised when invalid values are given for
@@ -2341,7 +2391,7 @@ class GBMaker:
             name_to_int = {name: i + 1 for i, name in enumerate(atom_names)}
 
         if charges is not None:
-            if not all([isinstance(i, int) or isinstance(i, str) for i in charges.keys()]):
+            if not all(isinstance(i, (int, str)) for i in charges.keys()):
                 raise GBMakerValueError(
                     "'charges' keys are required to be integers or strings.")
             if not all([isinstance(i, Number) for i in charges.values()]):
@@ -2375,15 +2425,22 @@ class GBMaker:
             fdata.write("{} atom types\n".format(len(set(atoms["name"]))))
             # Specify box dimensions
             fdata.write(
-                f'{box_sizes[0][0]:.{precision}f} {box_sizes[0][1]:.{precision}f} xlo xhi\n')
+                f"{box_sizes[0][0]:.{precision}f} "
+                f"{box_sizes[0][1]:.{precision}f} xlo xhi\n"
+            )
             fdata.write(
-                f'{box_sizes[1][0]:.{precision}f} {box_sizes[1][1]:.{precision}f} ylo yhi\n')
+                f"{box_sizes[1][0]:.{precision}f} "
+                f"{box_sizes[1][1]:.{precision}f} ylo yhi\n"
+            )
             fdata.write(
-                f'{box_sizes[2][0]:.{precision}f} {box_sizes[2][1]:.{precision}f} zlo zhi\n')
+                f"{box_sizes[2][0]:.{precision}f} "
+                f"{box_sizes[2][1]:.{precision}f} zlo zhi\n"
+            )
             if triclinic:
                 xy, xz, yz, theta = self.__get_triclinic_params()
                 fdata.write(
-                    f'{xy:.{precision}f} {xz:.{precision}f} {yz:.{precision}f} xy xz yz\n'
+                    f"{xy:.{precision}f} {xz:.{precision}f} "
+                    f"{yz:.{precision}f} xy xz yz\n"
                 )
                 ct, st = math.cos(theta), math.sin(theta)
                 Rx = np.array([[1, 0, 0], [0, ct, -st], [0, st, ct]])

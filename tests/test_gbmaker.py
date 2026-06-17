@@ -14,6 +14,7 @@ import pytest
 from scipy.spatial import KDTree
 
 from GBOpt.Atom import Atom, AtomValueError
+from GBOpt.BoundarySpec import CSLApproxSpec, CSLExactSpec, PQSpec
 from GBOpt.GBMaker import (
     GBMaker,
     GBMakerTypeError,
@@ -26,45 +27,77 @@ from zhang2021_boundaries import BOUNDARIES
 
 
 class TestStrainAccommodation(unittest.TestCase):
-    """Step 16b-c: mismatch_tol / strain_grain wired through from_boundary_spec."""
+    """Tests mismatch accommodation for boundary-spec construction."""
 
     A0 = 5.47       # UO2 lattice parameter (fluorite)
     STRUCTURE = "fluorite"
     ATOM_TYPES = ("U", "O")
     GB_THICKNESS = 0.0
-    # Sigma5 [001] 36.87 deg ATGB: P = identity, Q = [[4,-3,0],[3,4,0],[0,0,1]].
+    # Sigma5 [001] 36.87 deg ATGB:
+    # P = identity, Q = [[4,-3,0],[3,4,0],[0,0,1]].
     # With the primitive null basis for plane [1,0,0]:
-    #   row 1 (y-direction): left=[0,1,0] -> d_left=a0=5.47 Å
-    #                        right=[3,4,0] -> d_right=5*a0=27.35 Å  <-- real mismatch
+    #   row 1 (y-direction): left=[0,1,0] -> d_left=a0=5.47 A
+    #                        right=[3,4,0] -> d_right=5*a0=27.35 A
     #   row 2 (z-direction): left=right=[0,0,1] -> d_z=a0  (no mismatch)
-    # Commensurate pair: (n1=5, n2=1) -> 5*d_left = 1*d_right = 27.35 Å.
+    # Commensurate pair: (n1=5, n2=1) -> 5*d_left = 1*d_right = 27.35 A.
     # interaction_distance=1.0 keeps box dimensions small and avoids the
     # "Repeat factor modified to accommodate interaction distance" resize warning.
-    from GBOpt.BoundarySpec import CSLApproxSpec as _ApproxSpec
-    APPROX_SPEC = _ApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+    APPROX_SPEC = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
     INTERACTION_DISTANCE = 1.0
     INCOMMENSURATE_P = [[0, 2, 5], [0, 5, -2], [-1, 0, 0]]
     INCOMMENSURATE_Q = [[0, 1, 0], [1, 0, 0], [0, 0, -1]]
 
-    def _build(self, mismatch_tol=None, strain_grain="both"):
-        from GBOpt.GBMaker import GBMaker
-        from GBOpt.BoundarySpec import CSLApproxSpec
-        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
+    def _incommensurate_spec(self):
+        return PQSpec(
+            P=self.INCOMMENSURATE_P,
+            Q=self.INCOMMENSURATE_Q,
+            basis_mode="supplied",
+        )
+
+    def _build_exact_incommensurate_pq(
+        self,
+        strain_grain="both",
+        *,
+        a0=3.615,
+        structure="sc",
+        atom_types="Cu",
+        **kwargs,
+    ):
+        params = dict(
+            gb_thickness=0.0,
+            repeat_factor=[2, 3],
+            x_dim_min=10.0,
+            vacuum=0.0,
+            interaction_distance=self.INTERACTION_DISTANCE,
+            mismatch_tol=0.005,
+            strain_grain=strain_grain,
+        )
+        params.update(kwargs)
         return GBMaker.from_boundary_spec(
-            self.A0, self.STRUCTURE, self.ATOM_TYPES, spec,
+            a0, structure, atom_types, self._incommensurate_spec(),
+            mode="exact", **params
+        )
+
+    def _build(self, mismatch_tol=None, strain_grain="both"):
+        return GBMaker.from_boundary_spec(
+            self.A0, self.STRUCTURE, self.ATOM_TYPES, self.APPROX_SPEC,
             mode="approximate", gb_thickness=self.GB_THICKNESS,
             mismatch_tol=mismatch_tol, strain_grain=strain_grain,
             interaction_distance=self.INTERACTION_DISTANCE,
         )
 
     def test_default_no_accommodation(self):
-        gb = self._build()
-        assert gb.whole_system.size > 0
+        with patch("GBOpt.GBMaker._find_commensurate_pair") as find_pair:
+            gb = self._build()
+
+        find_pair.assert_not_called()
+        self.assertEqual(gb._GBMaker__strain_accommodation, {})
+        self.assertGreater(gb.whole_system.size, 0)
 
     def test_mismatch_tol_adjusts_y_dim_to_commensurate_value(self):
         # The real mismatch is in the y-direction (d_left=a0, d_right=5*a0).
         # After accommodation the commensurate pair is (5, 1), so
-        # y_dim = 5*d_left = 1*d_right = 27.35 Å exactly.
+        # y_dim = 5*d_left = 1*d_right = 27.35 A exactly.
         gb = self._build(mismatch_tol=0.005)
         a0 = self.A0
         d_right_y = 5.0 * a0   # right grain y-period = norm([3,4,0])*a0
@@ -76,35 +109,45 @@ class TestStrainAccommodation(unittest.TestCase):
                                msg=f"y_dim={y:.4f} != n1*d_left={5*d_left_y:.4f}")
 
     def test_strain_grain_modes_y_dim(self):
-        # For strain_grain='left'  the box is set to n2*d_right (right exact).
-        # For strain_grain='right' the box is set to n1*d_left  (left exact).
-        # Both values equal 27.35 Å since the commensurate pair is exact
-        # (5*d_left = 1*d_right exactly), so all three modes agree on y_dim.
-        a0 = self.A0
-        d_left_y = a0
-        d_right_y = 5.0 * a0
-        n1, n2 = 5, 1  # from _find_commensurate_pair(d_left_y, d_right_y, tol=0.005)
-        gb_left = self._build(mismatch_tol=0.005, strain_grain="left")
-        gb_right = self._build(mismatch_tol=0.005, strain_grain="right")
-        gb_both = self._build(mismatch_tol=0.005, strain_grain="both")
-        # 'left'  -> right grain is unstrained -> y_dim = n2*d_right
-        self.assertAlmostEqual(gb_left.y_dim, n2 * d_right_y, delta=1e-4,
-                               msg=f"strain_grain='left': y_dim={gb_left.y_dim:.4f} != {n2*d_right_y:.4f}")
-        # 'right' -> left grain is unstrained -> y_dim = n1*d_left
-        self.assertAlmostEqual(gb_right.y_dim, n1 * d_left_y, delta=1e-4,
-                               msg=f"strain_grain='right': y_dim={gb_right.y_dim:.4f} != {n1*d_left_y:.4f}")
-        # 'both'  -> commensurate value (same as others since pair is exact)
-        self.assertAlmostEqual(gb_both.y_dim, n2 * d_right_y, delta=1e-4,
-                               msg=f"strain_grain='both': y_dim={gb_both.y_dim:.4f} != {n2*d_right_y:.4f}")
+        d_left = 3.615 * np.linalg.norm(np.array(self.INCOMMENSURATE_P[1]))
+        d_right = 3.615 * np.linalg.norm(np.array(self.INCOMMENSURATE_Q[1]))
+        l_left = 5 * d_left
+        l_right = 27 * d_right
+        expected_y_dims = {
+            "both": (l_left + l_right) / 2.0,
+            "left": l_right,
+            "right": l_left,
+        }
+
+        actual_y_dims = {}
+        for mode, expected_y_dim in expected_y_dims.items():
+            with self.subTest(mode=mode):
+                gb = self._build_exact_incommensurate_pq(strain_grain=mode)
+                actual_y_dims[mode] = gb.y_dim
+                self.assertAlmostEqual(gb.y_dim, expected_y_dim, delta=1e-8)
+
+        self.assertNotAlmostEqual(
+            actual_y_dims["left"], actual_y_dims["right"], delta=1e-8
+        )
+        self.assertNotAlmostEqual(
+            actual_y_dims["both"], actual_y_dims["left"], delta=1e-8
+        )
+        self.assertNotAlmostEqual(
+            actual_y_dims["both"], actual_y_dims["right"], delta=1e-8
+        )
 
     def test_y_and_z_periods_independent(self):
         # y-direction: genuinely mismatched (d_left=a0, d_right=5*a0)
         # z-direction: tilt axis [0,0,1], same for both grains -> no mismatch
         gb = self._build(mismatch_tol=0.005)
         self.assertAlmostEqual(gb.y_dim, 5.0 * self.A0, delta=1e-4,
-                               msg=f"y_dim={gb.y_dim:.4f} != 5*a0={5*self.A0:.4f} (y mismatch accommodated)")
+                               msg=f"y_dim={gb.y_dim:.4f} != "
+                               f"5*a0={5*self.A0:.4f} "
+                               "(y mismatch accommodated)")
         self.assertAlmostEqual(gb.z_dim, self.A0, delta=1e-4,
-                               msg=f"z_dim={gb.z_dim:.4f} != a0={self.A0:.4f} (no z mismatch expected)")
+                               msg=f"z_dim={gb.z_dim:.4f} != "
+                               f"a0={self.A0:.4f} "
+                               "(no z mismatch expected)")
 
     def test_fallback_warning_when_no_pair_found(self):
         # Force _find_commensurate_pair to return None for both axes so the
@@ -119,23 +162,6 @@ class TestStrainAccommodation(unittest.TestCase):
             f"Expected a 'No commensurate' warning; got: {msgs}",
         )
 
-    def _build_exact_incommensurate_pq(self, strain_grain="both", **kwargs):
-        from GBOpt.BoundarySpec import PQSpec
-        spec = PQSpec(P=self.INCOMMENSURATE_P, Q=self.INCOMMENSURATE_Q)
-        params = dict(
-            gb_thickness=0.0,
-            repeat_factor=[2, 3],
-            x_dim_min=10.0,
-            vacuum=0.0,
-            interaction_distance=self.INTERACTION_DISTANCE,
-            mismatch_tol=0.005,
-            strain_grain=strain_grain,
-        )
-        params.update(kwargs)
-        return GBMaker.from_boundary_spec(
-            3.615, "sc", "Cu", spec, mode="exact", **params
-        )
-
     def test_exact_mismatch_tol_builds_incommensurate_pqspec(self):
         gb = self._build_exact_incommensurate_pq()
         self.assertGreater(gb.whole_system.size, 0)
@@ -144,12 +170,26 @@ class TestStrainAccommodation(unittest.TestCase):
         self.assertEqual(accommodation.right_repeats, 27)
         self.assertLessEqual(accommodation.mismatch, 0.005)
 
+    def test_exact_mismatch_tol_preserves_rocksalt_stoichiometry(self):
+        gb = self._build_exact_incommensurate_pq(
+            a0=5.64,
+            structure="rocksalt",
+            atom_types=("Na", "Cl"),
+        )
+
+        names, counts = np.unique(gb.whole_system["name"], return_counts=True)
+        species_counts = {str(name): int(count) for name, count in zip(names, counts)}
+        self.assertEqual(
+            species_counts["Na"],
+            species_counts["Cl"],
+            "Exact mismatch_tol rocksalt build is not stoichiometric: "
+            f"{species_counts}",
+        )
+
     def test_exact_without_mismatch_tol_still_raises_commensurability_error(self):
-        from GBOpt.BoundarySpec import PQSpec
-        spec = PQSpec(P=self.INCOMMENSURATE_P, Q=self.INCOMMENSURATE_Q)
         with self.assertRaises(GBMakerValueError):
             GBMaker.from_boundary_spec(
-                3.615, "sc", "Cu", spec, mode="exact",
+                3.615, "sc", "Cu", self._incommensurate_spec(), mode="exact",
                 gb_thickness=0.0,
                 repeat_factor=[2, 3],
                 x_dim_min=10.0,
@@ -176,7 +216,8 @@ class TestStrainAccommodation(unittest.TestCase):
             "left": (l_right, l_right / l_left, 1.0),
             "right": (l_left, 1.0, l_left / l_right),
         }
-        for mode, (expected_y_dim, expected_left_scale, expected_right_scale) in cases.items():
+        for mode, expected in cases.items():
+            expected_y_dim, expected_left_scale, expected_right_scale = expected
             with self.subTest(mode=mode):
                 gb = self._build_exact_incommensurate_pq(strain_grain=mode)
                 accommodation = gb._GBMaker__strain_accommodation["y"]
@@ -195,46 +236,40 @@ class TestStrainAccommodation(unittest.TestCase):
         self.assertEqual(accommodation.right_repeats, 6)
         self.assertAlmostEqual(gb.z_dim, 6 * 3.615, delta=1e-8)
 
-    def test_exact_mismatch_tol_builds_incommensurate_cslexactspec(self):
-        from GBOpt.BoundarySpec import CSLExactSpec
+    def test_exact_mismatch_tol_builds_primitive_cslexactspec(self):
         spec = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
 
-        with self.assertRaises(GBMakerValueError):
-            GBMaker.from_boundary_spec(
-                3.615, "sc", "Cu", spec, mode="exact",
-                gb_thickness=0.0,
-                repeat_factor=[2, 2],
-                x_dim_min=5.0,
-                vacuum=0.0,
-                interaction_distance=self.INTERACTION_DISTANCE,
-            )
+        gb_unstrained = GBMaker.from_boundary_spec(
+            3.615, "sc", "Cu", spec, mode="exact",
+            gb_thickness=0.0,
+            repeat_factor=[2, 2],
+            x_dim_min=5.0,
+            vacuum=0.0,
+            interaction_distance=self.INTERACTION_DISTANCE,
+        )
+        self.assertGreater(gb_unstrained.whole_system.size, 0)
+        self.assertEqual(gb_unstrained._GBMaker__strain_accommodation, {})
 
-        # This synthetic simple-cubic case intentionally uses a very thin
-        # x-slab relative to the large in-plane repeat pair. The warning
-        # documents that this test validates accommodation metadata, not a
-        # production-quality boundary geometry.
-        with self.assertWarnsRegex(UserWarning, "Exact gap equalization"):
-            gb = GBMaker.from_boundary_spec(
-                3.615, "sc", "Cu", spec, mode="exact",
-                gb_thickness=0.0,
-                repeat_factor=[2, 2],
-                x_dim_min=5.0,
-                vacuum=0.0,
-                interaction_distance=self.INTERACTION_DISTANCE,
-                mismatch_tol=0.005,
-            )
+        gb = GBMaker.from_boundary_spec(
+            3.615, "sc", "Cu", spec, mode="exact",
+            gb_thickness=0.0,
+            repeat_factor=[2, 2],
+            x_dim_min=5.0,
+            vacuum=0.0,
+            interaction_distance=self.INTERACTION_DISTANCE,
+            mismatch_tol=0.005,
+        )
         self.assertGreater(gb.whole_system.size, 0)
         accommodation_y = gb._GBMaker__strain_accommodation["y"]
         accommodation_z = gb._GBMaker__strain_accommodation["z"]
-        self.assertEqual(accommodation_y.left_repeats, 29)
-        self.assertEqual(accommodation_y.right_repeats, 13)
-        self.assertEqual(accommodation_z.left_repeats, 29)
-        self.assertEqual(accommodation_z.right_repeats, 13)
-        self.assertLessEqual(accommodation_y.mismatch, 0.005)
-        self.assertLessEqual(accommodation_z.mismatch, 0.005)
+        self.assertEqual(accommodation_y.left_repeats, 1)
+        self.assertEqual(accommodation_y.right_repeats, 1)
+        self.assertEqual(accommodation_z.left_repeats, 1)
+        self.assertEqual(accommodation_z.right_repeats, 1)
+        self.assertEqual(accommodation_y.mismatch, 0.0)
+        self.assertEqual(accommodation_z.mismatch, 0.0)
 
     def test_invalid_strain_grain_raises(self):
-        from GBOpt.BoundarySpec import CSLApproxSpec
         spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
         with self.assertRaises(GBMakerValueError):
             GBMaker.from_boundary_spec(
@@ -244,7 +279,7 @@ class TestStrainAccommodation(unittest.TestCase):
 
 
 class TestFindCommensurablePair(unittest.TestCase):
-    """Unit tests for the _find_commensurate_pair helper (Step 16a)."""
+    """Unit tests for the _find_commensurate_pair helper."""
 
     def test_identical_periods_returns_n1_n2_1(self):
         result = _find_commensurate_pair(3.0, 3.0, tol=0.005, max_n=10)
@@ -449,7 +484,7 @@ class TestGBMaker(unittest.TestCase):
         self.assertTrue(all(isinstance(v, bool) for v in result))
 
     def test_inplane_periodic_fully_periodic_for_csl_boundary(self):
-        # Sigma5 [001] 36.87 deg boundary is a fully coherent CSL — both in-plane
+        # Sigma5 [001] 36.87 deg boundary is a fully coherent CSL; both in-plane
         # directions must be periodic.
         self.assertEqual(self.gbm.inplane_periodic, (True, True))
 
@@ -598,7 +633,12 @@ class TestGBMaker(unittest.TestCase):
         np.testing.assert_array_equal(approx_matrix, expected_matrix)
 
     def test_calculate_periodic_spacing_logic(self):
-        with patch.object(GBMaker, "_GBMaker__calculate_periodic_spacing", return_value={"x": 5.0, "y": 10.0, "z": 15.0}):
+        spacing = {"x": 5.0, "y": 10.0, "z": 15.0}
+        with patch.object(
+            GBMaker,
+            "_GBMaker__calculate_periodic_spacing",
+            return_value=spacing,
+        ):
             self.gbm.update_spacing()
             self.assertEqual(self.gbm.spacing["x"], 5.0)
             self.assertEqual(self.gbm.spacing["y"], 10.0)
@@ -827,7 +867,9 @@ class TestGBMakerScaledPeriodicBasisVector(unittest.TestCase):
             period_vector, np.array([2.0, -1.0, 0.5]), atol=0.0, rtol=0.0
         )
 
-    def test_scaled_periodic_basis_vector_accepts_nonzero_projection_on_nonzero_axis(self):
+    def test_scaled_periodic_basis_vector_accepts_nonzero_projection_on_nonzero_axis(
+        self,
+    ):
         period_vector = np.array([0.0, 1e-10, 0.0])
 
         scaled = self.gbm._GBMaker__scaled_periodic_basis_vector(
@@ -849,7 +891,9 @@ class TestGBMakerScaledPeriodicBasisVector(unittest.TestCase):
             scaled, np.array([6.0, -3.0, 12.0]), atol=1e-12, rtol=0.0
         )
 
-    def test_scaled_periodic_basis_vector_scales_negative_selected_axis_projection(self):
+    def test_scaled_periodic_basis_vector_scales_negative_selected_axis_projection(
+        self,
+    ):
         period_vector = np.array([1.5, -0.75, -3.0])
 
         scaled = self.gbm._GBMaker__scaled_periodic_basis_vector(
@@ -941,7 +985,9 @@ class TestGBMakerPeriodicSpacing(unittest.TestCase):
             interaction_distance=5.0,
         )
 
-    def test_periodic_spacing_sigma3_keeps_periodic_flags_and_x_lengths_consistent(self):
+    def test_periodic_spacing_sigma3_keeps_periodic_flags_and_x_lengths_consistent(
+        self,
+    ):
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             gbm = self._make_gb(self.sigma3_111)
@@ -980,7 +1026,10 @@ class TestGBMakerPeriodicSpacing(unittest.TestCase):
         self.assertEqual(len(non_periodic_messages), 1)
         self.assertRegex(
             non_periodic_messages[0],
-            r"Required y-spacing .+ exceeds threshold .+; boundary is non-periodic along y\.",
+            (
+                r"Required y-spacing .+ exceeds threshold .+; boundary is "
+                r"non-periodic along y\."
+            ),
         )
 
 
@@ -1051,7 +1100,9 @@ class TestGBMakerBoxPeriodicBasis(unittest.TestCase):
         self.gbm._GBMaker__z_dim = 15.0
         self.gbm._GBMaker__inplane_periodic = (True, False)
 
-    def test_box_periodic_basis_scales_orthogonal_basis_and_zeros_nonperiodic_axis(self):
+    def test_box_periodic_basis_scales_orthogonal_basis_and_zeros_nonperiodic_axis(
+        self,
+    ):
         primitive_periods = np.array([[0.0, 3.0, 0.0], [0.0, 0.0, 5.0]])
 
         basis = self.gbm._GBMaker__box_periodic_basis(primitive_periods)
@@ -1063,7 +1114,9 @@ class TestGBMakerBoxPeriodicBasis(unittest.TestCase):
             rtol=0.0,
         )
 
-    def test_box_periodic_basis_preserves_tilted_components_while_matching_axis_lengths(self):
+    def test_box_periodic_basis_preserves_tilted_components_while_matching_axis_lengths(
+        self,
+    ):
         self.gbm._GBMaker__inplane_periodic = (True, True)
         primitive_periods = np.array([[2.0, 4.0, -1.0], [-3.0, 1.5, 5.0]])
 
@@ -1164,7 +1217,9 @@ class TestGBMakerBoxCoordinateConversions(unittest.TestCase):
             rtol=0.0,
         )
 
-    def test_reduced_box_coordinates_and_cartesian_from_box_coordinates_round_trip(self):
+    def test_reduced_box_coordinates_and_cartesian_from_box_coordinates_round_trip(
+        self,
+    ):
         box_basis = np.array([[6.0, 12.0, -3.0], [-9.0, 4.5, 15.0]])
         cartesian = np.array(
             [[-3.75, 6.375, 10.5], [-0.8, 6.9, 1.5], [2.25, 0.0, 7.5]]
@@ -1220,7 +1275,9 @@ class TestGBMakerXIndexRange(unittest.TestCase):
         self.assertLessEqual(covered_min, x_bounds[0])
         self.assertGreaterEqual(covered_max, x_bounds[1])
 
-    def test_x_index_range_is_contiguous_and_includes_expected_indices_for_tilted_box(self):
+    def test_x_index_range_is_contiguous_and_includes_expected_indices_for_tilted_box(
+        self,
+    ):
         primitive_periods = np.array([[1.0, 2.0, 0.0], [-1.0, 0.0, 2.0]])
         rotated_unit_cell_basis = np.eye(3)
         x_bounds = np.array([0.0, 8.0])
@@ -1272,7 +1329,9 @@ class TestGBMakerClipAtomsToCartesianBox(unittest.TestCase):
         self.assertEqual(len(clipped), 1)
         self.assertAlmostEqual(clipped["x"][0], -5e-11, delta=1e-15)
 
-    def test_clip_atoms_to_cartesian_box_clamps_small_negative_nonperiodic_coordinates(self):
+    def test_clip_atoms_to_cartesian_box_clamps_small_negative_nonperiodic_coordinates(
+        self,
+    ):
         atoms = np.array(
             [("Cu", 1.0, -5e-11, -2e-11)],
             dtype=Atom.atom_dtype,
@@ -1352,7 +1411,9 @@ class TestGBMakerDeduplicatePositions(unittest.TestCase):
 
         self.assertEqual(len(deduplicated), 1)
         np.testing.assert_allclose(
-            np.array([deduplicated["x"][0], deduplicated["y"][0], deduplicated["z"][0]]),
+            np.array(
+                [deduplicated["x"][0], deduplicated["y"][0], deduplicated["z"][0]]
+            ),
             np.array([0.0, 0.0, 0.0]),
             atol=1e-15,
             rtol=0.0,
@@ -1387,7 +1448,9 @@ class TestGBMakerSelectAtomsInBoxBasis(unittest.TestCase):
         self.gbm._GBMaker__z_dim = 15.0
         self.x_bounds = np.array([0.0, 5.0])
 
-    def test_select_atoms_in_box_basis_removes_duplicate_periodic_faces_in_orthorhombic_box(self):
+    def test_select_atoms_in_box_basis_deduplicates_orthorhombic_faces(
+        self,
+    ):
         self.gbm._GBMaker__inplane_periodic = (True, True)
         primitive_periods = np.array([[0.0, 3.0, 0.0], [0.0, 0.0, 5.0]])
         atoms = np.array(
@@ -1415,7 +1478,9 @@ class TestGBMakerSelectAtomsInBoxBasis(unittest.TestCase):
             rtol=0.0,
         )
 
-    def test_select_atoms_in_box_basis_keeps_one_tilted_periodic_representative_and_wraps_x(self):
+    def test_select_atoms_in_box_basis_deduplicates_tilted_faces_and_wraps_x(
+        self,
+    ):
         self.gbm._GBMaker__inplane_periodic = (True, True)
         primitive_periods = np.array([[2.0, 4.0, -1.0], [-3.0, 1.5, 5.0]])
         box_basis = self.gbm._GBMaker__selection_basis_vectors(primitive_periods)
@@ -1461,7 +1526,9 @@ class TestGBMakerSelectAtomsInBoxBasis(unittest.TestCase):
         self.assertTrue(np.all(reduced[:, 2] >= -z_tol))
         self.assertTrue(np.all(reduced[:, 2] < 1.0 + z_tol))
 
-    def test_select_atoms_in_box_basis_handles_mixed_periodic_and_nonperiodic_axes(self):
+    def test_select_atoms_in_box_basis_handles_mixed_periodic_and_nonperiodic_axes(
+        self,
+    ):
         self.gbm._GBMaker__inplane_periodic = (True, False)
         primitive_periods = np.array([[2.0, 4.0, -1.0], [0.0, 0.0, 5.0]])
         box_basis = self.gbm._GBMaker__selection_basis_vectors(primitive_periods)
@@ -1524,7 +1591,10 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
 
     def _primitive_periods(self, R_grain, R_grain_approx):
         rotated_unit_cell_basis = self.gbm.unit_cell.conventional @ R_grain.T
-        return np.asarray(R_grain_approx[1:], dtype=np.float64) @ rotated_unit_cell_basis
+        return (
+            np.asarray(R_grain_approx[1:], dtype=np.float64)
+            @ rotated_unit_cell_basis
+        )
 
     def test_generate_grain_keeps_atoms_within_grain_bounds_and_unique(self):
         interface = self.gbm._GBMaker__left_x + self.gbm.vacuum_thickness
@@ -1545,7 +1615,8 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
                 quantized = np.round(positions / self.gbm.epsilon).astype(np.int64)
                 self.assertEqual(len(np.unique(quantized, axis=0)), len(positions))
                 self.assertTrue(
-                    np.all(positions[:, 0] >= x_bounds[0] - self.gbm.epsilon))
+                    np.all(positions[:, 0] >= x_bounds[0] - self.gbm.epsilon)
+                )
                 self.assertTrue(np.all(positions[:, 0] < x_bounds[1]))
                 self.assertTrue(np.all(positions[:, 1] >= -self.gbm.epsilon))
                 self.assertTrue(np.all(positions[:, 1] < self.gbm.y_dim))
@@ -1556,20 +1627,29 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
         interface = self.gbm._GBMaker__left_x + self.gbm.vacuum_thickness
 
         self.assertGreaterEqual(
-            np.min(self.gbm.right_grain["x"]), interface - self.gbm.epsilon)
+            np.min(self.gbm.right_grain["x"]), interface - self.gbm.epsilon
+        )
 
     def test_generate_grain_removes_periodic_duplicates_in_sigma5_csl_cell(self):
         grains = (
-            (self.gbm.left_grain, self.gbm._GBMaker__R_left, self.gbm._GBMaker__R_left_approx),
-            (self.gbm.right_grain, self.gbm._GBMaker__R_right,
-             self.gbm._GBMaker__R_right_approx),
+            (
+                self.gbm.left_grain,
+                self.gbm._GBMaker__R_left,
+                self.gbm._GBMaker__R_left_approx,
+            ),
+            (
+                self.gbm.right_grain,
+                self.gbm._GBMaker__R_right,
+                self.gbm._GBMaker__R_right_approx,
+            ),
         )
 
         for atoms, R_grain, R_grain_approx in grains:
             with self.subTest(grain=R_grain_approx.tolist()):
                 primitive_periods = self._primitive_periods(R_grain, R_grain_approx)
                 selection_basis = self.gbm._GBMaker__selection_basis_vectors(
-                    primitive_periods)
+                    primitive_periods
+                )
                 canonical_box = self.gbm._GBMaker__reduced_box_coordinates(
                     self._positions(atoms), selection_basis
                 )
@@ -1684,8 +1764,9 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         pbc_gap = gbm.x_dim - np.max(gbm.right_grain["x"])
         self.assertGreater(
             pbc_gap, d_hkl * 0.1,
-            f"Rightmost right-grain atom is {pbc_gap:.2e} Å from x_dim; "
-            f"expected gap > {d_hkl * 0.1:.4f} Å (0.1 * d_hkl = {d_hkl:.4f} Å)",
+            f"Rightmost right-grain atom is {pbc_gap:.2e} A from x_dim; "
+            f"expected gap > {d_hkl * 0.1:.4f} A "
+            f"(0.1 * d_hkl = {d_hkl:.4f} A)",
         )
 
     def test_asymmetric_trim_warns_when_equalization_would_empty_right_grain(self):
@@ -1715,9 +1796,9 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         self.assertLessEqual(
             residual, x_period_right,
             msg=(
-                f"Periodic gap {periodic_gap:.6f} Å and central gap "
-                f"{central_gap:.6f} Å differ by {residual:.6f} Å, "
-                f"which exceeds one x-period ({x_period_right:.4f} Å)"
+                f"Periodic gap {periodic_gap:.6f} A and central gap "
+                f"{central_gap:.6f} A differ by {residual:.6f} A, "
+                f"which exceeds one x-period ({x_period_right:.4f} A)"
             ),
         )
 
@@ -1760,9 +1841,9 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             residual,
             x_period_right + gbm.epsilon,
             msg=(
-                f"Periodic gap {periodic_gap:.6f} Å and central gap "
-                f"{central_gap:.6f} Å differ by {residual:.6f} Å, "
-                f"which exceeds one x-period ({x_period_right:.4f} Å)"
+                f"Periodic gap {periodic_gap:.6f} A and central gap "
+                f"{central_gap:.6f} A differ by {residual:.6f} A, "
+                f"which exceeds one x-period ({x_period_right:.4f} A)"
             ),
         )
 
@@ -1789,8 +1870,8 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         self.assertGreater(
             periodic_gap, central_gap,
             msg=(
-                f"Periodic gap {periodic_gap:.6f} Å should exceed central gap "
-                f"{central_gap:.6f} Å when left grain is denser in x"
+                f"Periodic gap {periodic_gap:.6f} A should exceed central gap "
+                f"{central_gap:.6f} A when left grain is denser in x"
             ),
         )
 
@@ -1828,20 +1909,14 @@ class TestGBMakerGenerateGB(unittest.TestCase):
 
     def test_known_fluorite_vacuum0_trim_regressions_are_stoichiometric(self):
         """Legacy float-path trimming must preserve complete fluorite origins."""
-        cases = {
-            "sigma29_100_0_7_3bar_0_3bar_7_STGB": np.array(
-                [0.00000000, 0.76101275, 0.00000000, -1.57079633, -1.16590454]
-            ),
-            "sigma3_110_1_1bar_0_1_1bar_4_ATGB": np.array(
-                [-2.35619449, 1.91063324, 2.35619449, 0.00000000, 0.78539816]
-            ),
-            "sigma5_100_0_7bar_1bar_0_5_5bar_ATGB": np.array(
-                [0.00000000, 0.92729522, 0.00000000, -1.57079633, 1.42889927]
-            ),
-            "sigma11_110_3bar_3bar_2_3bar_3bar_2bar_STGB": np.array(
-                [-0.78539816, 2.26057133, 0.78539816, 2.55359005, 0.69398059]
-            ),
-        }
+        case_names = (
+            "sigma29_100_0_7_3bar_0_3bar_7_STGB",
+            "sigma3_110_1_1bar_0_1_1bar_4_ATGB",
+            "sigma5_100_0_7bar_1bar_0_5_5bar_ATGB",
+            "sigma11_110_3bar_3bar_2_3bar_3bar_2bar_STGB",
+            "sigma13_100_0_0_1_0_0_1bar_twist",
+            "sigma5_100_2_1_1_2bar_1bar_1bar_mixed",
+        )
 
         a0 = 5.454
         kwargs = dict(
@@ -1852,8 +1927,9 @@ class TestGBMakerGenerateGB(unittest.TestCase):
             interaction_distance=11.0,
         )
 
-        for name, misorientation in cases.items():
+        for name in case_names:
             with self.subTest(boundary=name):
+                misorientation = np.array(BOUNDARIES[name]["misorientation"])
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", UserWarning)
                     probe = GBMaker(a0, "fluorite", a0, misorientation, **kwargs)
@@ -2049,8 +2125,10 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         # as given by Olmsted et al. doi: 10.1016/j.actamat.2009.04.007.
         #   P = [[2,2,2], [1,-1,0], [1,1,-2]]
         #   Q = [[2,2,2], [-1,1,0], [-1,-1,2]]
-        # Misorientation: 180 deg rotation about [1,1,1] -> ZXZ = [3pi/4, arccos(-1/3), pi/4]
-        # Inclination: boundary normal [1,1,1]           -> theta=pi/4, phi=-arctan(1/sqrt(2))
+        # Misorientation: 180 deg rotation about [1,1,1] gives ZXZ =
+        # [3pi/4, arccos(-1/3), pi/4].
+        # Inclination: boundary normal [1,1,1] gives theta=pi/4,
+        # phi=-arctan(1/sqrt(2)).
         self.sigma3_111_180deg = np.array(
             [
                 3 * np.pi / 4,
@@ -2075,12 +2153,16 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         )
 
         # Sigma7 (111) twist boundary.
-        # Rotation angle theta = 2*arctan(sqrt(3)/5); exact: cos(theta)=11/14, sin(theta)=5*sqrt(3)/14.
+        # Rotation angle theta = 2*arctan(sqrt(3)/5);
+        # exact: cos(theta)=11/14, sin(theta)=5*sqrt(3)/14.
         # R_mis = [[6/7,-2/7,3/7],[3/7,6/7,-2/7],[-2/7,3/7,6/7]]
-        # ZXZ Euler angles: alpha=arctan(3/2), beta=arccos(6/7), gamma=arctan(-2/3)
-        # Same boundary-plane inclination as Sigma3 (111): theta=pi/4, phi=-arctan(1/sqrt(2)).
-        # Note: the right-grain y-direction period (row [2,11,-13], norm=7*sqrt(6)~17.15*a0)
-        # exceeds the default 15*a0 threshold, so a non-periodic warning is expected.
+        # ZXZ Euler angles: alpha=arctan(3/2), beta=arccos(6/7),
+        # gamma=arctan(-2/3).
+        # Same boundary-plane inclination as Sigma3 (111): theta=pi/4,
+        # phi=-arctan(1/sqrt(2)).
+        # Note: the right-grain y-direction period has row [2,11,-13],
+        # norm=7*sqrt(6)~17.15*a0, exceeding the default 15*a0 threshold,
+        # so a non-periodic warning is expected.
         self.sigma7_111 = np.array(
             [
                 np.arctan(3 / 2),
@@ -2128,8 +2210,8 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         Return True if candidate and reference share the same y,z positions (same
         stacking type). KDTree boxsize applies the minimum-image convention so atoms
         straddling a periodic boundary are correctly identified as coincident.
-        tol=0.1 Å is well above FP noise (~1e-10 Å) and well below the minimum DSC shift
-        between different plane types (~0.85 Å for Cu).
+        tol=0.1 A is well above FP noise (~1e-10 A) and well below the minimum
+        DSC shift between different plane types (~0.85 A for Cu).
         """
         if len(ref) != len(cand):
             return False
@@ -2150,8 +2232,8 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
             interface_gap,
             d_spacing,
             delta=d_spacing * 0.05,
-            msg=f"Interface x-gap {interface_gap:.4f} Å should equal "
-            f"d_spacing = {d_spacing:.4f} Å.  A gap of ~0 means both grains "
+            msg=f"Interface x-gap {interface_gap:.4f} A should equal "
+            f"d_spacing = {d_spacing:.4f} A.  A gap of ~0 means both grains "
             f"placed a plane at the same x-coordinate.",
         )
         self.assertFalse(
@@ -2289,7 +2371,7 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         return R_mis, R_incl
 
     def test_matrices_do_not_commute(self):
-        """Guard: sigma3_111_180deg must produce genuinely non-commuting R_mis and R_incl.
+        """Guard: sigma3_111_180deg gives non-commuting R_mis and R_incl.
 
         If the two matrices happened to commute, the spacing tests would pass even
         with the wrong multiplication order, defeating their value as regressions.
@@ -2302,12 +2384,13 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         )
 
     def test_spacing_uses_correct_matrix_order(self):
-        """The right-grain periodic spacing must come from R_incl @ R_mis, not R_mis @ R_incl.
+        """Right-grain periodic spacing must use R_incl @ R_mis.
 
-        For Sigma3 (111), row 0 of R_incl @ R_mis is [1,1,1]/sqrt(3), giving
-        x-spacing a0*sqrt(3).  The reversed product R_mis @ R_incl has a different
-        row 0 with irrational mixing of sqrt(2)/sqrt(3)/sqrt(6), so it does NOT
-        simplify to [1,1,1]/sqrt(3).  This test documents the invariant directly,
+        The reversed product R_mis @ R_incl gives the wrong spacing. For Sigma3
+        (111), row 0 of R_incl @ R_mis is [1,1,1]/sqrt(3), giving x-spacing
+        a0*sqrt(3). The reversed product R_mis @ R_incl has a different row 0
+        with irrational mixing of sqrt(2)/sqrt(3)/sqrt(6), so it does NOT
+        simplify to [1,1,1]/sqrt(3). This test documents the invariant directly,
         independent of GBMaker internals.
         """
         R_mis, R_incl = self._decompose(self.sigma3_111_180deg)
@@ -2320,7 +2403,8 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         self.assertFalse(
             np.allclose(wrong_row0, np.array([1, 1, 1]) / np.sqrt(3)),
             "Row 0 of R_mis @ R_incl must NOT equal [1,1,1]/sqrt(3); "
-            "if it did, the wrong order would be indistinguishable from the correct one.",
+            "if it did, the wrong order would be indistinguishable "
+            "from the correct one.",
         )
 
     def test_decompose_matches_gbmaker(self):
@@ -2331,9 +2415,10 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         R_incl: for (111) inclination, Rz(phi) @ Ry(theta) must place [1,1,1]/sqrt(3)
         in row 0.  A wrong R_incl order (e.g. Ry @ Rz) would produce a different row.
 
-        R_mis: for 180-deg rotation about [111], ZXZ Euler [3pi/4, arccos(-1/3), pi/4]
-        must yield [[-1/3, 2/3, 2/3], ...].  A wrong Euler series (e.g. ZYZ) would
-        produce a different matrix and R_mis[0,0] would not equal -1/3.
+        R_mis: for 180-deg rotation about [111], ZXZ Euler
+        [3pi/4, arccos(-1/3), pi/4] must yield [[-1/3, 2/3, 2/3], ...].
+        A wrong Euler series (e.g. ZYZ) would produce a different matrix and
+        R_mis[0,0] would not equal -1/3.
         """
         R_mis, R_incl = self._decompose(self.sigma3_111_180deg)
         # R_incl check: row 0 must be [1,1,1]/sqrt(3).
@@ -2349,7 +2434,8 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
             -1 / 3,
             places=5,
             msg=f"R_mis[0,0]={R_mis[0, 0]}; expected -1/3. "
-            "Wrong Euler series in _decompose (e.g. ZYZ vs ZXZ) would produce a different value.",
+            "Wrong Euler series in _decompose (e.g. ZYZ vs ZXZ) would "
+            "produce a different value.",
         )
 
     # ------------------------------------------------------------------
@@ -2365,7 +2451,7 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         self.assertGreater(gbm.right_grain.shape[0], 0)
 
     def test_sigma7_111_x_spacing_correct(self):
-        """Sigma7 (111): x-spacing (boundary normal [111]) must be a0*sqrt(3) for both grains."""
+        """Sigma7 (111) x-spacing must be a0*sqrt(3) for both grains."""
         with warnings.catch_warnings(record=True):
             warnings.simplefilter("always")
             gbm = self._make_gb(self.sigma7_111)
@@ -2374,18 +2460,20 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         self.assertAlmostEqual(s["x"]["right"], self.a0 * np.sqrt(3), places=5)
 
     def test_sigma7_111_non_periodic_warning_expected(self):
-        """Sigma7 (111) right-grain y-period (~17.15*a0) exceeds the default 15*a0 threshold.
+        """Sigma7 (111) right-grain y-period exceeds the default threshold.
 
-        The right-grain y-direction row is [2,11,-13] with norm 7*sqrt(6)~17.15*a0,
-        which exceeds the 15*a0 threshold.  The z-direction row [-3,-5,8] has norm
-        7*sqrt(2)~9.90*a0, which does not.  Exactly one non-periodic warning is expected.
-        A non-periodic UserWarning is therefore correct behaviour, not an error.
+        The right-grain y-direction row is [2,11,-13] with norm
+        7*sqrt(6)~17.15*a0, which exceeds the 15*a0 threshold. The z-direction
+        row [-3,-5,8] has norm 7*sqrt(2)~9.90*a0, which does not. Exactly one
+        non-periodic warning is expected. A non-periodic UserWarning is
+        therefore correct behavior, not an error.
         """
         # GBMaker.__calculate_periodic_spacing calls warnings.simplefilter("once", ...)
         # without a catch_warnings guard, which populates the per-module
-        # __warningregistry__.  catch_warnings restores warnings.filters on exit but
-        # does NOT clear __warningregistry__, so if another Sigma7 test ran first the
-        # "once" filter would suppress the warning here.  Clear it explicitly.
+        # __warningregistry__. catch_warnings restores warnings.filters on exit
+        # but does NOT clear __warningregistry__, so if another Sigma7 test ran
+        # first the "once" filter would suppress the warning here. Clear it
+        # explicitly.
         mod = sys.modules.get("GBOpt.GBMaker")
         if mod is not None and hasattr(mod, "__warningregistry__"):
             mod.__warningregistry__.clear()
@@ -2412,9 +2500,9 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
 
     def test_sigma3_111_no_duplicate_plane_at_interface(self):
         """
-        Sigma3 (111) coherent twin (180 deg representation): terminal left-grain plane
-        and first right-grain plane must be separated by exactly one d_111 spacing and
-        be of different stacking type.
+        Sigma3 (111) coherent twin (180 deg representation): terminal
+        left-grain plane and first right-grain plane must be separated by
+        exactly one d_111 spacing and be of different stacking type.
         """
 
         gbm = self._make_gb(self.sigma3_111_180deg, repeat_factor=(2, 3))
@@ -2422,21 +2510,21 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
 
     def test_sigma3_111_60deg_no_duplicate_plane_at_interface(self):
         """
-        Sigma3 (111) coherent twin (60 deg representation): same interface stacking
-        invariant as the 180 deg representation
+        Sigma3 (111) coherent twin (60 deg representation): same interface
+        stacking invariant as the 180 deg representation
         """
         gbm = self._make_gb(self.sigma3_111_60deg, repeat_factor=(2, 3))
         self._assert_interface_stacking(gbm, d_spacing=self.a0 / np.sqrt(3))
 
 
-@pytest.mark.slow
 class TestZhang2021ExactStoichiometry(unittest.TestCase):
-    """Exact-path stoichiometry sweep over all 178 Zhang 2021 UO₂ boundaries.
+    """Exact-path build-quality sweep over all 178 Zhang 2021 UO2 boundaries.
 
     Each boundary is built via ``from_boundary_spec(..., mode='exact')`` using
     the P/Q matrices from the dataset.  Boundaries whose P/Q leads to an
     incommensurate shared box (raising ``GBMakerValueError``) are skipped rather
-    than failed; all others must satisfy ``O == 2 * U``.
+    than failed; all others must be stoichiometric and remain inside the
+    vacuum-zero simulation box.
     """
 
     A0 = 5.454
@@ -2447,11 +2535,48 @@ class TestZhang2021ExactStoichiometry(unittest.TestCase):
         x_dim_min=20,
         interaction_distance=1.0,
     )
+    EXPECTED_BUILT = 166
+    EXPECTED_GBMAKER_ERRORS = 12
 
-    def test_all_boundaries_exact_stoichiometric(self):
+    def _quality_issues(self, gb) -> list[str]:
+        issues = []
+        ws = gb.whole_system
+        if ws is None or ws.shape[0] == 0:
+            return ["whole_system is empty"]
+
+        names, counts = np.unique(ws["name"], return_counts=True)
+        c = {str(n): int(v) for n, v in zip(names, counts)}
+        if c.get("O") != 2 * c.get("U", 0):
+            issues.append(f"O={c.get('O', 0)}, U={c.get('U', 0)}")
+
+        eps = 1e-8
+        min_x = float(np.min(ws["x"]))
+        max_x = float(np.max(ws["x"]))
+        if min_x < -eps:
+            issues.append(f"x underflow: min_x={min_x:.6f}")
+        if max_x >= gb.x_dim - eps:
+            issues.append(
+                f"x overflow or upper-face atom: max_x={max_x:.6f}, "
+                f"x_dim={gb.x_dim:.6f}"
+            )
+
+        central_gap = float(np.min(gb.right_grain["x"]) - np.max(gb.left_grain["x"]))
+        periodic_gap = float(
+            (gb.x_dim - np.max(gb.right_grain["x"]))
+            + np.min(gb.left_grain["x"])
+        )
+        if periodic_gap < central_gap - eps:
+            issues.append(
+                f"periodic_gap={periodic_gap:.6f} < central_gap={central_gap:.6f}"
+            )
+        return issues
+
+    def test_all_boundaries_exact_build_quality(self):
         from GBOpt.BoundarySpec import PQSpec
         from zhang2021_boundaries import BOUNDARIES
 
+        built = 0
+        errors = 0
         for name, entry in BOUNDARIES.items():
             with self.subTest(boundary=name):
                 spec = PQSpec(P=entry["P"], Q=entry["Q"])
@@ -2464,15 +2589,18 @@ class TestZhang2021ExactStoichiometry(unittest.TestCase):
                             **self.BUILD_KWARGS,
                         )
                 except GBMakerValueError:
+                    errors += 1
                     continue
-                names, counts = np.unique(
-                    gb.whole_system["name"], return_counts=True
-                )
-                c = {str(n): int(v) for n, v in zip(names, counts)}
+                built += 1
+                issues = self._quality_issues(gb)
                 self.assertEqual(
-                    c.get("O"), 2 * c.get("U", 0),
-                    f"{name}: O={c.get('O', 0)}, U={c.get('U', 0)}",
+                    issues,
+                    [],
+                    f"{name}: " + "; ".join(issues),
                 )
+
+        self.assertEqual(built, self.EXPECTED_BUILT)
+        self.assertEqual(errors, self.EXPECTED_GBMAKER_ERRORS)
 
 
 @pytest.mark.slow
@@ -2488,7 +2616,7 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
     2. Left-grain atoms do not exceed ``gb_plane_x``; right-grain atoms do not
        fall below it (no grain overlap in x).
     3. No two atoms within the same grain are closer than 2 % of the ideal fcc
-       nearest-neighbour distance (degeneracy check).
+       nearest-neighbor distance (degeneracy check).
 
     Boundaries that raise ``GBMakerValueError`` (e.g. no commensurate pair
     found within the tolerance) are skipped rather than failed.
@@ -2504,6 +2632,8 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
         mismatch_tol=0.005,
         mismatch_max_cells=100,
     )
+    EXPECTED_BUILT = 388
+    EXPECTED_GBMAKER_ERRORS = 0
 
     def _quality_issues(self, gb) -> list[str]:
         issues = []
@@ -2511,23 +2641,50 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
         if ws is None or ws.shape[0] == 0:
             issues.append("whole_system is empty")
             return issues
-        for dim_name, dim_val in (("x", gb.x_dim), ("y", gb.y_dim), ("z", gb.z_dim)):
+        for dim_name, dim_val in (
+            ("x", gb.x_dim),
+            ("y", gb.y_dim),
+            ("z", gb.z_dim),
+        ):
             if not (np.isfinite(dim_val) and dim_val > 0):
-                issues.append(f"{dim_name}_dim = {dim_val:.6g} (non-positive or non-finite)")
+                issues.append(
+                    f"{dim_name}_dim = {dim_val:.6g} "
+                    "(non-positive or non-finite)"
+                )
         eps = 1e-4 * self.A0
+        min_x = float(np.min(ws["x"]))
+        max_x = float(np.max(ws["x"]))
+        if min_x < -eps:
+            issues.append(f"x underflow: min_x={min_x:.6f}")
+        if max_x >= gb.x_dim - eps:
+            issues.append(
+                f"x overflow or upper-face atom: max_x={max_x:.6f}, "
+                f"x_dim={gb.x_dim:.6f}"
+            )
         gb_x = gb.gb_plane_x
         lg, rg = gb.left_grain, gb.right_grain
         if lg is not None and lg.shape[0] > 0:
             max_left_x = float(lg["x"].max())
             if max_left_x > gb_x + eps:
                 issues.append(
-                    f"left grain atom at x={max_left_x:.6f} exceeds gb_plane_x={gb_x:.6f}"
+                    f"left grain atom at x={max_left_x:.6f} exceeds "
+                    f"gb_plane_x={gb_x:.6f}"
                 )
         if rg is not None and rg.shape[0] > 0:
             min_right_x = float(rg["x"].min())
             if min_right_x < gb_x - eps:
                 issues.append(
-                    f"right grain atom at x={min_right_x:.6f} below gb_plane_x={gb_x:.6f}"
+                    f"right grain atom at x={min_right_x:.6f} below "
+                    f"gb_plane_x={gb_x:.6f}"
+                )
+        if lg is not None and rg is not None and lg.shape[0] > 0 and rg.shape[0] > 0:
+            central_gap = float(np.min(rg["x"]) - np.max(lg["x"]))
+            periodic_gap = float(
+                (gb.x_dim - np.max(rg["x"])) + np.min(lg["x"])
+            )
+            if periodic_gap < central_gap - eps:
+                issues.append(
+                    f"periodic_gap={periodic_gap:.6f} < central_gap={central_gap:.6f}"
                 )
         expected_nn = self.A0 / np.sqrt(2)
         threshold = 0.02 * expected_nn
@@ -2539,8 +2696,8 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
             min_nn = float(tree.query(pos, k=2)[0][:, 1].min())
             if min_nn < threshold:
                 issues.append(
-                    f"degeneracy in {label} grain: min NN {min_nn:.4f} Å "
-                    f"< 2% of expected {expected_nn:.4f} Å"
+                    f"degeneracy in {label} grain: min NN {min_nn:.4f} A "
+                    f"< 2% of expected {expected_nn:.4f} A"
                 )
         return issues
 
@@ -2548,6 +2705,8 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
         from GBOpt.BoundarySpec import PQSpec
         from olmsted2009_boundaries import BOUNDARIES
 
+        built = 0
+        errors = 0
         for gb_idx, entry in BOUNDARIES.items():
             with self.subTest(gb_index=gb_idx, sigma=entry["sigma"]):
                 spec = PQSpec(P=entry["P"], Q=entry["Q"])
@@ -2560,12 +2719,17 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
                             **self.BUILD_KWARGS,
                         )
                 except GBMakerValueError:
+                    errors += 1
                     continue
+                built += 1
                 issues = self._quality_issues(gb)
                 self.assertEqual(
                     issues, [],
                     f"GB {gb_idx} (Sigma{entry['sigma']}): " + "; ".join(issues),
                 )
+
+        self.assertEqual(built, self.EXPECTED_BUILT)
+        self.assertEqual(errors, self.EXPECTED_GBMAKER_ERRORS)
 
 
 if __name__ == "__main__":
