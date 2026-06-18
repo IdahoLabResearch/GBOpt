@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
 import operator
+from dataclasses import dataclass
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -217,7 +217,7 @@ def primitive_integer_null_basis_3d(covector: ArrayLike) -> np.ndarray:
     return basis
 
 
-def _det3(A: np.ndarray) -> int:
+def _int_det3(A: np.ndarray) -> int:
     """Return the exact determinant of a 3 by 3 integer matrix."""
     return int(
         A[0, 0] * (A[1, 1] * A[2, 2] - A[1, 2] * A[2, 1])
@@ -242,7 +242,7 @@ def _int_adj3(M: ArrayLike) -> list:
         rows = [r for r in range(3) if r != ri]
         cols = [c for c in range(3) if c != ci]
         minor = int(a[rows[0], cols[0]]) * int(a[rows[1], cols[1]]) - \
-                int(a[rows[0], cols[1]]) * int(a[rows[1], cols[0]])
+            int(a[rows[0], cols[1]]) * int(a[rows[1], cols[0]])
         return minor if (ri + ci) % 2 == 0 else -minor
 
     # adj[i][j] = cofactor(j, i)  -- transpose of the cofactor matrix
@@ -388,7 +388,7 @@ def column_hnf_3x3(A: ArrayLike) -> np.ndarray:
     :raises ExactNormalFormError: If A is singular or the postcondition fails.
     """
     H = _as_int_matrix(A, (3, 3), "A")
-    if _det3(H) == 0:
+    if _int_det3(H) == 0:
         raise ExactNormalFormError("column_hnf_3x3 requires a full-rank matrix.")
 
     # Triangularize: for each diagonal position i, eliminate H[i, j] for j > i.
@@ -433,18 +433,18 @@ def column_hnf_3x3(A: ArrayLike) -> np.ndarray:
     for j in range(3):
         if H[j, j] <= 0:
             raise ExactNormalFormError(
-                f"column_hnf_3x3 postcondition: diagonal H[{j},{j}]={H[j,j]} <= 0."
+                f"column_hnf_3x3 postcondition: diagonal H[{j},{j}]={H[j, j]} <= 0."
             )
         for i in range(j):
             if H[j, i] < 0 or H[j, i] >= H[j, j]:
                 raise ExactNormalFormError(
-                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j,i]} "
-                    f"not in [0, {H[j,j]})."
+                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j, i]} "
+                    f"not in [0, {H[j, j]})."
                 )
         for i in range(j + 1, 3):
             if H[j, i] != 0:
                 raise ExactNormalFormError(
-                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j,i]} != 0 "
+                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j, i]} != 0 "
                     "(upper-triangle entry non-zero)."
                 )
 

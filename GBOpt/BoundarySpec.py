@@ -1,8 +1,8 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-from dataclasses import dataclass
 import math
 import operator
+from dataclasses import dataclass
 from typing import Literal, Sequence
 
 import numpy as np
@@ -224,7 +224,7 @@ class CSLExactSpec(_CSLSpecBase):
     # parent class (_CSLSpecBase) has any field with a default (sigma=None),
     # every subclass field must also carry a default.  The __post_init__ below
     # turns the None sentinel into a hard error, making quat effectively required.
-    quat: Sequence[int] = None
+    quat: Sequence[int] | None = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -268,7 +268,7 @@ class CSLApproxSpec(_CSLSpecBase):
     """
 
     # default=None required by dataclass inheritance; __post_init__ enforces it.
-    angle_deg: float = None
+    angle_deg: float | None = None
 
     def __post_init__(self):
         super().__post_init__()

@@ -10,16 +10,15 @@ from typing import Any, Sequence, Tuple, Union
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from GBOpt.UnitCell import UnitCell
 from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
-from GBOpt.Utils.exact import (
-    _int_adj3,
-    build_supercell_matrix,
+from GBOpt.crystallography import (
     csl_approx_spec_to_embedding,
     csl_spec_to_embedding,
-    enumerate_supercell_origins,
     pq_spec_to_embedding,
 )
+from GBOpt.crystallography.integer import integer_adj3
+from GBOpt.gbmaker_supercell import build_supercell_matrix, enumerate_supercell_origins
+from GBOpt.UnitCell import UnitCell
 
 
 def _find_commensurate_pair(
@@ -805,7 +804,7 @@ class GBMaker:
         # fold finer resolution, so the gap-equalization loop can remove minimal
         # slices instead of coarse whole-repeat chunks.
         S_int = np.round(S).astype(int)
-        adj_S = np.array(_int_adj3(S_int), dtype=int)
+        adj_S = np.array(integer_adj3(S_int), dtype=int)
         u_num_0 = origins @ adj_S[:, 0]
         n0_labels = u_num_0[origin_ids]
         return atoms, n0_labels
