@@ -1,6 +1,8 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
 from dataclasses import dataclass
+import math
+import operator
 from typing import Literal, Sequence
 
 import numpy as np
@@ -36,6 +38,18 @@ class BoundarySpecOrthogonalityError(BoundarySpecError):
 # Boundary-format dataclasses
 # ---------------------------------------------------------------------------
 
+def _is_bool_like(value) -> bool:
+    """Return True for Python or NumPy boolean scalars."""
+    return isinstance(value, (bool, np.bool_))
+
+
+def _reject_bool_values(values, name: str) -> None:
+    """Reject booleans before numeric conversion treats them as 0/1."""
+    arr = np.asarray(values, dtype=object)
+    if any(_is_bool_like(value) for value in arr.flat):
+        raise BoundarySpecTypeError(f"{name} must not contain boolean values.")
+
+
 @dataclass(frozen=True)
 class FiveDOFSpec:
     """Five-degree-of-freedom boundary specified by Euler-angle parameters.
@@ -51,6 +65,7 @@ class FiveDOFSpec:
     params: Sequence[float]
 
     def __post_init__(self):
+        _reject_bool_values(self.params, "FiveDOFSpec.params")
         try:
             arr = np.asarray(self.params, dtype=float)
         except (ValueError, TypeError) as e:
@@ -66,10 +81,14 @@ class FiveDOFSpec:
             raise BoundarySpecValueError(
                 "FiveDOFSpec.params contains non-finite entries (NaN or inf)"
             )
+        object.__setattr__(self, "params", tuple(float(value) for value in arr))
 
 
-def _validate_nonzero_int_vector(seq, name: str, length: int = 3) -> None:
-    """Raise if ``seq`` is not a non-zero integer sequence of ``length``."""
+def _validate_nonzero_int_vector(
+    seq, name: str, length: int = 3
+) -> tuple[int, ...]:
+    """Return ``seq`` as an integer tuple after non-zero vector validation."""
+    _reject_bool_values(seq, name)
     try:
         arr = np.asarray(seq, dtype=float)
     except (ValueError, TypeError) as e:
@@ -90,13 +109,15 @@ def _validate_nonzero_int_vector(seq, name: str, length: int = 3) -> None:
         )
     if not np.any(np.round(arr).astype(int)):
         raise BoundarySpecValueError(f"{name} must not be all-zero")
+    return tuple(int(value) for value in np.round(arr).astype(int))
 
 
-def _validate_pq_matrix(m, name: str) -> None:
+def _validate_pq_matrix(m, name: str) -> tuple[tuple[float, ...], ...]:
     """Raise BoundarySpecError if m is not a valid 3x3 non-singular finite matrix.
 
     Called from PQSpec.__post_init__ for each of P and Q.
     """
+    _reject_bool_values(m, f"PQSpec.{name}")
     try:
         arr = np.asarray(m, dtype=float)
     except (ValueError, TypeError) as e:
@@ -115,6 +136,35 @@ def _validate_pq_matrix(m, name: str) -> None:
         raise BoundarySpecValueError(
             f"PQSpec.{name} is singular (determinant ~= 0)"
         )
+    return tuple(tuple(float(value) for value in row) for row in arr)
+
+
+def _sigma_from_integer_quaternion(quat: Sequence[int]) -> int:
+    """Return the Sigma value implied by a primitive integer quaternion."""
+    values = [int(value) for value in quat]
+    gcd_value = 0
+    for value in values:
+        gcd_value = math.gcd(gcd_value, abs(value))
+    values = [value // gcd_value for value in values]
+    norm_sq = sum(value * value for value in values)
+    while norm_sq > 1 and norm_sq % 2 == 0:
+        norm_sq //= 2
+    return int(norm_sq)
+
+
+def _validate_positive_integer(value, name: str) -> int:
+    """Return a positive integer scalar while rejecting booleans."""
+    if _is_bool_like(value):
+        raise BoundarySpecTypeError(f"{name} must not be boolean.")
+    try:
+        integer = operator.index(value)
+    except TypeError as exc:
+        raise BoundarySpecValueError(
+            f"{name} must be a positive integer"
+        ) from exc
+    if integer <= 0:
+        raise BoundarySpecValueError(f"{name} must be a positive integer")
+    return int(integer)
 
 
 @dataclass(frozen=True)
@@ -124,13 +174,15 @@ class PQSpec:
     basis_mode: Literal["primitive", "supplied"] = "primitive"
 
     def __post_init__(self):
-        _validate_pq_matrix(self.P, "P")
-        _validate_pq_matrix(self.Q, "Q")
+        P = _validate_pq_matrix(self.P, "P")
+        Q = _validate_pq_matrix(self.Q, "Q")
         if self.basis_mode not in ("primitive", "supplied"):
             raise BoundarySpecValueError(
                 "PQSpec.basis_mode must be either 'primitive' or 'supplied'; "
                 f"got {self.basis_mode!r}"
             )
+        object.__setattr__(self, "P", P)
+        object.__setattr__(self, "Q", Q)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -140,11 +192,13 @@ class _CSLSpecBase:
     sigma: int | None = None
 
     def __post_init__(self):
-        _validate_nonzero_int_vector(self.axis, "axis")
-        _validate_nonzero_int_vector(self.plane, "plane")
+        axis = _validate_nonzero_int_vector(self.axis, "axis")
+        plane = _validate_nonzero_int_vector(self.plane, "plane")
+        object.__setattr__(self, "axis", axis)
+        object.__setattr__(self, "plane", plane)
         if self.sigma is not None:
-            if not isinstance(self.sigma, int) or self.sigma <= 0:
-                raise BoundarySpecValueError("sigma must be a positive integer")
+            sigma = _validate_positive_integer(self.sigma, "sigma")
+            object.__setattr__(self, "sigma", sigma)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -176,8 +230,9 @@ class CSLExactSpec(_CSLSpecBase):
         super().__post_init__()
         if self.quat is None:
             raise BoundarySpecValueError("CSLExactSpec.quat is required.")
-        _validate_nonzero_int_vector(self.quat, "quat", length=4)
-        quat_vec = np.array(self.quat[1:], dtype=float)
+        quat = _validate_nonzero_int_vector(self.quat, "quat", length=4)
+        object.__setattr__(self, "quat", quat)
+        quat_vec = np.array(quat[1:], dtype=float)
         quat_vec_norm = np.linalg.norm(quat_vec)
         if quat_vec_norm > 1e-10:
             # The vector part must be parallel to the user-supplied axis field.
@@ -190,6 +245,13 @@ class CSLExactSpec(_CSLSpecBase):
                     f"axis {list(self.axis)}. The axis must match the rotation axis "
                     "encoded in the quaternion (components [x, y, z] in Hamilton "
                     "order)."
+                )
+        if self.sigma is not None:
+            derived_sigma = _sigma_from_integer_quaternion(quat)
+            if derived_sigma != self.sigma:
+                raise BoundarySpecValueError(
+                    f"Sigma mismatch: quaternion {list(quat)} gives "
+                    f"sigma={derived_sigma}, but sigma={self.sigma} was provided."
                 )
 
 
@@ -212,6 +274,10 @@ class CSLApproxSpec(_CSLSpecBase):
         super().__post_init__()
         if self.angle_deg is None:
             raise BoundarySpecValueError("CSLApproxSpec.angle_deg is required.")
+        if _is_bool_like(self.angle_deg):
+            raise BoundarySpecTypeError(
+                "CSLApproxSpec.angle_deg must not be boolean."
+            )
         try:
             val = float(self.angle_deg)
         except (TypeError, ValueError) as e:
@@ -223,6 +289,7 @@ class CSLApproxSpec(_CSLSpecBase):
             raise BoundarySpecValueError(
                 f"CSLApproxSpec.angle_deg must be finite; got {val}"
             )
+        object.__setattr__(self, "angle_deg", val)
 
 
 # ---------------------------------------------------------------------------

@@ -40,6 +40,10 @@ def _as_int_matrix(A: ArrayLike, shape: tuple[int, ...], name: str) -> np.ndarra
     out = np.empty(shape, dtype=object)
     for index in np.ndindex(shape):
         value = arr[index]
+        if isinstance(value, (bool, np.bool_)):
+            raise ExactNormalFormError(
+                f"{name}{index}={value!r} is not an integer."
+            )
         try:
             integer = int(value)
         except (TypeError, ValueError) as exc:
@@ -71,7 +75,27 @@ def _row_gcd_reduce(row: ArrayLike) -> np.ndarray:
     Rows that are already primitive (gcd == 1) or all-zero are returned unchanged.
     """
     arr = np.asarray(row)
-    ints = [int(v) for v in arr.flat]
+    if arr.ndim != 1:
+        raise ExactNormalFormError(
+            f"row must be a 1D integer-valued array; got shape {arr.shape}."
+        )
+    ints = []
+    for index, value in enumerate(arr):
+        if isinstance(value, (bool, np.bool_)):
+            raise ExactNormalFormError(
+                f"row[{index}]={value!r} is not an integer."
+            )
+        try:
+            integer = int(value)
+        except (TypeError, ValueError) as exc:
+            raise ExactNormalFormError(
+                f"row[{index}]={value!r} is not an integer."
+            ) from exc
+        if value != integer:
+            raise ExactNormalFormError(
+                f"row[{index}]={value!r} is not exactly integer-valued."
+            )
+        ints.append(integer)
     gcd = 0
     for v in ints:
         gcd = math.gcd(gcd, abs(v))
@@ -111,6 +135,47 @@ def _extended_gcd(a: int, b: int) -> tuple[int, int, int]:
     return old_r, old_s, old_t
 
 
+def _elimination_transform(a: int, b: int) -> tuple[int, int, int, int]:
+    """Return coefficients that combine a pivot vector with one to eliminate.
+
+    The returned ``(p0, s0, p1, s1)`` maps
+    ``primary, secondary`` to
+    ``p0 * primary + s0 * secondary, p1 * primary + s1 * secondary``.
+    For entries ``a`` and ``b`` at the active coordinate, the transformed
+    secondary entry is zero while the primary entry becomes ``gcd(a, b)``.
+    """
+    if a == 0:
+        raise ExactNormalFormError("cannot eliminate with a zero pivot.")
+    if b % a == 0:
+        return 1, 0, -(b // a), 1
+    gcd_value, primary_coeff, secondary_coeff = _extended_gcd(a, b)
+    return (
+        primary_coeff,
+        secondary_coeff,
+        -b // gcd_value,
+        a // gcd_value,
+    )
+
+
+def _cross_int3(x: ArrayLike, y: ArrayLike) -> np.ndarray:
+    """Return the exact Python-int cross product of two length-3 vectors."""
+    x_vals = [int(value) for value in np.asarray(x, dtype=object).flat]
+    y_vals = [int(value) for value in np.asarray(y, dtype=object).flat]
+    if len(x_vals) != 3 or len(y_vals) != 3:
+        raise ExactNormalFormError(
+            f"cross product requires length-3 vectors; got {len(x_vals)} "
+            f"and {len(y_vals)}."
+        )
+    return np.array(
+        [
+            x_vals[1] * y_vals[2] - x_vals[2] * y_vals[1],
+            x_vals[2] * y_vals[0] - x_vals[0] * y_vals[2],
+            x_vals[0] * y_vals[1] - x_vals[1] * y_vals[0],
+        ],
+        dtype=object,
+    )
+
+
 def primitive_integer_null_basis_3d(covector: ArrayLike) -> np.ndarray:
     """Return primitive integer columns spanning ``covector @ x == 0``.
 
@@ -146,7 +211,7 @@ def primitive_integer_null_basis_3d(covector: ArrayLike) -> np.ndarray:
             reduced[j] = 0
 
     basis = transform[:, 1:3].astype(object)
-    cross = np.cross(basis[:, 0].astype(int), basis[:, 1].astype(int))
+    cross = _cross_int3(basis[:, 0], basis[:, 1])
     if _dot_int(cross, vec) < 0:
         basis[:, 1] = -basis[:, 1]
     return basis
@@ -241,23 +306,15 @@ def smith_normal_form_3x3(A: ArrayLike) -> SmithNormalForm:
                         continue
                     a = int(D[k, k])
                     b = int(D[i, k])
-                    # Divisibility fast-path: avoids Bezout cycling when pivot
-                    # divides the off-diagonal entry (e.g. a==b==1 => gcd returns
-                    # s=0, t=1 which would swap rows and undo prior progress).
-                    if b % a == 0:
-                        q = b // a
-                        D[i, :] = D[i, :] - q * D[k, :]
-                        U[i, :] = U[i, :] - q * U[k, :]
-                    else:
-                        g, s, t = _extended_gcd(a, b)
-                        row_k = D[k, :].copy()
-                        row_i = D[i, :].copy()
-                        u_k = U[k, :].copy()
-                        u_i = U[i, :].copy()
-                        D[k, :] = s * row_k + t * row_i
-                        D[i, :] = (-b // g) * row_k + (a // g) * row_i
-                        U[k, :] = s * u_k + t * u_i
-                        U[i, :] = (-b // g) * u_k + (a // g) * u_i
+                    p0, s0, p1, s1 = _elimination_transform(a, b)
+                    row_k = D[k, :].copy()
+                    row_i = D[i, :].copy()
+                    u_k = U[k, :].copy()
+                    u_i = U[i, :].copy()
+                    D[k, :] = p0 * row_k + s0 * row_i
+                    D[i, :] = p1 * row_k + s1 * row_i
+                    U[k, :] = p0 * u_k + s0 * u_i
+                    U[i, :] = p1 * u_k + s1 * u_i
                     changed = True
 
                 for j in range(3):
@@ -265,20 +322,15 @@ def smith_normal_form_3x3(A: ArrayLike) -> SmithNormalForm:
                         continue
                     a = int(D[k, k])
                     b = int(D[k, j])
-                    if b % a == 0:
-                        q = b // a
-                        D[:, j] = D[:, j] - q * D[:, k]
-                        V[:, j] = V[:, j] - q * V[:, k]
-                    else:
-                        g, s, t = _extended_gcd(a, b)
-                        col_k = D[:, k].copy()
-                        col_j = D[:, j].copy()
-                        v_k = V[:, k].copy()
-                        v_j = V[:, j].copy()
-                        D[:, k] = s * col_k + t * col_j
-                        D[:, j] = (-b // g) * col_k + (a // g) * col_j
-                        V[:, k] = s * v_k + t * v_j
-                        V[:, j] = (-b // g) * v_k + (a // g) * v_j
+                    p0, s0, p1, s1 = _elimination_transform(a, b)
+                    col_k = D[:, k].copy()
+                    col_j = D[:, j].copy()
+                    v_k = V[:, k].copy()
+                    v_j = V[:, j].copy()
+                    D[:, k] = p0 * col_k + s0 * col_j
+                    D[:, j] = p1 * col_k + s1 * col_j
+                    V[:, k] = p0 * v_k + s0 * v_j
+                    V[:, j] = p1 * v_k + s1 * v_j
                     changed = True
 
             if D[k, k] < 0:
@@ -354,17 +406,11 @@ def column_hnf_3x3(A: ArrayLike) -> np.ndarray:
                     continue
                 a = int(H[i, i])
                 b = int(H[i, j])
-                # Divisibility fast-path: a simple quotient step clears the entry
-                # when pivot divides it, avoiding Bezout cycling (same fix as SNF).
-                if b % a == 0:
-                    q = b // a
-                    H[:, j] = H[:, j] - q * H[:, i]
-                else:
-                    g, s, t = _extended_gcd(a, b)
-                    col_i = H[:, i].copy()
-                    col_j = H[:, j].copy()
-                    H[:, i] = s * col_i + t * col_j
-                    H[:, j] = (-b // g) * col_i + (a // g) * col_j
+                p0, s0, p1, s1 = _elimination_transform(a, b)
+                col_i = H[:, i].copy()
+                col_j = H[:, j].copy()
+                H[:, i] = p0 * col_i + s0 * col_j
+                H[:, j] = p1 * col_i + s1 * col_j
                 changed = True
             if not changed:
                 break
@@ -419,7 +465,7 @@ def hnf_2d_supercells(n: int) -> list[np.ndarray]:
     :return: List of 2 by 2 lower-HNF arrays with Python-integer entries.
     :raises ExactNormalFormError: If ``n`` is not a positive integer.
     """
-    if isinstance(n, bool):
+    if isinstance(n, (bool, np.bool_)):
         raise ExactNormalFormError(f"n must be a positive integer; got {n!r}.")
 
     try:

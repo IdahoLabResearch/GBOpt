@@ -50,11 +50,23 @@ from GBOpt.Utils.exact import (
     verify_coincidence_basis,
 )
 from GBOpt.Utils.integer_normal_forms import (
+    ExactNormalFormError,
+    _cross_int3,
     _det3,
+    _row_gcd_reduce as _inf_row_gcd_reduce,
     column_hnf_3x3,
     hnf_2d_supercells,
+    primitive_integer_null_basis_3d,
     smith_normal_form_3x3,
 )
+
+
+SIGMA5_36_P = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+SIGMA5_36_Q = ((4, -3, 0), (3, 4, 0), (0, 0, 1))
+SIGMA5_TWIST_LEGACY_P = ((0, 0, 1), (3, 1, 0), (-1, 3, 0))
+SIGMA5_TWIST_LEGACY_Q = ((0, 0, 1), (3, -1, 0), (1, 3, 0))
+SIGMA5_TWIST_PRIMITIVE_P = ((0, 0, 1), (1, 2, 0), (-2, 1, 0))
+SIGMA5_TWIST_PRIMITIVE_Q = ((0, 0, 1), (2, 1, 0), (-1, 2, 0))
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +211,17 @@ class TestEnumerateSupercellOrigins:
         for rx, ry, rz in [(1, 1, 1), (2, 1, 1), (1, 2, 3)]:
             origins = enumerate_supercell_origins(Q, rx, ry, rz)
             assert len(origins) == rx * ry * rz * 25
+
+    def test_singular_s_raises(self):
+        S = np.array([[1, 0, 0], [1, 0, 0], [0, 0, 1]], dtype=int)
+
+        with pytest.raises(ValueError, match="non-singular"):
+            enumerate_supercell_origins(S, 1, 1, 1)
+
+    @pytest.mark.parametrize("repeats", [(0, 1, 1), (1, -1, 1), (1.0, 1, 1)])
+    def test_invalid_repeat_count_raises(self, repeats):
+        with pytest.raises(ValueError, match="positive integer"):
+            enumerate_supercell_origins(np.eye(3, dtype=int), *repeats)
 
 
 def _make_identity_pair():
@@ -635,8 +658,8 @@ class TestCanonicalizePQPaired:
         # Non-primitive in-plane rows must be GCD-reduced to match
         # _canonicalize_matrix behavior; [2,0,0] -> [1,0,0].
         import math
-        P = np.array([[1, 0, 0], [2, 0, 0], [0, 2, 0]], dtype=float)
-        Q = np.array([[1, 0, 0], [4, 0, 0], [0, 6, 0]], dtype=float)
+        P = np.array([[0, 0, 1], [2, 0, 0], [0, 2, 0]], dtype=float)
+        Q = np.array([[0, 0, 1], [4, 0, 0], [0, 6, 0]], dtype=float)
         P_c, Q_c = _canonicalize_pq_paired(P, Q)
         for M, name in [(P_c, "P"), (Q_c, "Q")]:
             for i, row in enumerate(M):
@@ -645,6 +668,8 @@ class TestCanonicalizePQPaired:
                 for v in ints:
                     gcd = math.gcd(gcd, abs(int(v)))
                 assert gcd == 1, f"{name} row {i} {row} has GCD {gcd}, expected 1"
+            assert np.dot(M[0].astype(int), M[1].astype(int)) == 0
+            assert np.dot(M[0].astype(int), M[2].astype(int)) == 0
 
     def test_idempotent(self):
         # Canonicalization must be idempotent: applying it twice gives the same result.
@@ -658,9 +683,9 @@ class TestCanonicalizePQPaired:
     def test_scaled_equivalent_inplane_rows_canonicalize_identically(self):
         # P with in-plane rows [1,0,0]/[0,1,0] and [2,0,0]/[0,3,0] must
         # produce the same canonical P (after GCD reduction).
-        P_a = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
-        P_b = np.array([[1, 0, 0], [2, 0, 0], [0, 3, 0]], dtype=float)
-        Q = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+        P_a = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
+        P_b = np.array([[0, 0, 1], [2, 0, 0], [0, 3, 0]], dtype=float)
+        Q = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
         Pa, _ = _canonicalize_pq_paired(P_a, Q)
         Pb, _ = _canonicalize_pq_paired(P_b, Q)
         np.testing.assert_array_equal(Pa, Pb)
@@ -741,10 +766,10 @@ class TestPQSpecToEmbedding:
 
 
 class TestPQSpecPrimitiveBasis:
-    LEGACY_TWIST_P = [[0, 0, 1], [3, 1, 0], [-1, 3, 0]]
-    LEGACY_TWIST_Q = [[0, 0, 1], [3, -1, 0], [1, 3, 0]]
-    PRIMITIVE_TWIST_P = [[0, 0, 1], [1, 2, 0], [-2, 1, 0]]
-    PRIMITIVE_TWIST_Q = [[0, 0, 1], [2, 1, 0], [-1, 2, 0]]
+    LEGACY_TWIST_P = SIGMA5_TWIST_LEGACY_P
+    LEGACY_TWIST_Q = SIGMA5_TWIST_LEGACY_Q
+    PRIMITIVE_TWIST_P = SIGMA5_TWIST_PRIMITIVE_P
+    PRIMITIVE_TWIST_Q = SIGMA5_TWIST_PRIMITIVE_Q
     TILT_210_P = [[2, 1, 0], [0, 0, 1], [1, -2, 0]]
     TILT_210_Q = [[2, -1, 0], [0, 0, 1], [-1, -2, 0]]
     TILT_310_P = [[3, 1, 0], [0, 0, 1], [1, -3, 0]]
@@ -907,9 +932,11 @@ class TestCSLExactSpecValidation:
     def test_sigma_mismatch_raises(self):
         # quat [2,0,0,1] -> sigma=5, not 3
         with pytest.raises(BoundarySpecError):
-            csl_spec_to_embedding(
-                CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0],
-                             quat=[2, 0, 0, 1], sigma=3)
+            CSLExactSpec(
+                axis=[0, 0, 1],
+                plane=[1, 0, 0],
+                quat=[2, 0, 0, 1],
+                sigma=3,
             )
 
 
@@ -918,10 +945,8 @@ class TestCSLSpecToEmbedding:
     SPEC_36 = CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
     SPEC_TWIST = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
     # Equivalent PQSpec for the cross-format round-trip assertion
-    PQ_36 = PQSpec(P=[[1, 0, 0], [0, 1, 0], [0, 0, 1]],
-                   Q=[[4, -3, 0], [3, 4, 0], [0, 0, 1]])
-    PQ_TWIST = PQSpec(P=[[0, 0, 1], [3, 1, 0], [-1, 3, 0]],
-                      Q=[[0, 0, 1], [3, -1, 0], [1, 3, 0]])
+    PQ_36 = PQSpec(P=SIGMA5_36_P, Q=SIGMA5_36_Q)
+    PQ_TWIST = PQSpec(P=SIGMA5_TWIST_LEGACY_P, Q=SIGMA5_TWIST_LEGACY_Q)
     # Sigma3 [111] 60 deg twin -- quat [3,1,1,1], plane [1,1,1].
     SPEC_SIGMA3 = CSLExactSpec(axis=[1, 1, 1], plane=[1, 1, 1], quat=[3, 1, 1, 1])
 
@@ -1017,7 +1042,28 @@ class TestCSLSpecToEmbedding:
             assert abs(np.linalg.det(R) - 1.0) < 1e-10
         assert emb.metadata is not None
         assert emb.metadata.basis_mode == "primitive"
-        assert emb.metadata.primitive_area_index == 5
+
+    def test_large_denominator_quaternion_stays_on_exact_path(self):
+        spec = CSLExactSpec(
+            axis=[128, 1, 1],
+            plane=[1, 0, 0],
+            quat=[128, 128, 1, 1],
+        )
+
+        emb = csl_spec_to_embedding(spec, max_exact_atoms=10**9)
+
+        assert emb.exact is True
+        assert emb.P is not None
+        assert emb.Q is not None
+        for R in (emb.R_left, emb.R_right):
+            np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10, rtol=0)
+        np.testing.assert_array_equal(emb.P.astype(int), np.eye(3, dtype=int))
+        expected_Q = np.array(
+            [[16383, 0, 256], [256, 0, -16383], [0, 1, 0]],
+            dtype=int,
+        )
+        np.testing.assert_array_equal(emb.Q.astype(int), expected_Q)
+        assert abs(_int_det3(emb.Q.astype(object))) == 16385**2
 
 
 class TestPrimitiveCellReporting:
@@ -1677,6 +1723,14 @@ class TestRowGCDReduce:
     def test_reduces_by_common_component_gcd(self, row, expected):
         np.testing.assert_array_equal(_row_gcd_reduce(np.array(row)), expected)
 
+    def test_rejects_non_integer_entries(self):
+        with pytest.raises(BoundarySpecError, match="integer-valued"):
+            _row_gcd_reduce(np.array([2.5, 0.0, 0.0]))
+
+    def test_integer_normal_form_helper_rejects_non_integer_entries(self):
+        with pytest.raises(ExactNormalFormError, match="integer-valued"):
+            _inf_row_gcd_reduce(np.array([2.5, 0.0, 0.0]))
+
 
 class TestDotInt:
     def test_positive(self):
@@ -1706,8 +1760,10 @@ class TestGaussReduce2dPaired:
         q1 = np.array([1, 0, 0])
         q2 = np.array([0, 1, 0])
         a, b, qa, qb = _gauss_reduce_2d_paired(p1, p2, q1, q2)
-        # Both output vectors must still span the same lattice as the inputs.
-        # Verify by checking that the same unimodular operations were applied.
+        np.testing.assert_array_equal(a, np.array([-1, 1, 0]))
+        np.testing.assert_array_equal(b, np.array([2, 1, 0]))
+        np.testing.assert_array_equal(qa, np.array([3, 1, 0]))
+        np.testing.assert_array_equal(qb, np.array([4, 1, 0]))
         assert np.linalg.matrix_rank(np.array([a, b])) == 2
 
     def test_same_ops_applied_to_q(self):
@@ -1785,6 +1841,15 @@ class TestPlaneNullBasis:
     def test_negative_components(self):
         _check_null_basis([-1, 2, -1])
 
+    def test_primitive_integer_null_basis_uses_python_int_cross_product(self):
+        covector = np.array([10**20, 10**20 + 1, 1], dtype=object)
+
+        basis = primitive_integer_null_basis_3d(covector)
+
+        assert _dot_int(covector, basis[:, 0]) == 0
+        assert _dot_int(covector, basis[:, 1]) == 0
+        np.testing.assert_array_equal(_cross_int3(basis[:, 0], basis[:, 1]), covector)
+
 
 # ---------------------------------------------------------------------------
 # _inplane_area_index
@@ -1848,6 +1913,9 @@ EXACT_CSL_SCENARIOS = [
             "q": (1, 1, 1, 1),
             "plane": None,
             "expected_N": 4,
+            "expected_M": np.array(
+                [[0, 0, 4], [4, 0, 0], [0, 4, 0]], dtype=object
+            ),
             "expected_sigma": 1,
             "expected_hnf_det": 1,
             "expected_kernel_moduli": (1, 1, 1),
@@ -1859,6 +1927,9 @@ EXACT_CSL_SCENARIOS = [
             "q": (1, 1, 1, 0),
             "plane": (1, 1, 1),
             "expected_N": 3,
+            "expected_M": np.array(
+                [[1, 2, 2], [2, 1, -2], [-2, 2, -1]], dtype=object
+            ),
             "expected_sigma": 3,
             "expected_hnf_det": 3,
             "expected_inplane_cross_abs": np.array([3, 3, 3]),
@@ -2007,6 +2078,23 @@ def test_normalize_zero_raises():
         normalize_integer_quaternion((0, 0, 0, 0))
 
 
+def _assert_integer_unimodular_column_transform(source, target):
+    """Assert ``target == source @ U`` for integer unimodular U."""
+    source = np.asarray(source, dtype=object)
+    target = np.asarray(target, dtype=object)
+    det = _int_det3(source)
+    adj = np.asarray(_int_adj3(source), dtype=object)
+    transform_num = adj @ target
+    assert det != 0
+    assert all(int(value) % det == 0 for value in transform_num.flat)
+    transform = np.array(
+        [int(value) // det for value in transform_num.flat],
+        dtype=object,
+    ).reshape(3, 3)
+    assert abs(_int_det3(transform)) == 1
+    np.testing.assert_array_equal(source @ transform, target)
+
+
 def test_lll_reduce_identity_unchanged():
     """LLL reduction of an already-reduced basis (identity) returns the identity."""
     B = np.eye(3, dtype=object)
@@ -2028,10 +2116,7 @@ def test_lll_reduce_actually_reduces():
     assert max(output_norms) < max(input_norms), (
         f"LLL did not reduce: input norms {input_norms}, output norms {output_norms}"
     )
-    # The lattice must be preserved (det unchanged up to sign).
-    det_in = abs(int(np.round(float(np.linalg.det(B.astype(float))))))
-    det_out = abs(int(np.round(float(np.linalg.det(np.asarray(R, dtype=float))))))
-    assert det_in == det_out
+    _assert_integer_unimodular_column_transform(B, R)
 
 
 def test_lll_reduce_same_lattice_as_csl_hnf():
@@ -2041,10 +2126,17 @@ def test_lll_reduce_same_lattice_as_csl_hnf():
     csl_lll = csl_from_scaled_rotation(rot, post_reduce="lll")
     # Both must have the same sigma (same lattice).
     assert csl_lll.sigma == csl.sigma
-    # HNF basis and LLL basis must have the same absolute determinant.
-    det_hnf = abs(_det3(csl.basis_hnf))
-    det_lll = abs(_det3(np.asarray(csl_lll.basis, dtype=object)))
-    assert det_hnf == det_lll
+    _assert_integer_unimodular_column_transform(csl.basis_hnf, csl_lll.basis)
+
+
+def test_lll_reduce_large_integer_basis_preserves_lattice_exactly():
+    big = 10**12
+    B = np.array([[1, big, 0], [0, 1, 0], [0, 0, 1]], dtype=object)
+
+    R = lll_reduce(B)
+
+    _assert_integer_unimodular_column_transform(B, R)
+    assert max(_dot_int(R[:, i], R[:, i]) for i in range(3)) < big * big
 
 
 def test_lll_reduce_singular_raises():
@@ -2060,6 +2152,28 @@ def test_hnf_2d_supercells_count_and_det():
         assert det == 2
 
     assert len(hnf_2d_supercells(6)) == 12
+
+
+@pytest.mark.parametrize("index", [1, 2, 6])
+def test_hnf_2d_supercells_are_canonical_and_unique(index):
+    hnfs = hnf_2d_supercells(index)
+    seen = set()
+
+    for H in hnfs:
+        assert int(H[0, 0]) > 0
+        assert int(H[1, 1]) > 0
+        assert int(H[0, 1]) == 0
+        assert 0 <= int(H[1, 0]) < int(H[1, 1])
+        det = int(H[0, 0]) * int(H[1, 1])
+        assert det == index
+        seen.add(tuple(int(value) for value in H.flat))
+
+    assert len(seen) == len(hnfs)
+
+
+def test_hnf_2d_supercells_rejects_numpy_bool():
+    with pytest.raises(ExactNormalFormError, match="positive integer"):
+        hnf_2d_supercells(np.bool_(True))
 
 
 def test_snf_known_diagonal_couples_coprime_factors():

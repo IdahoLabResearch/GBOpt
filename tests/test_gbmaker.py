@@ -26,7 +26,7 @@ from GBOpt.UnitCell import UnitCell
 from zhang2021_boundaries import BOUNDARIES
 
 
-class TestStrainAccommodation(unittest.TestCase):
+class TestStrainAccommodation:
     """Tests mismatch accommodation for boundary-spec construction."""
 
     A0 = 5.47       # UO2 lattice parameter (fluorite)
@@ -91,8 +91,8 @@ class TestStrainAccommodation(unittest.TestCase):
             gb = self._build()
 
         find_pair.assert_not_called()
-        self.assertEqual(gb._GBMaker__strain_accommodation, {})
-        self.assertGreater(gb.whole_system.size, 0)
+        assert gb._GBMaker__strain_accommodation == {}
+        assert gb.whole_system.size > 0
 
     def test_mismatch_tol_adjusts_y_dim_to_commensurate_value(self):
         # The real mismatch is in the y-direction (d_left=a0, d_right=5*a0).
@@ -103,10 +103,38 @@ class TestStrainAccommodation(unittest.TestCase):
         d_right_y = 5.0 * a0   # right grain y-period = norm([3,4,0])*a0
         d_left_y = a0           # left  grain y-period = norm([0,1,0])*a0
         y = gb.y_dim
-        self.assertAlmostEqual(y, 1 * d_right_y, delta=1e-4,
-                               msg=f"y_dim={y:.4f} != n2*d_right={d_right_y:.4f}")
-        self.assertAlmostEqual(y, 5 * d_left_y, delta=1e-4,
-                               msg=f"y_dim={y:.4f} != n1*d_left={5*d_left_y:.4f}")
+        assert y == pytest.approx(1 * d_right_y, abs=1e-4, rel=0.0)
+        assert y == pytest.approx(5 * d_left_y, abs=1e-4, rel=0.0)
+
+    def test_approximate_mismatch_tol_applies_left_grain_y_strain(self):
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=20.0)
+
+        gb = GBMaker.from_boundary_spec(
+            3.615,
+            "sc",
+            "Cu",
+            spec,
+            mode="approximate",
+            gb_thickness=0.0,
+            repeat_factor=1,
+            x_dim_min=5.0,
+            vacuum=0.0,
+            interaction_distance=self.INTERACTION_DISTANCE,
+            mismatch_tol=0.005,
+            mismatch_max_cells=50,
+        )
+
+        accommodation = gb._GBMaker__strain_accommodation["y"]
+        assert accommodation.left_scale != pytest.approx(1.0, abs=1e-6, rel=0.0)
+        y_planes = np.unique(np.round(gb.left_grain["y"], 10))
+        assert len(y_planes) == accommodation.left_repeats
+        expected_spacing = gb.a0 * accommodation.left_scale
+        np.testing.assert_allclose(
+            np.diff(y_planes),
+            np.full(accommodation.left_repeats - 1, expected_spacing),
+            atol=1e-8,
+            rtol=0.0,
+        )
 
     def test_strain_grain_modes_y_dim(self):
         d_left = 3.615 * np.linalg.norm(np.array(self.INCOMMENSURATE_P[1]))
@@ -121,33 +149,26 @@ class TestStrainAccommodation(unittest.TestCase):
 
         actual_y_dims = {}
         for mode, expected_y_dim in expected_y_dims.items():
-            with self.subTest(mode=mode):
-                gb = self._build_exact_incommensurate_pq(strain_grain=mode)
-                actual_y_dims[mode] = gb.y_dim
-                self.assertAlmostEqual(gb.y_dim, expected_y_dim, delta=1e-8)
+            gb = self._build_exact_incommensurate_pq(strain_grain=mode)
+            actual_y_dims[mode] = gb.y_dim
+            assert gb.y_dim == pytest.approx(expected_y_dim, abs=1e-8, rel=0.0)
 
-        self.assertNotAlmostEqual(
-            actual_y_dims["left"], actual_y_dims["right"], delta=1e-8
+        assert actual_y_dims["left"] != pytest.approx(
+            actual_y_dims["right"], abs=1e-8, rel=0.0
         )
-        self.assertNotAlmostEqual(
-            actual_y_dims["both"], actual_y_dims["left"], delta=1e-8
+        assert actual_y_dims["both"] != pytest.approx(
+            actual_y_dims["left"], abs=1e-8, rel=0.0
         )
-        self.assertNotAlmostEqual(
-            actual_y_dims["both"], actual_y_dims["right"], delta=1e-8
+        assert actual_y_dims["both"] != pytest.approx(
+            actual_y_dims["right"], abs=1e-8, rel=0.0
         )
 
     def test_y_and_z_periods_independent(self):
         # y-direction: genuinely mismatched (d_left=a0, d_right=5*a0)
         # z-direction: tilt axis [0,0,1], same for both grains -> no mismatch
         gb = self._build(mismatch_tol=0.005)
-        self.assertAlmostEqual(gb.y_dim, 5.0 * self.A0, delta=1e-4,
-                               msg=f"y_dim={gb.y_dim:.4f} != "
-                               f"5*a0={5*self.A0:.4f} "
-                               "(y mismatch accommodated)")
-        self.assertAlmostEqual(gb.z_dim, self.A0, delta=1e-4,
-                               msg=f"z_dim={gb.z_dim:.4f} != "
-                               f"a0={self.A0:.4f} "
-                               "(no z mismatch expected)")
+        assert gb.y_dim == pytest.approx(5.0 * self.A0, abs=1e-4, rel=0.0)
+        assert gb.z_dim == pytest.approx(self.A0, abs=1e-4, rel=0.0)
 
     def test_fallback_warning_when_no_pair_found(self):
         # Force _find_commensurate_pair to return None for both axes so the
@@ -157,18 +178,17 @@ class TestStrainAccommodation(unittest.TestCase):
                 warnings.simplefilter("always")
                 self._build(mismatch_tol=0.005)
         msgs = [str(x.message) for x in w]
-        self.assertTrue(
-            any("No commensurate" in m for m in msgs),
-            f"Expected a 'No commensurate' warning; got: {msgs}",
+        assert any("No commensurate" in m for m in msgs), (
+            f"Expected a 'No commensurate' warning; got: {msgs}"
         )
 
     def test_exact_mismatch_tol_builds_incommensurate_pqspec(self):
         gb = self._build_exact_incommensurate_pq()
-        self.assertGreater(gb.whole_system.size, 0)
+        assert gb.whole_system.size > 0
         accommodation = gb._GBMaker__strain_accommodation["y"]
-        self.assertEqual(accommodation.left_repeats, 5)
-        self.assertEqual(accommodation.right_repeats, 27)
-        self.assertLessEqual(accommodation.mismatch, 0.005)
+        assert accommodation.left_repeats == 5
+        assert accommodation.right_repeats == 27
+        assert accommodation.mismatch <= 0.005
 
     def test_exact_mismatch_tol_preserves_rocksalt_stoichiometry(self):
         gb = self._build_exact_incommensurate_pq(
@@ -179,15 +199,13 @@ class TestStrainAccommodation(unittest.TestCase):
 
         names, counts = np.unique(gb.whole_system["name"], return_counts=True)
         species_counts = {str(name): int(count) for name, count in zip(names, counts)}
-        self.assertEqual(
-            species_counts["Na"],
-            species_counts["Cl"],
+        assert species_counts["Na"] == species_counts["Cl"], (
             "Exact mismatch_tol rocksalt build is not stoichiometric: "
-            f"{species_counts}",
+            f"{species_counts}"
         )
 
     def test_exact_without_mismatch_tol_still_raises_commensurability_error(self):
-        with self.assertRaises(GBMakerValueError):
+        with pytest.raises(GBMakerValueError):
             GBMaker.from_boundary_spec(
                 3.615, "sc", "Cu", self._incommensurate_spec(), mode="exact",
                 gb_thickness=0.0,
@@ -198,7 +216,7 @@ class TestStrainAccommodation(unittest.TestCase):
             )
 
     def test_exact_mismatch_tol_no_pair_raises(self):
-        with self.assertRaisesRegex(GBMakerValueError, "No commensurate y pair"):
+        with pytest.raises(GBMakerValueError, match="No commensurate y pair"):
             self._build_exact_incommensurate_pq(
                 mismatch_tol=1e-10,
                 mismatch_max_cells=2,
@@ -218,23 +236,22 @@ class TestStrainAccommodation(unittest.TestCase):
         }
         for mode, expected in cases.items():
             expected_y_dim, expected_left_scale, expected_right_scale = expected
-            with self.subTest(mode=mode):
-                gb = self._build_exact_incommensurate_pq(strain_grain=mode)
-                accommodation = gb._GBMaker__strain_accommodation["y"]
-                self.assertAlmostEqual(gb.y_dim, expected_y_dim, delta=1e-8)
-                self.assertAlmostEqual(
-                    accommodation.left_scale, expected_left_scale, delta=1e-12
-                )
-                self.assertAlmostEqual(
-                    accommodation.right_scale, expected_right_scale, delta=1e-12
-                )
+            gb = self._build_exact_incommensurate_pq(strain_grain=mode)
+            accommodation = gb._GBMaker__strain_accommodation["y"]
+            assert gb.y_dim == pytest.approx(expected_y_dim, abs=1e-8, rel=0.0)
+            assert accommodation.left_scale == pytest.approx(
+                expected_left_scale, abs=1e-12, rel=0.0
+            )
+            assert accommodation.right_scale == pytest.approx(
+                expected_right_scale, abs=1e-12, rel=0.0
+            )
 
     def test_exact_interaction_resize_preserves_commensurate_pair(self):
         gb = self._build_exact_incommensurate_pq(interaction_distance=10.0)
         accommodation = gb._GBMaker__strain_accommodation["z"]
-        self.assertEqual(accommodation.left_repeats, 6)
-        self.assertEqual(accommodation.right_repeats, 6)
-        self.assertAlmostEqual(gb.z_dim, 6 * 3.615, delta=1e-8)
+        assert accommodation.left_repeats == 6
+        assert accommodation.right_repeats == 6
+        assert gb.z_dim == pytest.approx(6 * 3.615, abs=1e-8, rel=0.0)
 
     def test_exact_mismatch_tol_builds_primitive_cslexactspec(self):
         spec = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
@@ -247,8 +264,8 @@ class TestStrainAccommodation(unittest.TestCase):
             vacuum=0.0,
             interaction_distance=self.INTERACTION_DISTANCE,
         )
-        self.assertGreater(gb_unstrained.whole_system.size, 0)
-        self.assertEqual(gb_unstrained._GBMaker__strain_accommodation, {})
+        assert gb_unstrained.whole_system.size > 0
+        assert gb_unstrained._GBMaker__strain_accommodation == {}
 
         gb = GBMaker.from_boundary_spec(
             3.615, "sc", "Cu", spec, mode="exact",
@@ -259,26 +276,64 @@ class TestStrainAccommodation(unittest.TestCase):
             interaction_distance=self.INTERACTION_DISTANCE,
             mismatch_tol=0.005,
         )
-        self.assertGreater(gb.whole_system.size, 0)
+        assert gb.whole_system.size > 0
         accommodation_y = gb._GBMaker__strain_accommodation["y"]
         accommodation_z = gb._GBMaker__strain_accommodation["z"]
-        self.assertEqual(accommodation_y.left_repeats, 1)
-        self.assertEqual(accommodation_y.right_repeats, 1)
-        self.assertEqual(accommodation_z.left_repeats, 1)
-        self.assertEqual(accommodation_z.right_repeats, 1)
-        self.assertEqual(accommodation_y.mismatch, 0.0)
-        self.assertEqual(accommodation_z.mismatch, 0.0)
+        assert accommodation_y.left_repeats == 1
+        assert accommodation_y.right_repeats == 1
+        assert accommodation_z.left_repeats == 1
+        assert accommodation_z.right_repeats == 1
+        assert accommodation_y.mismatch == 0.0
+        assert accommodation_z.mismatch == 0.0
 
     def test_invalid_strain_grain_raises(self):
         spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
-        with self.assertRaises(GBMakerValueError):
+        with pytest.raises(GBMakerValueError):
             GBMaker.from_boundary_spec(
                 3.615, "fcc", "Cu", spec, mode="approximate",
                 strain_grain="diagonal",
             )
 
+    @pytest.mark.parametrize(
+        "kwargs",
+        (
+            {"mismatch_tol": -0.01},
+            {"mismatch_tol": np.nan},
+            {"mismatch_tol": True},
+            {"mismatch_tol": 0.005, "mismatch_max_cells": 0},
+            {"mismatch_tol": 0.005, "mismatch_max_cells": 1.5},
+            {"mismatch_tol": 0.005, "mismatch_max_cells": np.bool_(True)},
+        ),
+        ids=(
+            "negative-tol",
+            "nan-tol",
+            "bool-tol",
+            "zero-max-cells",
+            "float-max-cells",
+            "numpy-bool-max-cells",
+        ),
+    )
+    def test_invalid_public_mismatch_arguments_raise_gbmaker_value_error(
+        self, kwargs
+    ):
+        spec = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=20.0)
+        with pytest.raises(GBMakerValueError):
+            GBMaker.from_boundary_spec(
+                3.615,
+                "sc",
+                "Cu",
+                spec,
+                mode="approximate",
+                gb_thickness=0.0,
+                repeat_factor=1,
+                x_dim_min=5.0,
+                vacuum=0.0,
+                interaction_distance=self.INTERACTION_DISTANCE,
+                **kwargs,
+            )
 
-class TestFindCommensurablePair(unittest.TestCase):
+
+class TestFindCommensurablePair:
     """Unit tests for the _find_commensurate_pair helper."""
 
     @staticmethod
@@ -297,65 +352,69 @@ class TestFindCommensurablePair(unittest.TestCase):
 
     def test_identical_periods_returns_n1_n2_1(self):
         result = _find_commensurate_pair(3.0, 3.0, tol=0.005, max_n=10)
-        self.assertIsNotNone(result)
+        assert result is not None
         n1, n2, l1, l2 = result
-        self.assertEqual(n1, 1)
-        self.assertEqual(n2, 1)
-        self.assertAlmostEqual(l1, 3.0)
-        self.assertAlmostEqual(l2, 3.0)
+        assert n1 == 1
+        assert n2 == 1
+        assert l1 == pytest.approx(3.0, abs=1e-12, rel=0.0)
+        assert l2 == pytest.approx(3.0, abs=1e-12, rel=0.0)
 
     def test_exact_multiple_found(self):
         # d2 = 2*d1 -> n1=2, n2=1 should be found with tol=0
         result = _find_commensurate_pair(3.0, 6.0, tol=0.0, max_n=10)
-        self.assertIsNotNone(result)
+        assert result is not None
         n1, n2, l1, l2 = result
-        self.assertEqual((n1, n2), (2, 1))
-        self.assertAlmostEqual(l1, l2, places=10)
+        assert (n1, n2) == (2, 1)
+        assert l1 == pytest.approx(l2, abs=1e-10, rel=0.0)
 
     def test_commensurate_pair_within_tolerance(self):
         # 3*5.0 = 15.0, 2*7.48 = 14.96 -> mismatch = 0.04/15 ~= 0.27%
         result = _find_commensurate_pair(5.0, 7.48, tol=0.005, max_n=20)
-        self.assertIsNotNone(result)
+        assert result is not None
         n1, n2, l1, l2 = result
         mismatch = abs(l1 - l2) / max(l1, l2)
-        self.assertLessEqual(mismatch, 0.005)
+        assert mismatch <= 0.005
 
     def test_no_pair_within_tight_tolerance(self):
         # Irrational-like ratio: no small-integer pair within 0.001%
         result = _find_commensurate_pair(1.0, math.pi, tol=0.00001, max_n=5)
-        self.assertIsNone(result)
+        assert result is None
 
     def test_returns_smallest_box(self):
         # Both (n1=1,n2=2) and (n1=2,n2=4) are valid; (1,2) has smaller box.
         result = _find_commensurate_pair(4.0, 2.0, tol=0.0, max_n=10)
         n1, n2, _, _ = result
-        self.assertEqual((n1, n2), (1, 2))
-        self.assertEqual(max(n1 * 4.0, n2 * 2.0), 4.0)
+        assert (n1, n2) == (1, 2)
+        assert max(n1 * 4.0, n2 * 2.0) == 4.0
 
     def test_tolerance_boundary(self):
         # mismatch exactly at tol should be accepted
         d1, d2 = 10.0, 10.1
         tol = abs(d1 - d2) / max(d1, d2)
         result = _find_commensurate_pair(d1, d2, tol=tol, max_n=5)
-        self.assertIsNotNone(result)
+        assert result is not None
 
-    def test_continued_fraction_result_matches_brute_force_size(self):
-        cases = (
+    @pytest.mark.parametrize(
+        ("d1", "d2", "tol", "max_n"),
+        (
             (5.0, 7.48, 0.005, 20),
             (1.0, math.sqrt(2.0), 0.001, 50),
             (3.615 * math.sqrt(29.0), 3.615, 0.005, 50),
             (10.0, 10.1, abs(10.0 - 10.1) / 10.1, 5),
-        )
-        for d1, d2, tol, max_n in cases:
-            with self.subTest(d1=d1, d2=d2, tol=tol, max_n=max_n):
-                result = _find_commensurate_pair(d1, d2, tol=tol, max_n=max_n)
-                brute = self._brute_force_pair(d1, d2, tol, max_n)
-                self.assertEqual(result is None, brute is None)
-                if result is None or brute is None:
-                    continue
-                result_size = max(result[2], result[3])
-                brute_size = max(brute[2], brute[3])
-                self.assertAlmostEqual(result_size, brute_size, delta=1e-12)
+        ),
+        ids=("near-3-2", "sqrt2", "sigma29-row", "tolerance-boundary"),
+    )
+    def test_continued_fraction_result_matches_brute_force_size(
+        self, d1, d2, tol, max_n
+    ):
+        result = _find_commensurate_pair(d1, d2, tol=tol, max_n=max_n)
+        brute = self._brute_force_pair(d1, d2, tol, max_n)
+        assert (result is None) == (brute is None)
+        if result is None or brute is None:
+            return
+        result_size = max(result[2], result[3])
+        brute_size = max(brute[2], brute[3])
+        assert result_size == pytest.approx(brute_size, abs=1e-12, rel=0.0)
 
 
 class TestGBMaker(unittest.TestCase):
@@ -2290,7 +2349,7 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         self._assert_interface_stacking(gbm, d_spacing=self.a0 / np.sqrt(3))
 
 
-class TestZhang2021ExactStoichiometry(unittest.TestCase):
+class TestZhang2021ExactStoichiometry:
     """Exact-path build-quality sweep over all 178 Zhang 2021 UO2 boundaries.
 
     Each boundary is built via ``from_boundary_spec(..., mode='exact')`` using
@@ -2310,6 +2369,20 @@ class TestZhang2021ExactStoichiometry(unittest.TestCase):
     )
     EXPECTED_BUILT = 166
     EXPECTED_GBMAKER_ERRORS = 12
+    EXPECTED_SKIPPED = {
+        "sigma11_110_1_1bar_0_7bar_7_12_ATGB",
+        "sigma3_110_1_1bar_4bar_1bar_1_0_ATGB",
+        "sigma3_110_1_1bar_0_1_1bar_4_ATGB",
+        "sigma3_110_1bar_17bar_4_3_3_4_mixed",
+        "sigma3_110_25bar_29bar_10_7_11_2_mixed",
+        "sigma9_110_4bar_1bar_1bar_1_1_0_mixed",
+        "sigma3_110_5bar_4bar_2bar_2_1_0_mixed",
+        "sigma21_111_1bar_2_1bar_2_13bar_11_ATGB",
+        "sigma39_111_22bar_23_1bar_1bar_1bar_2_ATGB",
+        "sigma7_111_11bar_13_2bar_1bar_1bar_2_ATGB",
+        "sigma3_111_1bar_1bar_4bar_0_1_1_mixed",
+        "sigma3_111_5bar_4bar_2bar_2_1_0_mixed",
+    }
 
     def _quality_issues(self, gb) -> list[str]:
         issues = []
@@ -2345,39 +2418,34 @@ class TestZhang2021ExactStoichiometry(unittest.TestCase):
         return issues
 
     def test_all_boundaries_exact_build_quality(self):
-        from GBOpt.BoundarySpec import PQSpec
-        from zhang2021_boundaries import BOUNDARIES
-
         built = 0
         errors = 0
+        skipped = set()
         for name, entry in BOUNDARIES.items():
-            with self.subTest(boundary=name):
-                spec = PQSpec(P=entry["P"], Q=entry["Q"])
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        gb = GBMaker.from_boundary_spec(
-                            self.A0, "fluorite", ("U", "O"),
-                            spec, mode="exact",
-                            **self.BUILD_KWARGS,
-                        )
-                except GBMakerValueError:
-                    errors += 1
-                    continue
-                built += 1
-                issues = self._quality_issues(gb)
-                self.assertEqual(
-                    issues,
-                    [],
-                    f"{name}: " + "; ".join(issues),
-                )
+            spec = PQSpec(P=entry["P"], Q=entry["Q"])
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    gb = GBMaker.from_boundary_spec(
+                        self.A0, "fluorite", ("U", "O"),
+                        spec, mode="exact",
+                        **self.BUILD_KWARGS,
+                    )
+            except GBMakerValueError:
+                errors += 1
+                skipped.add(name)
+                continue
+            built += 1
+            issues = self._quality_issues(gb)
+            assert issues == [], f"{name}: " + "; ".join(issues)
 
-        self.assertEqual(built, self.EXPECTED_BUILT)
-        self.assertEqual(errors, self.EXPECTED_GBMAKER_ERRORS)
+        assert built == self.EXPECTED_BUILT
+        assert errors == self.EXPECTED_GBMAKER_ERRORS
+        assert skipped == self.EXPECTED_SKIPPED
 
 
 @pytest.mark.slow
-class TestOlmsted2009ExactBuild(unittest.TestCase):
+class TestOlmsted2009ExactBuild:
     """Exact-path build-quality sweep over all 388 Olmsted 2009 fcc boundaries.
 
     Each boundary is built via ``from_boundary_spec(..., mode='exact')`` using
@@ -2481,28 +2549,26 @@ class TestOlmsted2009ExactBuild(unittest.TestCase):
         built = 0
         errors = 0
         for gb_idx, entry in BOUNDARIES.items():
-            with self.subTest(gb_index=gb_idx, sigma=entry["sigma"]):
-                spec = PQSpec(P=entry["P"], Q=entry["Q"])
-                try:
-                    with warnings.catch_warnings():
-                        warnings.simplefilter("ignore", UserWarning)
-                        gb = GBMaker.from_boundary_spec(
-                            self.A0, "fcc", "Ni",
-                            spec, mode="exact",
-                            **self.BUILD_KWARGS,
-                        )
-                except GBMakerValueError:
-                    errors += 1
-                    continue
-                built += 1
-                issues = self._quality_issues(gb)
-                self.assertEqual(
-                    issues, [],
-                    f"GB {gb_idx} (Sigma{entry['sigma']}): " + "; ".join(issues),
-                )
+            spec = PQSpec(P=entry["P"], Q=entry["Q"])
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", UserWarning)
+                    gb = GBMaker.from_boundary_spec(
+                        self.A0, "fcc", "Ni",
+                        spec, mode="exact",
+                        **self.BUILD_KWARGS,
+                    )
+            except GBMakerValueError:
+                errors += 1
+                continue
+            built += 1
+            issues = self._quality_issues(gb)
+            assert issues == [], (
+                f"GB {gb_idx} (Sigma{entry['sigma']}): " + "; ".join(issues)
+            )
 
-        self.assertEqual(built, self.EXPECTED_BUILT)
-        self.assertEqual(errors, self.EXPECTED_GBMAKER_ERRORS)
+        assert built == self.EXPECTED_BUILT
+        assert errors == self.EXPECTED_GBMAKER_ERRORS
 
 
 if __name__ == "__main__":

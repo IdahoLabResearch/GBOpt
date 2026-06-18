@@ -104,12 +104,26 @@ def test_five_dof_spec_rejects_invalid_params(params, error_type):
         FiveDOFSpec(params=params)
 
 
+def test_five_dof_spec_copies_mutable_input():
+    params = list(VALID_PARAMS)
+    spec = FiveDOFSpec(params=params)
+
+    params[0] = 99.0
+
+    assert spec.params[0] == pytest.approx(VALID_PARAMS[0], abs=1e-12, rel=0)
+
+
+def test_five_dof_spec_rejects_boolean_params():
+    with pytest.raises(BoundarySpecTypeError):
+        FiveDOFSpec(params=[0.1, True, 0.3, 45.0, 30.0])
+
+
 @pytest.mark.parametrize("q_matrix", [SWAPPED_Q, ROTATED_Q])
 def test_pq_spec_stores_valid_matrices(q_matrix):
     spec = PQSpec(P=IDENTITY_P, Q=q_matrix)
 
-    assert spec.P == IDENTITY_P
-    assert spec.Q == q_matrix
+    np.testing.assert_allclose(spec.P, IDENTITY_P, atol=0.0, rtol=0.0)
+    np.testing.assert_allclose(spec.Q, q_matrix, atol=0.0, rtol=0.0)
     assert spec.basis_mode == "primitive"
 
 
@@ -139,6 +153,33 @@ def test_pq_spec_rejects_invalid_p_matrix(p_matrix):
         PQSpec(P=p_matrix, Q=IDENTITY_Q)
 
 
+@pytest.mark.parametrize(
+    "q_matrix",
+    [
+        [[1, 0, 0], [0, 1, 0]],
+        [[1, 0, 0], [0, float("nan"), 0], [0, 0, 1]],
+        [[1, 0, 0], [0, float("inf"), 0], [0, 0, 1]],
+        [[1, 0, 0], [1, 0, 0], [0, 0, 1]],
+    ],
+    ids=["wrong_shape", "nan_entry", "inf_entry", "singular"],
+)
+def test_pq_spec_rejects_invalid_q_matrix(q_matrix):
+    with pytest.raises(BoundarySpecError):
+        PQSpec(P=IDENTITY_P, Q=q_matrix)
+
+
+def test_pq_spec_copies_mutable_inputs():
+    P = [row[:] for row in IDENTITY_P]
+    Q = [row[:] for row in ROTATED_Q]
+    spec = PQSpec(P=P, Q=Q)
+
+    P[0][0] = 9
+    Q[0][0] = 9
+
+    np.testing.assert_allclose(spec.P, IDENTITY_P, atol=0.0, rtol=0.0)
+    np.testing.assert_allclose(spec.Q, ROTATED_Q, atol=0.0, rtol=0.0)
+
+
 def test_csl_base_defaults_sigma_to_none(csl_base_kwargs):
     spec = _CSLSpecBase(**csl_base_kwargs)
 
@@ -166,6 +207,33 @@ def test_csl_base_rejects_invalid_fields(kwargs):
         _CSLSpecBase(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        _csl_kwargs(axis=[0, True, 1]),
+        _csl_kwargs(plane=[False, 0, 1]),
+        _csl_kwargs(sigma=np.bool_(True)),
+    ],
+    ids=["bool_axis", "bool_plane", "bool_sigma"],
+)
+def test_csl_base_rejects_boolean_fields(kwargs):
+    with pytest.raises(BoundarySpecTypeError):
+        _CSLSpecBase(**kwargs)
+
+
+def test_csl_base_copies_mutable_axis_and_plane():
+    axis = [0, 0, 1]
+    plane = [1, 0, 0]
+    spec = _CSLSpecBase(axis=axis, plane=plane, sigma=np.int64(5))
+
+    axis[2] = 9
+    plane[0] = 9
+
+    assert spec.axis == (0, 0, 1)
+    assert spec.plane == (1, 0, 0)
+    assert spec.sigma == 5
+
+
 def test_csl_exact_spec_stores_quat_and_sigma(csl_exact_kwargs):
     spec = CSLExactSpec(**csl_exact_kwargs, sigma=5)
 
@@ -177,6 +245,25 @@ def test_csl_exact_spec_allows_identity_quaternion():
     spec = CSLExactSpec(axis=VALID_AXIS, plane=VALID_PLANE, quat=[1, 0, 0, 0])
 
     assert list(spec.quat) == [1, 0, 0, 0]
+
+
+def test_csl_exact_spec_rejects_sigma_mismatch_at_construction():
+    with pytest.raises(BoundarySpecValueError, match="Sigma mismatch"):
+        CSLExactSpec(
+            axis=[0, 0, 1],
+            plane=[1, 0, 0],
+            quat=[2, 0, 0, 1],
+            sigma=3,
+        )
+
+
+def test_csl_exact_spec_copies_mutable_quat():
+    quat = [3, 0, 0, 1]
+    spec = CSLExactSpec(axis=VALID_AXIS, plane=VALID_PLANE, quat=quat, sigma=5)
+
+    quat[0] = 9
+
+    assert spec.quat == (3, 0, 0, 1)
 
 
 @pytest.mark.parametrize(
@@ -240,6 +327,11 @@ def test_csl_approx_spec_rejects_invalid_fields(kwargs, error_type):
         CSLApproxSpec(**kwargs)
 
 
+def test_csl_approx_spec_rejects_boolean_angle(csl_base_kwargs):
+    with pytest.raises(BoundarySpecTypeError):
+        CSLApproxSpec(**csl_base_kwargs, angle_deg=np.bool_(True))
+
+
 def test_boundary_embedding_stores_arrays_and_default_metadata():
     P = np.array(IDENTITY_P, dtype=float)
     Q = np.array(SWAPPED_Q, dtype=float)
@@ -268,3 +360,20 @@ def test_boundary_embedding_stores_source():
     emb = _make_embedding(source="csl")
 
     assert emb.source == "csl"
+
+
+def test_boundary_embedding_round_trips_primitive_metadata():
+    metadata = PrimitiveCellMetadata(
+        basis_mode="primitive",
+        supplied_area_index=10,
+        primitive_area_index=5,
+        reduction_index=2,
+        plane=(0, 0, 1),
+        rotation_denominator=10,
+        conventional_cell_multiplier=10,
+    )
+
+    emb = _make_embedding(metadata=metadata)
+
+    assert emb.metadata == metadata
+    assert emb.metadata.plane == (0, 0, 1)

@@ -46,78 +46,195 @@ def structured_array_equal(array1, array2):
     return True
 
 
-class TestLyakhovLocalOrder(unittest.TestCase):
-    def test_local_order_is_higher_for_ideal_crystal_neighborhoods(self):
-        cases = [
-            ("fcc", "Cu", 18),
-            ("bcc", "Fe", 14),
-            ("sc", "Po", 6),
-            ("diamond", "C", 34),
-            ("fluorite", ("U", "O"), 50),
-            ("rocksalt", ("Na", "Cl"), 32),
-            ("zincblende", ("Zn", "S"), 34),
-        ]
-        for structure, atoms, expected_neighbors in cases:
-            with self.subTest(structure=structure):
-                ideal_order, distorted_order, neighbor_count = (
-                    self._local_order_for_structure(structure, atoms)
-                )
+def _local_order_for_structure(structure, atoms):
+    unit_cell = UnitCell()
+    unit_cell.init_by_structure(structure, 1.0, atoms)
+    basis = unit_cell.asarray()
+    basis_positions = np.column_stack((basis["x"], basis["y"], basis["z"]))
+    basis_types = unit_cell.names(asint=True)
+    rmax = 1.05
 
-                self.assertEqual(neighbor_count, expected_neighbors)
-                self.assertTrue(np.isfinite(ideal_order))
-                self.assertTrue(np.isfinite(distorted_order))
-                self.assertGreaterEqual(ideal_order, 0.0)
-                self.assertGreaterEqual(distorted_order, 0.0)
-                self.assertGreater(
-                    ideal_order - distorted_order,
-                    1e-8,
-                    "Ideal crystal neighborhood should be more ordered than a "
-                    "deterministically distorted neighborhood.",
-                )
+    translation_indices = np.array(
+        np.meshgrid(
+            np.arange(-2, 3),
+            np.arange(-2, 3),
+            np.arange(-2, 3),
+            indexing="ij",
+        )
+    ).reshape(3, -1).T
+    translations = translation_indices @ unit_cell.conventional
+    supercell_positions = (
+        translations[:, np.newaxis, :] + basis_positions[np.newaxis, :, :]
+    ).reshape(-1, 3)
+    supercell_types = np.tile(basis_types, len(translations))
 
-    def _local_order_for_structure(self, structure, atoms):
-        unit_cell = UnitCell()
-        unit_cell.init_by_structure(structure, 1.0, atoms)
-        basis = unit_cell.asarray()
-        basis_positions = np.column_stack((basis["x"], basis["y"], basis["z"]))
-        basis_types = unit_cell.names(asint=True)
-        rmax = 1.05
+    central_position = basis_positions[0]
+    distances = np.linalg.norm(supercell_positions - central_position, axis=1)
+    neighborhood = (distances > 1e-12) & (distances < rmax)
 
-        translation_indices = np.array(
-            np.meshgrid(
-                np.arange(-2, 3),
-                np.arange(-2, 3),
-                np.arange(-2, 3),
-                indexing="ij",
+    atom = np.array([basis_types[0], *central_position], dtype=np.float64)
+    ideal_neighbors = np.column_stack(
+        (supercell_types[neighborhood], supercell_positions[neighborhood])
+    )
+    distorted_neighbors = ideal_neighbors.copy()
+    distorted_neighbors[:, 1:] *= np.array([1.0, 1.15, 0.85])
+
+    kwargs = dict(
+        unit_cell_types=basis_types,
+        unit_cell_a0=unit_cell.a0,
+        N=len(basis),
+        Delta=0.05,
+        Rmax=rmax,
+    )
+    ideal_order = _calculate_local_order(atom, ideal_neighbors, **kwargs)
+    distorted_order = _calculate_local_order(atom, distorted_neighbors, **kwargs)
+    return ideal_order, distorted_order, len(ideal_neighbors)
+
+
+@pytest.mark.parametrize(
+    ("structure", "atoms", "expected_neighbors"),
+    (
+        ("fcc", "Cu", 18),
+        ("bcc", "Fe", 14),
+        ("sc", "Po", 6),
+        ("diamond", "C", 34),
+        ("fluorite", ("U", "O"), 50),
+        ("rocksalt", ("Na", "Cl"), 32),
+        ("zincblende", ("Zn", "S"), 34),
+    ),
+    ids=("fcc", "bcc", "sc", "diamond", "fluorite", "rocksalt", "zincblende"),
+)
+def test_local_order_is_higher_for_ideal_crystal_neighborhoods(
+    structure, atoms, expected_neighbors
+):
+    ideal_order, distorted_order, neighbor_count = _local_order_for_structure(
+        structure, atoms
+    )
+
+    assert neighbor_count == expected_neighbors
+    assert np.isfinite(ideal_order)
+    assert np.isfinite(distorted_order)
+    assert ideal_order >= 0.0
+    assert distorted_order >= 0.0
+    assert ideal_order - distorted_order > 1e-8
+
+
+def _synthetic_manipulator(unit_cell, atoms, seed=100):
+    # Bypass full GBMaker construction so stoichiometric mutator tests can
+    # isolate selection logic with a tiny deterministic parent.
+    parent = type("SyntheticParent", (), {})()
+    parent.unit_cell = unit_cell
+    parent.whole_system = atoms
+    parent.gb_atoms = atoms
+    parent.gb_indices = np.arange(len(atoms))
+
+    manipulator = object.__new__(GBManipulator)
+    manipulator._GBManipulator__one_parent = True
+    manipulator._GBManipulator__parents = [parent, None]
+    manipulator._GBManipulator__rng = np.random.default_rng(seed)
+    return manipulator
+
+
+def test_insert_atoms_with_stoichiometry_uses_selected_neighbor_site_ids():
+    unit_cell = UnitCell()
+    unit_cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+    atoms = np.array(
+        [
+            ("U", 0.0, 0.0, 0.0),
+            ("O", 2.0, 0.0, 0.0),
+            ("O", 0.0, 2.0, 0.0),
+            ("U", 0.0, 0.0, 2.0),
+        ],
+        dtype=Atom.atom_dtype,
+    )
+    manipulator = _synthetic_manipulator(unit_cell, atoms)
+
+    class FixedChoiceRng:
+        def __init__(self):
+            self.calls = 0
+
+        def choice(self, _choices, _size, replace=False, p=None):
+            self.calls += 1
+            if self.calls == 1:
+                return np.array([3])
+            return np.array([0, 1])
+
+    class FakeKDTree:
+        def __init__(self, data):
+            self.data = np.asarray(data, dtype=float)
+
+        def query_ball_tree(self, other, _radius):
+            return [[] for _ in range(len(self.data))]
+
+        def query(self, points, k=1):
+            return np.ones(len(points)), np.zeros(len(points), dtype=int)
+
+    recorded_sites = {}
+
+    def sparse_site_neighbors(_cutoff, positions):
+        recorded_sites["positions"] = np.asarray(positions, dtype=float)
+        neighbors = [[] for _ in range(len(positions))]
+        neighbors[3] = [5, 7]
+        return neighbors
+
+    manipulator._GBManipulator__rng = FixedChoiceRng()
+    with patch("GBOpt.GBManipulator.KDTree", FakeKDTree):
+        with patch(
+            "GBOpt.GBManipulator._create_neighbor_list",
+            side_effect=sparse_site_neighbors,
+        ):
+            _new_system, new_atoms = manipulator.insert_atoms(
+                num_to_insert=1,
+                method="grid",
+                keep_ratio=True,
+                return_positions=True,
             )
-        ).reshape(3, -1).T
-        translations = translation_indices @ unit_cell.conventional
-        supercell_positions = (
-            translations[:, np.newaxis, :] + basis_positions[np.newaxis, :, :]
-        ).reshape(-1, 3)
-        supercell_types = np.tile(basis_types, len(translations))
 
-        central_position = basis_positions[0]
-        distances = np.linalg.norm(supercell_positions - central_position, axis=1)
-        neighborhood = (distances > 1e-12) & (distances < rmax)
+    sites = recorded_sites["positions"]
+    inserted_positions = {
+        tuple(row)
+        for row in np.column_stack((new_atoms["x"], new_atoms["y"], new_atoms["z"]))
+    }
+    expected_positions = {tuple(sites[idx]) for idx in (3, 5, 7)}
+    assert inserted_positions == expected_positions
+    assert list(new_atoms["name"]) == ["U", "O", "O"]
 
-        atom = np.array([basis_types[0], *central_position], dtype=np.float64)
-        ideal_neighbors = np.column_stack(
-            (supercell_types[neighborhood], supercell_positions[neighborhood])
+
+@pytest.mark.slow
+def test_displace_along_soft_modes_preserves_multitype_numeric_roundtrip():
+    seed = 100
+    theta = math.radians(36.869898)
+    gb = GBMaker(
+        a0=3.0,
+        structure="rocksalt",
+        gb_thickness=5.0,
+        misorientation=[theta, 0, 0, 0, -theta / 2.0],
+        atom_types=("Na", "Cl"),
+        repeat_factor=(2, 2),
+        x_dim_min=5.0,
+        vacuum=2.0,
+        interaction_distance=4.0,
+    )
+    manipulator = GBManipulator(gb, seed=seed)
+
+    child = manipulator.displace_along_soft_modes(mesh_size=1, num_q=1)[0]
+
+    assert set(child["name"]) == {"Na", "Cl"}
+    with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+        gb.write_lammps(
+            temp_file.name,
+            child,
+            gb.box_dims,
+            type_as_int=True,
         )
-        distorted_neighbors = ideal_neighbors.copy()
-        distorted_neighbors[:, 1:] *= np.array([1.0, 1.15, 0.85])
-
-        kwargs = dict(
-            unit_cell_types=basis_types,
-            unit_cell_a0=unit_cell.a0,
-            N=len(basis),
-            Delta=0.05,
-            Rmax=rmax,
+        loaded = GBManipulator(
+            temp_file.name,
+            unit_cell=gb.unit_cell,
+            gb_thickness=gb.gb_thickness,
+            seed=seed,
         )
-        ideal_order = _calculate_local_order(atom, ideal_neighbors, **kwargs)
-        distorted_order = _calculate_local_order(atom, distorted_neighbors, **kwargs)
-        return ideal_order, distorted_order, len(ideal_neighbors)
+    loaded_names = set(loaded.parents[0].whole_system["name"])
+    assert loaded_names == {"Na", "Cl"}
 
 
 class TestGBManipulator(unittest.TestCase):
@@ -155,6 +272,9 @@ class TestGBManipulator(unittest.TestCase):
         self.file1 = "tests/inputs/basic_dump_test1.txt"
         self.file2 = "tests/inputs/basic_dump_test2.txt"
         self.seed = 100
+
+    def _synthetic_manipulator(self, unit_cell, atoms):
+        return _synthetic_manipulator(unit_cell, atoms, seed=self.seed)
 
     def test_init_with_one_gbmaker_parent(self):
         self.assertIsNotNone(self.manipulator_tilt.parents[0])
@@ -261,16 +381,7 @@ class TestGBManipulator(unittest.TestCase):
             dtype=Atom.atom_dtype,
         )
 
-        parent = type("SyntheticParent", (), {})()
-        parent.unit_cell = unit_cell
-        parent.whole_system = atoms
-        parent.gb_atoms = atoms
-        parent.gb_indices = np.arange(len(atoms))
-
-        manipulator = object.__new__(GBManipulator)
-        manipulator._GBManipulator__one_parent = True
-        manipulator._GBManipulator__parents = [parent, None]
-        manipulator._GBManipulator__rng = np.random.default_rng(self.seed)
+        manipulator = self._synthetic_manipulator(unit_cell, atoms)
 
         with patch("GBOpt.GBManipulator._calculate_local_order", return_value=1.0):
             new_system = manipulator.remove_atoms(num_to_remove=1, keep_ratio=True)
@@ -331,15 +442,7 @@ class TestGBManipulator(unittest.TestCase):
             dtype=Atom.atom_dtype,
         )
 
-        parent = type("SyntheticParent", (), {})()
-        parent.unit_cell = unit_cell
-        parent.whole_system = atoms
-        parent.gb_atoms = atoms
-
-        manipulator = object.__new__(GBManipulator)
-        manipulator._GBManipulator__one_parent = True
-        manipulator._GBManipulator__parents = [parent, None]
-        manipulator._GBManipulator__rng = np.random.default_rng(self.seed)
+        manipulator = self._synthetic_manipulator(unit_cell, atoms)
 
         def all_sites_are_neighbors(_cutoff, positions):
             return [

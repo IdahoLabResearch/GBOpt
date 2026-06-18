@@ -24,6 +24,7 @@ from GBOpt.BoundarySpec import (
 from GBOpt.Utils.integer_normal_forms import (
     ExactNormalFormError,
     _as_int_matrix as _inf_as_int_matrix,
+    _cross_int3,
     _det3 as _inf_det3,
     _dot_int,
     _int_adj3 as _inf_int_adj3,
@@ -391,7 +392,7 @@ def _primitive_null_coefficients(covector: ArrayLike) -> np.ndarray:
 
 def _saturate_coefficients(coeffs: np.ndarray, covector: np.ndarray) -> np.ndarray:
     """Replace a nonprimitive rank-two coefficient basis with a primitive one."""
-    cross = np.cross(coeffs[:, 0].astype(int), coeffs[:, 1].astype(int)).astype(object)
+    cross = _cross_int3(coeffs[:, 0], coeffs[:, 1])
     primitive = np.asarray(covector, dtype=object)
     factor: int | None = None
     for i in range(3):
@@ -595,7 +596,11 @@ def lll_reduce(B: np.ndarray, delta: float = 0.75) -> np.ndarray:
     :return: LLL-reduced 3 by 3 integer matrix (object dtype).
     :raises ExactCSLValueError: If ``delta`` is out of range or B is singular.
     """
-    if not (0.25 < float(delta) <= 1.0):
+    try:
+        delta_fraction = Fraction(delta).limit_denominator()
+    except TypeError as exc:
+        raise ExactCSLValueError("delta must be numeric.") from exc
+    if not (Fraction(1, 4) < delta_fraction <= Fraction(1, 1)):
         raise ExactCSLValueError("delta must be in the interval (0.25, 1.0].")
     M = _as_int_array(B, (3, 3), "B")
     if _det3(M) == 0:
@@ -603,44 +608,58 @@ def lll_reduce(B: np.ndarray, delta: float = 0.75) -> np.ndarray:
             "lll_reduce requires a full-rank (non-singular) basis."
         )
 
-    # Work with float column vectors; all reduction steps use integer rounding
-    # so the result is guaranteed to be integer-valued.
-    vecs = [M[:, i].astype(float) for i in range(3)]
+    basis = M.copy()
 
-    def _gram_schmidt():
-        """Return orthogonal basis (bstar) and Gram-Schmidt coefficients (mu)."""
-        bstar = [vecs[0].copy()]
-        mu = [[0.0] * 3 for _ in range(3)]
-        for i in range(1, 3):
-            proj = vecs[i].copy()
+    def _nearest_integer(value: Fraction) -> int:
+        """Return the nearest integer, with half cases rounded toward zero."""
+        return math.floor(value + Fraction(1, 2))
+
+    def _gram_schmidt_coefficients():
+        """Return exact Gram-Schmidt mu coefficients and squared norms."""
+        gram = [
+            [_dot_int(basis[:, i], basis[:, j]) for j in range(3)]
+            for i in range(3)
+        ]
+        mu = [[Fraction(0, 1) for _ in range(3)] for _ in range(3)]
+        norm = [Fraction(0, 1) for _ in range(3)]
+        for i in range(3):
+            norm_i = Fraction(gram[i][i], 1)
             for j in range(i):
-                denom = np.dot(bstar[j], bstar[j])
-                mu[i][j] = (np.dot(vecs[i], bstar[j]) / denom) if denom > 1e-30 else 0.0
-                proj -= mu[i][j] * bstar[j]
-            bstar.append(proj)
-        return bstar, mu
+                numerator = Fraction(gram[i][j], 1)
+                for ell in range(j):
+                    numerator -= mu[i][ell] * mu[j][ell] * norm[ell]
+                if norm[j] == 0:
+                    raise ExactCSLValueError(
+                        "lll_reduce requires a full-rank (non-singular) basis."
+                    )
+                mu[i][j] = numerator / norm[j]
+                norm_i -= mu[i][j] * mu[i][j] * norm[j]
+            if norm_i <= 0:
+                raise ExactCSLValueError(
+                    "lll_reduce requires a full-rank (non-singular) basis."
+                )
+            norm[i] = norm_i
+        return mu, norm
 
     k = 1
     while k < 3:
-        bstar, mu = _gram_schmidt()
+        mu, norm = _gram_schmidt_coefficients()
 
-        # Size reduction: replace vecs[k] with vecs[k] - round(mu[k][j]) * vecs[j].
+        # Size reduction: replace b_k with b_k - round(mu[k,j]) * b_j.
         for j in range(k - 1, -1, -1):
-            r = round(mu[k][j])
+            r = _nearest_integer(mu[k][j])
             if r != 0:
-                vecs[k] = vecs[k] - float(r) * vecs[j]
-                bstar, mu = _gram_schmidt()
+                basis[:, k] = basis[:, k] - r * basis[:, j]
+                mu, norm = _gram_schmidt_coefficients()
 
-        # Lovasz condition: check if swap of vecs[k] and vecs[k-1] is needed.
-        bk_sq = np.dot(bstar[k], bstar[k])
-        bkm1_sq = np.dot(bstar[k - 1], bstar[k - 1])
-        if bkm1_sq > 1e-30 and bk_sq >= (delta - mu[k][k - 1] ** 2) * bkm1_sq:
+        # Lovasz condition: check whether columns k and k-1 should swap.
+        if norm[k] >= (delta_fraction - mu[k][k - 1] ** 2) * norm[k - 1]:
             k += 1
         else:
-            vecs[k], vecs[k - 1] = vecs[k - 1].copy(), vecs[k].copy()
+            basis[:, [k, k - 1]] = basis[:, [k - 1, k]]
             k = max(k - 1, 1)
 
-    return np.column_stack([np.round(v).astype(int) for v in vecs]).astype(object)
+    return basis.astype(object)
 
 
 def integer_quaternion_from_unit(q: ArrayLike, max_denominator: int = 10001) -> Int4:
@@ -681,7 +700,10 @@ def _row_gcd_reduce(row: np.ndarray) -> np.ndarray:
     which returns object dtype.  GBMaker's rotation-matrix pipeline expects
     float arrays, so the conversion is done here rather than at every call site.
     """
-    return _row_gcd_reduce_int(np.round(row).astype(int)).astype(float)
+    try:
+        return _row_gcd_reduce_int(row).astype(float)
+    except ExactNormalFormError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
 
 def _assert_integer_rows(M: np.ndarray, name: str) -> None:
@@ -1289,22 +1311,46 @@ def enumerate_supercell_origins(
     :param repeat_z: Number of repeats along s2.
     :return: Array of shape (N, 3) of accepted integer origins, where
         ``N == repeat_x * repeat_y * repeat_z * abs(det(S))``.
-    :raises ValueError: If the accepted count does not match the expected value.
+    :raises ValueError: If ``S`` is singular, a repeat count is not positive,
+        or the accepted count does not match the expected value.
     """
-    S_int = np.round(S).astype(int)
+    try:
+        S_int = _inf_as_int_matrix(S, (3, 3), "S")
+    except ExactNormalFormError as exc:
+        raise ValueError(str(exc)) from exc
+    repeats = []
+    for name, value in (
+        ("repeat_x", repeat_x),
+        ("repeat_y", repeat_y),
+        ("repeat_z", repeat_z),
+    ):
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{name} must be a positive integer; got {value!r}.")
+        if not isinstance(value, (int, np.integer)):
+            raise ValueError(
+                f"{name} must be a positive integer; got {value!r}."
+            )
+        repeat = int(value)
+        if repeat <= 0:
+            raise ValueError(f"{name} must be a positive integer; got {value!r}.")
+        repeats.append(repeat)
+    repeat_x, repeat_y, repeat_z = repeats
+
     s0 = S_int[0]
     s1 = S_int[1]
     s2 = S_int[2]
     det_S = _int_det3(S_int)
+    if det_S == 0:
+        raise ValueError("enumerate_supercell_origins requires non-singular S.")
     adj_S = _int_adj3(S_int)
 
     # Bounding box from the 8 parallelepiped corners
     corners = np.array([
         i * repeat_x * s0 + j * repeat_y * s1 + k * repeat_z * s2
         for i in (0, 1) for j in (0, 1) for k in (0, 1)
-    ], dtype=int)
-    lo = corners.min(axis=0) - 1
-    hi = corners.max(axis=0) + 1
+    ], dtype=object)
+    lo = np.array([int(value) for value in corners.min(axis=0) - 1])
+    hi = np.array([int(value) for value in corners.max(axis=0) + 1])
 
     ranges = [np.arange(lo[d], hi[d] + 1) for d in range(3)]
     grid = np.stack(np.meshgrid(*ranges, indexing="ij"), axis=-1).reshape(-1, 3)
@@ -1714,17 +1760,16 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
 
         Q[row i] = gcd_reduce(P[row i] @ M_int)
 
-    where ``M_int = round(N * R)`` and N is recovered from R.  This formula
-    is equivalent to rotating each lab axis from grain 1's crystal frame into
-    grain 2's crystal frame -- exactly what R_right encodes.  After
-    ``canonicalize_pq`` the resulting matrices are identical to what a
-    ``PQSpec`` with the same boundary would produce, enabling the cross-format
-    round-trip test.
+    where ``M_int`` and ``N`` are carried from the exact scaled rotation.  This
+    formula is equivalent to rotating each lab axis from grain 1's crystal frame
+    into grain 2's crystal frame -- exactly what R_right encodes.  After
+    ``canonicalize_pq`` the resulting matrices are identical to what a ``PQSpec``
+    with the same boundary would produce, enabling the cross-format round-trip
+    test.
 
     :param spec: A ``CSLExactSpec`` instance (quat is required).
-    :param max_exact_atoms: Passed to ``solve_inplane_csl`` as the cell-size
-        guard.  Raises ``BoundarySpecError`` if the in-plane CSL cell would be
-        larger than this.
+    :param max_exact_atoms: Cell-size guard. Raises ``BoundarySpecError`` if
+        the in-plane CSL cell would be larger than this.
     :return: ``BoundaryEmbedding`` with ``exact=True``, ``coherent=True``,
         ``source="csl"``.
     :raises BoundarySpecError: On invalid quaternion, sigma mismatch, missing
@@ -1733,24 +1778,20 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     if spec.quat is None:
         raise BoundarySpecError("CSLExactSpec.quat is required.")
 
-    quat_arr = np.asarray(spec.quat, dtype=float)
-    quat_norm = validate_and_normalize_quaternion(quat_arr)
-
     try:
-        rot = quaternion_to_scaled_rotation(
-            tuple(int(x) for x in np.round(quat_arr).astype(int)))
+        rot = quaternion_to_scaled_rotation(tuple(spec.quat))
         csl = csl_from_scaled_rotation(rot)
     except ExactCSLError as exc:
         raise BoundarySpecError(str(exc)) from exc
+    quat_int = rot.quaternion if rot.quaternion is not None else tuple(spec.quat)
 
     if spec.sigma is not None and csl.sigma != int(spec.sigma):
         raise BoundarySpecError(
-            f"Sigma mismatch: quaternion {np.round(quat_arr).astype(int).tolist()} "
+            f"Sigma mismatch: quaternion {list(quat_int)} "
             f"gives sigma={csl.sigma}, but sigma={spec.sigma} was provided."
         )
 
-    plane_int = _row_gcd_reduce(
-        np.round(np.asarray(spec.plane, dtype=float)).astype(int))
+    plane_int = _row_gcd_reduce(np.asarray(spec.plane, dtype=object))
     try:
         row_rotation = validate_scaled_rotation_matrix(
             rot.M,
@@ -1790,19 +1831,29 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
         if primitive_embedding is not None:
             return primitive_embedding
 
-    R = quaternion_to_rotation_matrix(quat_norm)
-    N = _recover_sigma_from_rotation(R)
-    M_int = np.round(N * R).astype(int)
+    try:
+        column_rotation = validate_scaled_rotation_matrix(
+            np.asarray(row_rotation.M, dtype=object).T,
+            N=row_rotation.N,
+        )
+        fallback_csl = csl_from_scaled_rotation(column_rotation)
+        inplane = inplane_basis_from_csl(
+            fallback_csl.basis_hnf,
+            tuple(int(x) for x in plane_int),
+        )
+    except ExactCSLError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
-    # Find the minimal in-plane CSL basis (raises if none exists or cell is too large).
     # Use the shortest CSL in-plane vector as e1 so the max_exact_atoms guard
     # applies to the same basis that P will actually use.
-    v1, v2 = solve_inplane_csl(
-        np.asarray(spec.axis, dtype=float),
-        np.asarray(spec.plane, dtype=float),
-        R,
-        max_exact_atoms=max_exact_atoms,
-    )
+    v1 = np.asarray(inplane.basis[:, 0], dtype=float)
+    v2 = np.asarray(inplane.basis[:, 1], dtype=float)
+    area = np.linalg.norm(np.cross(v1, v2))
+    if area > max_exact_atoms:
+        raise BoundarySpecError(
+            f"Exact in-plane CSL cell area ({area:.1f}) exceeds max_exact_atoms="
+            f"{max_exact_atoms}.  Use mode='approximate' or increase the limit."
+        )
     r1, _r2 = reduce_2d_basis(v1, v2)
     e1 = _row_gcd_reduce(r1)
     # e2 = plane_int x e1 is orthogonal to both, keeping P rows mutually
@@ -1815,10 +1866,10 @@ def csl_spec_to_embedding(spec, max_exact_atoms: int = 10_000) -> BoundaryEmbedd
     ])
 
     # Build Q: rotate each lab axis from grain 1 into grain 2's crystal frame.
-    Q = np.array([
-        _row_gcd_reduce(P[i].astype(int) @ M_int).astype(float)
-        for i in range(3)
-    ])
+    M_int = np.asarray(row_rotation.M, dtype=object)
+    Q = np.array(
+        [_row_gcd_reduce(np.asarray(P[i], dtype=object) @ M_int) for i in range(3)]
+    )
 
     P_canon, Q_canon = canonicalize_pq(P, Q)
 
