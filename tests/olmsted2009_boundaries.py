@@ -1,15 +1,14 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 """Olmsted 2009 fcc grain boundary dataset for GBOpt tests.
 
-Static reference data extracted from Olmsted et al., Acta Mater. 57
-(2009) 3694-3703. The compact rows below preserve the public
-``BOUNDARIES`` dictionary used by tests while avoiding repeated field
-names for every boundary entry.
+Static reference data extracted from Olmsted et al., Acta Mater. 57 (2009) 3694-3703.
+The compact rows below preserve the public ``BOUNDARIES`` dictionary used by tests while
+avoiding repeated field names for every boundary entry.
 """
 
 from __future__ import annotations
 
-
+# fmt:off
 # index, sigma, misorientation_index, P, Q, Ni energy, Al energy
 _BOUNDARY_ROWS = (
     (1, 5, 1, [[3, 1, 0], [0, 0, 2], [1, -3, 0]],
@@ -790,6 +789,16 @@ _BOUNDARY_ROWS = (
      [[2, 2, 2], [-7, 3, 4], [1, -11, 10]], 0.404, 0.2),
 )
 
+# Paired P/Q rows for these entries do not recover an exact proper row
+# rotation and therefore cannot be interpreted with basis_mode="primitive".
+_PRIMITIVE_INCOMPATIBLE_BOUNDARY_IDS = frozenset(
+    {
+        18, 20, 23, 37, 38, 83, 84, 88, 89, 97, 102, 104, 108, 115, 116, 118, 119, 127,
+        128, 131, 186, 187, 188, 189, 197, 198, 199, 200, 208, 209, 212, 213, 266, 267,
+        271, 272, 273, 274, 301, 308, 312, 320, 321, 329,
+    }
+)
+# fmt:on
 
 BOUNDARIES: dict[int, dict] = {
     idx: {
@@ -799,7 +808,9 @@ BOUNDARIES: dict[int, dict] = {
         "Q": Q,
         "energy_J_m2": {"Ni": ni_energy, "Al": al_energy},
         "source": "Olmsted2009",
+        "primitive_compatible": (
+            idx not in _PRIMITIVE_INCOMPATIBLE_BOUNDARY_IDS
+        ),
     }
-    for idx, sigma, misorientation_index, P, Q, ni_energy, al_energy
-    in _BOUNDARY_ROWS
+    for idx, sigma, misorientation_index, P, Q, ni_energy, al_energy in _BOUNDARY_ROWS
 }

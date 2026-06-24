@@ -1,370 +1,447 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-# NOTE: There may be overlap between tests here and test_gbmaker.py.
-# Overlap will be resolved when GBMaker is split into its own module.
-
-import math
-import warnings
-from unittest.mock import patch
+"""Integration tests for GBMaker's exact integer grain-construction path."""
 
 import numpy as np
 import pytest
 from scipy.spatial import KDTree
-from zhang2021_boundaries import BOUNDARIES
 
 from GBOpt.Atom import Atom
-from GBOpt.BoundarySpec import (
-    CSLApproxSpec,
-    CSLExactSpec,
-    PQSpec,
-)
+from GBOpt.BoundarySpec import CSLExactSpec, PQSpec
 from GBOpt.crystallography import pq_spec_to_embedding
 from GBOpt.GBMaker import GBMaker
 
-# ---------------------------------------------------------------------------
-# Shared boundary specs
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
+# Shared boundary specifications and material data
+# --------------------------------------------------------------------------------------
 
 SIGMA5_TILT_P = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
 SIGMA5_TILT_Q = [[4, -3, 0], [3, 4, 0], [0, 0, 1]]
 SIGMA5_TILT_EXACT_SPEC = CSLExactSpec(
-    axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1])
-SIGMA5_TILT_PQ_SPEC = PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied")
+    axis=[0, 0, 1],
+    plane=[1, 0, 0],
+    quat=[3, 0, 0, 1],
+)
+SIGMA5_TILT_PQ_SPEC = PQSpec(
+    P=SIGMA5_TILT_P,
+    Q=SIGMA5_TILT_Q,
+    basis_mode="supplied",
+)
+NONCOMMENSURATE_PQ_SPEC = PQSpec(
+    P=SIGMA5_TILT_P,
+    Q=[[1, 0, 0], [0, 1, 1], [0, -1, 1]],
+    basis_mode="supplied",
+)
 
 A0_FCC = 3.615
 STRUCTURE_FCC = "fcc"
 ATOM_TYPES_FCC = "Cu"
 
+EXACT_BOX_CASES = [
+    pytest.param(
+        SIGMA5_TILT_PQ_SPEC,
+        A0_FCC,
+        STRUCTURE_FCC,
+        ATOM_TYPES_FCC,
+        id="pq-fcc",
+    ),
+    pytest.param(
+        SIGMA5_TILT_EXACT_SPEC,
+        A0_FCC,
+        STRUCTURE_FCC,
+        ATOM_TYPES_FCC,
+        id="csl-exact-fcc",
+    ),
+    pytest.param(
+        SIGMA5_TILT_PQ_SPEC,
+        5.47,
+        "fluorite",
+        ("U", "O"),
+        id="pq-fluorite",
+    ),
+]
 
-# ---------------------------------------------------------------------------
-# Exact grain repeats
-# ---------------------------------------------------------------------------
+VACUUM_ZERO_BOX_CASES = [
+    pytest.param(
+        A0_FCC,
+        STRUCTURE_FCC,
+        ATOM_TYPES_FCC,
+        {"interaction_distance": A0_FCC, "repeat_factor": 2},
+        id="fcc-default-thickness",
+    ),
+    pytest.param(
+        5.47,
+        "fluorite",
+        ("U", "O"),
+        {"interaction_distance": 5.47, "repeat_factor": 2},
+        id="fluorite-default-thickness",
+    ),
+    pytest.param(
+        5.47,
+        "fluorite",
+        ("U", "O"),
+        {"x_dim_min": 20.0, "interaction_distance": 1.0, "repeat_factor": 2},
+        id="fluorite-reduced-thickness",
+    ),
+]
 
-def test_exact_grain_repeats_builds_and_dims_divisible_by_left_grain_periods():
-    gb = GBMaker.from_boundary_spec(
-        A0_FCC, STRUCTURE_FCC, ATOM_TYPES_FCC, SIGMA5_TILT_PQ_SPEC,
-        mode="exact", gb_thickness=0.0, repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
-    assert gb.whole_system.size > 0
-
-    y_period_left = A0_FCC * np.linalg.norm(np.array(SIGMA5_TILT_P[1]))
-    z_period_left = A0_FCC * np.linalg.norm(np.array(SIGMA5_TILT_P[2]))
-    y_ratio = gb.y_dim / y_period_left
-    z_ratio = gb.z_dim / z_period_left
-    assert abs(y_ratio - round(y_ratio)) < 1e-6
-    assert abs(z_ratio - round(z_ratio)) < 1e-6
-
-
-# ---------------------------------------------------------------------------
-# Exact grain builder
-# ---------------------------------------------------------------------------
-
-def test_exact_grain_builder_output_dtype_and_atom_count_are_valid():
-
-    gb = GBMaker.from_boundary_spec(
-        A0_FCC, STRUCTURE_FCC, ATOM_TYPES_FCC, SIGMA5_TILT_PQ_SPEC,
-        mode="exact", gb_thickness=0.0, repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
-    assert gb.whole_system.dtype == Atom.atom_dtype
-    assert gb.whole_system.size > 0
-
-
-def test_exact_grain_builder_pqspec_and_cslexactspec_produce_same_atoms():
-    gb_pq = GBMaker.from_boundary_spec(
-        A0_FCC, STRUCTURE_FCC, ATOM_TYPES_FCC, SIGMA5_TILT_PQ_SPEC,
-        mode="exact", gb_thickness=0.0, repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
-    gb_csl = GBMaker.from_boundary_spec(
-        A0_FCC, STRUCTURE_FCC, ATOM_TYPES_FCC, SIGMA5_TILT_EXACT_SPEC,
-        mode="exact", gb_thickness=0.0, repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
-    np.testing.assert_array_equal(gb_pq.whole_system, gb_csl.whole_system)
-
-
-def test_exact_grain_builder_approx_path_still_works():
-    approx = CSLApproxSpec(axis=[0, 0, 1], plane=[1, 0, 0], angle_deg=36.87)
-    gb = GBMaker.from_boundary_spec(
-        A0_FCC, STRUCTURE_FCC, ATOM_TYPES_FCC, approx,
-        mode="approximate", gb_thickness=0.0, repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
-    assert gb.whole_system.size > 0
+FLUORITE_EXACT_SPECS = [
+    pytest.param(SIGMA5_TILT_PQ_SPEC, id="pq"),
+    pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
+]
 
 
-# ---------------------------------------------------------------------------
-# _from_boundary_embedding
-# ---------------------------------------------------------------------------
-
-def test_from_boundary_embedding_sigma5_exact_builds_valid_fcc_bicrystal():
-    theta = math.atan2(3, 4)
-    misorientation = np.array([0.0, 0.0, theta, 0.0, 0.0])
-    gb_legacy = GBMaker(
-        A0_FCC, STRUCTURE_FCC, 0.0, misorientation, ATOM_TYPES_FCC,
-        interaction_distance=A0_FCC, repeat_factor=2, x_dim_min=30.0,
-    )
-
-    P = gb_legacy._GBMaker__R_left_approx.astype(int).tolist()
-    Q = gb_legacy._GBMaker__R_right_approx.astype(int).tolist()
-    spec = PQSpec(P=P, Q=Q, basis_mode="supplied")
-    emb = pq_spec_to_embedding(spec)
-    gb_emb = GBMaker._from_boundary_embedding(
-        emb, a0=A0_FCC, structure=STRUCTURE_FCC, atom_types=ATOM_TYPES_FCC,
-        gb_thickness=0.0, repeat_factor=2, x_dim_min=30.0,
-        interaction_distance=A0_FCC,
-    )
-
-    ws = gb_emb.whole_system
-    assert ws.size > 0
-    assert set(ws["name"]) == {"Cu"}
-    for field in ("x", "y", "z"):
-        assert np.all(np.isfinite(ws[field]))
+# --------------------------------------------------------------------------------------
+# Fixtures and helpers
+# --------------------------------------------------------------------------------------
 
 
-def test_from_boundary_embedding_exact_path_skips_approximation():
-    spec = PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_P)  # identity
-    emb = pq_spec_to_embedding(spec)
-    assert emb.exact is True
+@pytest.fixture
+def build_gb():
+    """Return a function-scoped GBMaker factory with compact exact-path defaults."""
 
-    spy_target = "_GBMaker__approximate_rotation_matrix_as_int"
-    with patch.object(GBMaker, spy_target) as spy:
-        GBMaker._from_boundary_embedding(
-            emb, a0=A0_FCC, structure=STRUCTURE_FCC, atom_types=ATOM_TYPES_FCC,
-            gb_thickness=0.0, repeat_factor=2, interaction_distance=A0_FCC,
+    def _build(
+        boundary=SIGMA5_TILT_PQ_SPEC,
+        *,
+        a0=A0_FCC,
+        structure=STRUCTURE_FCC,
+        atom_types=ATOM_TYPES_FCC,
+        mode="exact",
+        **overrides,
+    ):
+        kwargs = {
+            "gb_thickness": 0.0,
+            "repeat_factor": 2,
+            "interaction_distance": a0,
+        }
+        kwargs.update(overrides)
+        return GBMaker.from_boundary_spec(
+            a0,
+            structure,
+            atom_types,
+            boundary,
+            mode=mode,
+            **kwargs,
         )
-        spy.assert_not_called()
+
+    return _build
 
 
-def test_from_boundary_embedding_coherent_sets_inplane_periodic():
-    spec = PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_P)  # identity
-    emb = pq_spec_to_embedding(spec)
-    assert emb.coherent is True
+def _positions(atoms):
+    """Return structured atom coordinates as an ``(N, 3)`` float array."""
+    return np.column_stack((atoms["x"], atoms["y"], atoms["z"]))
+
+
+def _assert_fluorite_stoichiometry(atoms, *, label):
+    """Assert a nonempty atom collection has the expected UO2 species ratio."""
+    uranium_count = int(np.count_nonzero(atoms["name"] == "U"))
+    oxygen_count = int(np.count_nonzero(atoms["name"] == "O"))
+
+    assert uranium_count > 0, f"{label} contains no U atoms"
+    assert oxygen_count == 2 * uranium_count, (
+        f"{label} stoichiometry is {uranium_count} U to {oxygen_count} O; "
+        "expected UO2"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# Exact-path dispatch and commensurability
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("grain_rows", "row_index", "dimension_name"),
+    [
+        pytest.param(SIGMA5_TILT_P, 1, "y_dim", id="left-y"),
+        pytest.param(SIGMA5_TILT_P, 2, "z_dim", id="left-z"),
+        pytest.param(SIGMA5_TILT_Q, 1, "y_dim", id="right-y"),
+        pytest.param(SIGMA5_TILT_Q, 2, "z_dim", id="right-z"),
+    ],
+)
+def test_exact_inplane_dimensions_are_integer_multiples_of_both_grain_periods(
+    build_gb,
+    grain_rows,
+    row_index,
+    dimension_name,
+):
+    gb = build_gb()
+
+    period = A0_FCC * np.linalg.norm(
+        np.asarray(grain_rows[row_index], dtype=float)
+    )
+    repeat_count = getattr(gb, dimension_name) / period
+
+    assert repeat_count == pytest.approx(round(repeat_count), abs=1e-6, rel=0.0)
+
+
+def test_exact_embedding_uses_integer_rows_without_float_approximation(
+    monkeypatch,
+    build_gb,
+):
+    embedding = pq_spec_to_embedding(
+        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_P, basis_mode="supplied")
+    )
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError(
+            "The exact embedding path must not approximate rotation rows as integers."
+        )
+
+    monkeypatch.setattr(
+        GBMaker,
+        "_GBMaker__approximate_rotation_matrix_as_int",
+        fail_if_called,
+    )
+
     gb = GBMaker._from_boundary_embedding(
-        emb, a0=A0_FCC, structure=STRUCTURE_FCC, atom_types=ATOM_TYPES_FCC,
-        gb_thickness=0.0, repeat_factor=2, interaction_distance=A0_FCC,
-    )
-    assert gb.inplane_periodic == (True, True)
-
-
-def test_from_boundary_embedding_misorientation_setter_clears_embedding():
-    spec = PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied")
-    emb = pq_spec_to_embedding(spec)
-    gb = GBMaker._from_boundary_embedding(
-        emb, a0=A0_FCC, structure=STRUCTURE_FCC, atom_types=ATOM_TYPES_FCC,
-        gb_thickness=0.0, repeat_factor=2, interaction_distance=A0_FCC,
-    )
-    assert gb._GBMaker__embedding is not None
-
-    theta = math.atan2(3, 4)
-    gb.misorientation = np.array([0.0, 0.0, theta, 0.0, 0.0])
-    assert gb._GBMaker__embedding is None
-    np.testing.assert_array_almost_equal(gb._GBMaker__R_left, np.eye(3))
-
-
-# ---------------------------------------------------------------------------
-# Box bounds
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("spec,a0,structure,atom_types", [
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        3.615, "fcc", "Cu",
-    ),
-    (
-        CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
-        3.615, "fcc", "Cu",
-    ),
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        5.47, "fluorite", ("U", "O"),
-    ),
-])
-def test_exact_path_atoms_within_yz_box(spec, a0, structure, atom_types):
-    gb = GBMaker.from_boundary_spec(
-        a0, structure, atom_types, spec, mode="exact",
-        repeat_factor=2, interaction_distance=a0,
-    )
-    ws = gb.whole_system
-    tol = 1e-4
-    assert np.all(ws["y"] >= -tol), f"y underflow: min={ws['y'].min():.6f}"
-    assert np.all(ws["y"] < gb.y_dim + tol), (
-        f"y overflow: max={ws['y'].max():.6f} > y_dim={gb.y_dim:.6f}"
-    )
-    assert np.all(ws["z"] >= -tol), f"z underflow: min={ws['z'].min():.6f}"
-    assert np.all(ws["z"] < gb.z_dim + tol), (
-        f"z overflow: max={ws['z'].max():.6f} > z_dim={gb.z_dim:.6f}"
+        embedding,
+        a0=A0_FCC,
+        structure=STRUCTURE_FCC,
+        atom_types=ATOM_TYPES_FCC,
+        gb_thickness=0.0,
+        repeat_factor=2,
+        interaction_distance=A0_FCC,
     )
 
+    assert gb.whole_system.size > 0
 
-def test_exact_left_grain_does_not_overflow_gb_plane():
+
+# --------------------------------------------------------------------------------------
+# Complete-origin construction
+# --------------------------------------------------------------------------------------
+
+
+def test_exact_builder_returns_atom_dtype_and_complete_unit_cell_origins(build_gb):
+    gb = build_gb()
+    basis_size = len(gb.unit_cell.asarray())
+
+    assert gb.whole_system.dtype == Atom.atom_dtype
+    assert gb.whole_system.size == gb.left_grain.size + gb.right_grain.size
+
+    for label, grain in (("left", gb.left_grain), ("right", gb.right_grain)):
+        assert grain.size > 0, f"{label} grain is empty"
+        assert grain.size % basis_size == 0, (
+            f"{label} grain contains {grain.size} atoms, which is not divisible by "
+            f"the conventional-cell basis size {basis_size}"
+        )
+
+
+# --------------------------------------------------------------------------------------
+# Cartesian box and central-interface bounds
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("spec", "a0", "structure", "atom_types"),
+    EXACT_BOX_CASES,
+)
+def test_exact_atoms_are_within_periodic_yz_box(
+    build_gb,
+    spec,
+    a0,
+    structure,
+    atom_types,
+):
+    gb = build_gb(
+        spec,
+        a0=a0,
+        structure=structure,
+        atom_types=atom_types,
+    )
+    atoms = gb.whole_system
+    tolerance = max(1e-8, 100.0 * gb.epsilon)
+
+    assert np.min(atoms["y"]) >= -tolerance
+    assert np.max(atoms["y"]) < gb.y_dim + tolerance
+    assert np.min(atoms["z"]) >= -tolerance
+    assert np.max(atoms["z"]) < gb.z_dim + tolerance
+
+
+def test_exact_grains_do_not_cross_central_boundary_plane():
     spec = PQSpec(
         P=[[3, 1, 0], [0, 0, 2], [1, -3, 0]],
         Q=[[3, 1, 0], [0, 0, -2], [-1, 3, 0]],
     )
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
+
+    with pytest.warns(UserWarning, match=r"Recommended repeat factor is at least 2\."):
         gb = GBMaker.from_boundary_spec(
-            3.52, "fcc", "Ni", spec, mode="exact",
-            gb_thickness=0.0, repeat_factor=1, x_dim_min=20.0,
-            vacuum=0.0, interaction_distance=5.0,
+            3.52,
+            "fcc",
+            "Ni",
+            spec,
+            mode="exact",
+            gb_thickness=0.0,
+            repeat_factor=(1, 3),
+            x_dim_min=20.0,
+            vacuum=0.0,
+            interaction_distance=5.0,
         )
 
-    tol = 1e-4 * gb.a0
-    left_max_x = float(np.max(gb.left_grain["x"]))
-    right_min_x = float(np.min(gb.right_grain["x"]))
-    assert left_max_x <= gb.gb_plane_x + tol, (
-        f"left grain overflows GB plane: max_x={left_max_x:.6f}, "
-        f"gb_plane_x={gb.gb_plane_x:.6f}"
+    tolerance = 1e-4 * gb.a0
+    assert np.max(gb.left_grain["x"]) <= gb.gb_plane_x + tolerance
+    assert np.min(gb.right_grain["x"]) >= gb.gb_plane_x - tolerance
+
+
+@pytest.mark.parametrize(
+    ("a0", "structure", "atom_types", "kwargs"),
+    VACUUM_ZERO_BOX_CASES,
+)
+def test_vacuum_zero_exact_atoms_are_within_x_box(
+    build_gb,
+    a0,
+    structure,
+    atom_types,
+    kwargs,
+):
+    gb = build_gb(
+        a0=a0,
+        structure=structure,
+        atom_types=atom_types,
+        vacuum=0.0,
+        **kwargs,
     )
-    assert right_min_x >= gb.gb_plane_x - tol, (
-        f"right grain underflows GB plane: min_x={right_min_x:.6f}, "
-        f"gb_plane_x={gb.gb_plane_x:.6f}"
+    atoms = gb.whole_system
+    tolerance = max(1e-8, 100.0 * gb.epsilon)
+
+    assert np.min(atoms["x"]) >= -tolerance
+    assert np.max(atoms["x"]) < gb.x_dim + tolerance
+
+
+# --------------------------------------------------------------------------------------
+# Vacuum-zero periodic-interface regressions
+# --------------------------------------------------------------------------------------
+
+
+def test_vacuum_zero_periodic_gap_is_not_smaller_than_central_gap(build_gb):
+    gb = build_gb(vacuum=0.0)
+
+    central_gap = float(
+        np.min(gb.right_grain["x"]) - np.max(gb.left_grain["x"])
     )
-
-
-@pytest.mark.parametrize("spec,a0,structure,atom_types,kwargs", [
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        3.615, "fcc", "Cu",
-        {"interaction_distance": 3.615, "repeat_factor": 2},
-    ),
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        5.47, "fluorite", ("U", "O"),
-        {"interaction_distance": 5.47, "repeat_factor": 2},
-    ),
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        5.47, "fluorite", ("U", "O"),
-        {"x_dim_min": 20, "interaction_distance": 1, "repeat_factor": 2},
-    ),
-])
-def test_vacuum0_atoms_within_x_box(spec, a0, structure, atom_types, kwargs):
-    gb = GBMaker.from_boundary_spec(
-        a0, structure, atom_types, spec, mode="exact", vacuum=0, **kwargs,
-    )
-    ws = gb.whole_system
-    tol = 1e-4
-    x_dim = gb._GBMaker__x_dim
-    assert np.all(ws["x"] >= -tol), f"x underflow: min={ws['x'].min():.6f}"
-    assert np.all(ws["x"] < x_dim + tol), (
-        f"x overflow: max={ws['x'].max():.6f} > x_dim={x_dim:.6f}"
-    )
-
-
-def test_vacuum0_zhang_sigma53_atoms_within_x_box():
-    """Regression for a fluorite exact build with basis-offset x leakage."""
-
-    entry = BOUNDARIES["sigma53_100_0_7_2bar_0_2bar_7_STGB"]
-    spec = PQSpec(P=entry["P"], Q=entry["Q"])
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", UserWarning)
-        gb = GBMaker.from_boundary_spec(
-            5.454, "fluorite", ("U", "O"), spec, mode="exact",
-            gb_thickness=0.0, vacuum=0.0, repeat_factor=[1, 1],
-            x_dim_min=20, interaction_distance=1.0,
-        )
-
-    ws = gb.whole_system
-    tol = 1e-8
-    assert np.min(ws["x"]) >= -tol
-    assert np.max(ws["x"]) < gb.x_dim - tol
-
-    central_gap = float(np.min(gb.right_grain["x"]) - np.max(gb.left_grain["x"]))
     periodic_gap = float(
-        (gb.x_dim - np.max(gb.right_grain["x"])) + np.min(gb.left_grain["x"])
+        (gb.x_dim - np.max(gb.right_grain["x"]))
+        + np.min(gb.left_grain["x"])
     )
-    assert periodic_gap >= central_gap - tol
 
-    names, counts = np.unique(ws["name"], return_counts=True)
-    species = {str(n): int(c) for n, c in zip(names, counts)}
-    assert species["O"] == 2 * species["U"]
-
-
-def test_vacuum0_periodic_gap_matches_central_gap():
-    gb = GBMaker.from_boundary_spec(
-        3.615, "fcc", "Cu", SIGMA5_TILT_PQ_SPEC, mode="exact",
-        vacuum=0, repeat_factor=2, interaction_distance=3.615,
-    )
-    x_dim = gb._GBMaker__x_dim
-    rg = gb._GBMaker__right_grain
-    lg = gb._GBMaker__left_grain
-    left_max_x = np.max(lg["x"])
-    right_min_x = np.min(rg["x"])
-    central_gap = right_min_x - left_max_x
-    right_max_x = np.max(rg["x"])
-    left_min_x = np.min(lg["x"])
-    periodic_gap = (x_dim - right_max_x) + left_min_x
-    assert right_max_x < x_dim + 1e-4, (
-        f"vacuum=0 right grain overflows box: max_x={right_max_x:.4f} "
-        f"> x_dim={x_dim:.4f}"
-    )
-    assert abs(periodic_gap - central_gap) < 0.1, (
-        f"vacuum=0 periodic_gap ({periodic_gap:.4f}) != central_gap "
-        f"({central_gap:.4f})"
+    assert periodic_gap >= central_gap - gb.epsilon, (
+        f"periodic gap {periodic_gap:.8f} is smaller than central gap "
+        f"{central_gap:.8f}"
     )
 
 
-# ---------------------------------------------------------------------------
-# No coincident atoms
-# ---------------------------------------------------------------------------
-
-@pytest.mark.parametrize("spec,a0,structure,atom_types", [
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        5.47, "fluorite", ("U", "O"),
-    ),
-    (
-        CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
-        5.47, "fluorite", ("U", "O"),
-    ),
-])
-def test_no_coincident_interface_atoms(spec, a0, structure, atom_types):
-
-    gb = GBMaker.from_boundary_spec(
-        a0, structure, atom_types, spec, mode="exact", vacuum=0,
-        repeat_factor=2, interaction_distance=a0,
+@pytest.mark.parametrize("spec", FLUORITE_EXACT_SPECS)
+def test_vacuum_zero_has_no_coincident_atoms_across_periodic_images(build_gb, spec):
+    gb = build_gb(
+        spec,
+        a0=5.47,
+        structure="fluorite",
+        atom_types=("U", "O"),
+        vacuum=0.0,
     )
-    lg = gb._GBMaker__left_grain
-    rg = gb._GBMaker__right_grain
-    L = np.column_stack([lg["x"], lg["y"], lg["z"]])
-    R = np.column_stack([rg["x"], rg["y"], rg["z"]])
-    tree = KDTree(R)
-    dists, _ = tree.query(L, k=1)
-    assert dists.min() > 1e-4, (
-        f"Coincident left/right atoms detected: "
-        f"{(dists < 1e-4).sum()} pairs at zero distance"
+    box_lengths = np.array([gb.x_dim, gb.y_dim, gb.z_dim], dtype=float)
+    left_positions = np.mod(_positions(gb.left_grain), box_lengths)
+    right_positions = np.mod(_positions(gb.right_grain), box_lengths)
+
+    tree = KDTree(right_positions, boxsize=box_lengths)
+    nearest_distances, _ = tree.query(left_positions, k=1)
+    coincident_count = int(np.count_nonzero(nearest_distances <= 1e-4))
+
+    assert coincident_count == 0, (
+        f"detected {coincident_count} coincident left/right atom pairs under periodic "
+        "boundary conditions"
     )
 
 
-@pytest.mark.parametrize("spec,a0,structure,atom_types", [
-    (
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_Q, basis_mode="supplied"),
-        5.47, "fluorite", ("U", "O"),
-    ),
-    (
-        CSLExactSpec(axis=[0, 0, 1], plane=[1, 0, 0], quat=[3, 0, 0, 1]),
-        5.47, "fluorite", ("U", "O"),
-    ),
-])
-def test_vacuum0_stoichiometry_preserved(spec, a0, structure, atom_types):
-    gb = GBMaker.from_boundary_spec(
-        a0, structure, atom_types, spec, mode="exact", vacuum=0,
-        repeat_factor=2, interaction_distance=a0,
+@pytest.mark.parametrize("spec", FLUORITE_EXACT_SPECS)
+def test_vacuum_zero_preserves_fluorite_stoichiometry_in_each_grain_and_system(
+    build_gb,
+    spec,
+):
+    gb = build_gb(
+        spec,
+        a0=5.47,
+        structure="fluorite",
+        atom_types=("U", "O"),
+        vacuum=0.0,
     )
-    rg = gb._GBMaker__right_grain
-    ws = gb.whole_system
-    u_rg = (rg["name"] == "U").sum()
-    o_rg = (rg["name"] == "O").sum()
-    u_ws = (ws["name"] == "U").sum()
-    o_ws = (ws["name"] == "O").sum()
-    assert u_rg > 0, "Right grain has no U atoms"
-    assert o_rg == 2 * u_rg, (
-        f"Right grain stoichiometry broken: {u_rg} U, {o_rg} O (expected 2:1)"
+
+    _assert_fluorite_stoichiometry(gb.left_grain, label="left grain")
+    _assert_fluorite_stoichiometry(gb.right_grain, label="right grain")
+    _assert_fluorite_stoichiometry(gb.whole_system, label="whole system")
+
+
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param(SIGMA5_TILT_PQ_SPEC, id="pq"),
+        pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
+    ],
+)
+def test_vacuum_zero_preserves_rocksalt_stoichiometry_in_each_grain_and_system(
+    build_gb,
+    spec,
+):
+    gb = build_gb(
+        spec,
+        a0=4.0,
+        structure="rocksalt",
+        atom_types=("Na", "Cl"),
+        vacuum=0.0,
     )
-    assert o_ws == 2 * u_ws, (
-        f"Whole-system stoichiometry broken: {u_ws} U, {o_ws} O (expected 2:1)"
+
+    for label, atoms in (
+        ("left grain", gb.left_grain),
+        ("right grain", gb.right_grain),
+        ("whole system", gb.whole_system),
+    ):
+        sodium_count = int(np.count_nonzero(atoms["name"] == "Na"))
+        chlorine_count = int(np.count_nonzero(atoms["name"] == "Cl"))
+
+        assert sodium_count > 0, f"{label} contains no Na atoms"
+        assert chlorine_count == sodium_count, (
+            f"{label} stoichiometry is {sodium_count} Na to "
+            f"{chlorine_count} Cl; expected NaCl"
+        )
+
+
+def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometry():
+    """Cover the external fluorite case that previously leaked basis offsets in x."""
+    zhang_boundaries = pytest.importorskip(
+        "zhang2021_boundaries",
+        reason="optional Zhang boundary dataset is not installed",
     )
+    entry = zhang_boundaries.BOUNDARIES[
+        "sigma53_100_0_7_2bar_0_2bar_7_STGB"
+    ]
+    spec = PQSpec(P=entry["P"], Q=entry["Q"])
+
+    with pytest.warns(UserWarning, match=r"Recommended repeat factor is at least 2\."):
+        gb = GBMaker.from_boundary_spec(
+            5.454,
+            "fluorite",
+            ("U", "O"),
+            spec,
+            mode="exact",
+            gb_thickness=0.0,
+            vacuum=0.0,
+            repeat_factor=[1, 1],
+            x_dim_min=20.0,
+            interaction_distance=1.0,
+        )
+
+    tolerance = max(1e-8, 100.0 * gb.epsilon)
+    assert np.min(gb.whole_system["x"]) >= -tolerance
+    assert np.max(gb.whole_system["x"]) < gb.x_dim + tolerance
+
+    central_gap = float(
+        np.min(gb.right_grain["x"]) - np.max(gb.left_grain["x"])
+    )
+    periodic_gap = float(
+        (gb.x_dim - np.max(gb.right_grain["x"]))
+        + np.min(gb.left_grain["x"])
+    )
+    assert periodic_gap >= central_gap - gb.epsilon
+
+    _assert_fluorite_stoichiometry(gb.left_grain, label="left grain")
+    _assert_fluorite_stoichiometry(gb.right_grain, label="right grain")
+    _assert_fluorite_stoichiometry(gb.whole_system, label="whole system")

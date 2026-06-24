@@ -2,9 +2,9 @@
 
 """Shared test data for crystallography test suite.
 
-This module provides shared constants and scenario definitions used across
-multiple test files. Import explicitly where needed rather than via conftest.py,
-since these are data constants rather than pytest fixtures.
+This module provides shared constants and scenario definitions used across multiple test
+files. Import explicitly where needed, since these are data constants rather than pytest
+fixtures.
 
 Usage:
     from crystallography_fixtures import CSL_SCENARIO_DICTS, SIGMA5_36_P, ...
@@ -25,17 +25,17 @@ SIGMA5_TWIST_LEGACY_Q = ((0, 0, 1), (3, -1, 0), (1, 3, 0))
 SIGMA5_TWIST_PRIMITIVE_P = ((0, 0, 1), (1, 2, 0), (-2, 1, 0))
 SIGMA5_TWIST_PRIMITIVE_Q = ((0, 0, 1), (2, 1, 0), (-1, 2, 0))
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # CSL scenario dicts
 #
-# Used by test_crystallography_csl.py and test_crystallography_embedding.py.
-# Each dict contains the quaternion, plane, and expected values for a known
-# CSL boundary. Build pytest.param objects from these in each test file as:
+# Used by test_crystallography_csl.py and test_crystallography_embedding.py. Each dict
+# contains the quaternion, plane, and expected values for a known CSL boundary. Build
+# pytest.param objects from these in each test file as:
 #
 #   EXACT_CSL_SCENARIOS = [
-#       pytest.param(d, id=str(d["id"])) for d in CSL_SCENARIO_DICTS
-#   ]
-# ---------------------------------------------------------------------------
+#           pytest.param(d, id=str(d["id"])) for d in CSL_SCENARIO_DICTS
+#           ]
+# --------------------------------------------------------------------------------------
 
 CSL_SCENARIO_DICTS = [
     {

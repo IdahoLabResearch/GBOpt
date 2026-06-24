@@ -1,5 +1,4 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
-
 import math
 
 import numpy as np
@@ -13,158 +12,214 @@ from GBOpt.crystallography.pq import (
 )
 from GBOpt.crystallography.rotation import assert_scaled_rotation
 from GBOpt.crystallography.types import CrystallographyValueError
+from GBOpt.Utils.integer_linalg import det3_int
+
+IDENTITY_PQ = np.eye(3, dtype=float)
+
+SIGMA5_Q = np.array([[3, 1, 0], [0, 0, 1], [-1, 3, 0]], dtype=float)
 
 
-def _make_identity_pair():
-    I = np.eye(3, dtype=float)
-    return I.copy(), I.copy()
+def _assert_rows_are_primitive(matrix):
+    for row in matrix:
+        assert math.gcd(*map(abs, row)) == 1
 
 
-# ---------------------------------------------------------------------------
+def _sigma5_twist_primitive_pair():
+    return (
+        np.array(SIGMA5_TWIST_PRIMITIVE_P, dtype=float),
+        np.array(SIGMA5_TWIST_PRIMITIVE_Q, dtype=float),
+    )
+
+
+# --------------------------------------------------------------------------------------
 # canonicalize_pq
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
-def test_canonicalize_pq_idempotent_identity():
-    P, Q = _make_identity_pair()
+
+@pytest.mark.parametrize(
+    ("P", "Q"),
+    [
+        pytest.param(IDENTITY_PQ, IDENTITY_PQ, id="identity"),
+        pytest.param(
+            IDENTITY_PQ,
+            SIGMA5_Q,
+            id="sigma5",
+        ),
+    ],
+)
+def test_canonicalize_pq_is_idempotent(P, Q):
     P1, Q1 = canonicalize_pq(P, Q)
     P2, Q2 = canonicalize_pq(P1, Q1)
+
     np.testing.assert_array_equal(P1, P2)
     np.testing.assert_array_equal(Q1, Q2)
 
 
-def test_canonicalize_pq_idempotent_sigma5():
-    P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    Q = np.array([[3, 1, 0], [0, 0, 1], [-1, 3, 0]], dtype=float)
-    P1, Q1 = canonicalize_pq(P, Q)
-    P2, Q2 = canonicalize_pq(P1, Q1)
-    np.testing.assert_array_equal(P1, P2)
-    np.testing.assert_array_equal(Q1, Q2)
+@pytest.mark.parametrize(
+    ("P", "Q"),
+    [
+        pytest.param(
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="identity",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            SIGMA5_Q,
+            id="sigma5",
+        ),
+        pytest.param(
+            np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            id="sign-fixes",
+        ),
+    ],
+)
+def test_canonicalize_pq_returns_right_handed_rows(P, Q):
+    P_c, Q_c = canonicalize_pq(P, Q)
+
+    assert det3_int(P_c) > 0
+    assert det3_int(Q_c) > 0
 
 
-def test_canonicalize_pq_row_scaling_equivalent():
-    P_base = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_scaled = np.array([[2, 0, 0], [0, 3, 0], [0, 0, 2]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    P_canon_base, _ = canonicalize_pq(P_base, Q)
-    P_canon_scaled, _ = canonicalize_pq(P_scaled, Q)
-    np.testing.assert_array_equal(P_canon_base, P_canon_scaled)
+@pytest.mark.parametrize(
+    ("P_a", "P_b", "Q_a", "Q_b"),
+    [
+        pytest.param(
+            IDENTITY_PQ,
+            np.diag([2, 3, 4]).astype(float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="row-scaling",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, 1, 1], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="inplane-basis-change",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, 2, 1], [0, 1, 1]], dtype=float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="longer-inplane-combination",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="inplane-sign-flip",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="boundary-normal-sign-flip",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=float),
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            id="swapped-inplane-rows",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            IDENTITY_PQ,
+            SIGMA5_Q,
+            np.array([[3, 1, 0], [-1, 3, 0], [0, 0, 1]], dtype=float),
+            id="swapped-q-inplane-rows",
+        ),
+    ],
+)
+def test_canonicalize_pq_treats_equivalent_inputs_as_same(P_a, P_b, Q_a, Q_b):
+    P_a_c, Q_a_c = canonicalize_pq(P_a, Q_a)
+    P_b_c, Q_b_c = canonicalize_pq(P_b, Q_b)
+
+    np.testing.assert_array_equal(P_b_c, P_a_c)
+    np.testing.assert_array_equal(Q_b_c, Q_a_c)
 
 
-def test_canonicalize_pq_inplane_basis_equivalent():
-    P_a = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_b = np.array([[1, 0, 0], [0, 1, 0], [0, 1, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pa, _ = canonicalize_pq(P_a, Q)
-    Pb, _ = canonicalize_pq(P_b, Q)
-    np.testing.assert_array_equal(Pa, Pb)
+@pytest.mark.parametrize(
+    ("P", "Q"),
+    [
+        pytest.param(
+            np.array([[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]], dtype=float),
+            IDENTITY_PQ,
+            id="rational",
+        ),
+        pytest.param(
+            np.array([[1, 0, 0], [0, 1.5, 0], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            id="mixed-rational",
+        ),
+        pytest.param(
+            np.array([[100000.4, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            id="large-noninteger",
+        ),
+    ],
+)
+def test_canonicalize_pq_rejects_invalid_values(P, Q):
+    with pytest.raises(CrystallographyValueError, match="integer-valued"):
+        canonicalize_pq(P, Q)
 
 
-def test_canonicalize_pq_inplane_basis_longer_combination():
-    P_a = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_b = np.array([[1, 0, 0], [0, 1, 0], [0, 2, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pa, _ = canonicalize_pq(P_a, Q)
-    Pb, _ = canonicalize_pq(P_b, Q)
-    np.testing.assert_array_equal(Pa, Pb)
-
-
-def test_canonicalize_pq_inplane_row_sign_equivalent():
-    P_a = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_b = np.array([[1, 0, 0], [0, -1, 0], [0, 0, -1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pa, _ = canonicalize_pq(P_a, Q)
-    Pb, _ = canonicalize_pq(P_b, Q)
-    np.testing.assert_array_equal(Pa, Pb)
-
-
-def test_canonicalize_pq_boundary_normal_sign_equivalent():
-    P_a = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_b = np.array([[-1, 0, 0], [0, 1, 0], [0, 0, -1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pa, _ = canonicalize_pq(P_a, Q)
-    Pb, _ = canonicalize_pq(P_b, Q)
-    np.testing.assert_array_equal(Pa, Pb)
-
-
-def test_canonicalize_pq_output_right_handed_identity():
-    P, Q = _make_identity_pair()
-    Pc, Qc = canonicalize_pq(P, Q)
-    assert np.linalg.det(Pc) > 0
-    assert np.linalg.det(Qc) > 0
-
-
-def test_canonicalize_pq_output_right_handed_sigma5():
-    P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    Q = np.array([[3, 1, 0], [0, 0, 1], [-1, 3, 0]], dtype=float)
-    Pc, Qc = canonicalize_pq(P, Q)
-    assert np.linalg.det(Pc) > 0
-    assert np.linalg.det(Qc) > 0
-
-
-def test_canonicalize_pq_output_right_handed_after_sign_fixes():
-    P = np.array([[-1, 0, 0], [0, -1, 0], [0, 0, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pc, _ = canonicalize_pq(P, Q)
-    assert np.linalg.det(Pc) > 0
-
-
-def test_canonicalize_pq_swapped_inplane_rows_same_canonical():
-    P_a = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    P_b = np.array([[1, 0, 0], [0, 0, 1], [0, 1, 0]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    Pa, _ = canonicalize_pq(P_a, Q)
-    Pb, _ = canonicalize_pq(P_b, Q)
-    np.testing.assert_array_equal(Pa, Pb)
-
-
-def test_canonicalize_pq_swapped_sigma5_inplane_rows_same_canonical():
-    P = np.eye(3, dtype=float)
-    Q_a = np.array([[3, 1, 0], [0, 0, 1], [-1, 3, 0]], dtype=float)
-    Q_b = np.array([[3, 1, 0], [-1, 3, 0], [0, 0, 1]], dtype=float)
-    _, Qa = canonicalize_pq(P, Q_a)
-    _, Qb = canonicalize_pq(P, Q_b)
-    np.testing.assert_array_equal(Qa, Qb)
-
-
-def test_canonicalize_pq_rational_row_raises():
-    P_rational = np.array([[0.5, 0, 0], [0, 0.5, 0], [0, 0, 0.5]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    with pytest.raises(CrystallographyValueError):
-        canonicalize_pq(P_rational, Q)
-
-
-def test_canonicalize_pq_mixed_rational_row_raises():
-    P_bad = np.array([[1, 0, 0], [0, 1.5, 0], [0, 0, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    with pytest.raises(CrystallographyValueError):
-        canonicalize_pq(P_bad, Q)
-
-
-def test_canonicalize_pq_large_noninteger_row_raises():
-    P_large = np.array([[100000.4, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    with pytest.raises(CrystallographyValueError):
-        canonicalize_pq(P_large, Q)
-
-
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # canonicalize_pq_paired
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
-def test_canonicalize_pq_paired_nonprimitive_inplane_rows_are_reduced():
 
-    P = np.array([[0, 0, 1], [2, 0, 0], [0, 2, 0]], dtype=float)
-    Q = np.array([[0, 0, 1], [4, 0, 0], [0, 6, 0]], dtype=float)
+def test_canonicalize_pq_paired_reduces_nonprimitive_rows():
+    P = np.array([[0, 0, 2], [2, 0, 0], [0, 3, 0]], dtype=float)
+    Q = np.array([[0, 0, 4], [4, 0, 0], [0, 6, 0]], dtype=float)
+
     P_c, Q_c = canonicalize_pq_paired(P, Q)
-    for M, name in [(P_c, "P"), (Q_c, "Q")]:
-        for i, row in enumerate(M):
-            ints = np.round(row).astype(int)
-            gcd = 0
-            for v in ints:
-                gcd = math.gcd(gcd, abs(int(v)))
-            assert gcd == 1, f"{name} row {i} {row} has GCD {gcd}, expected 1"
-        assert np.dot(M[0].astype(int), M[1].astype(int)) == 0
-        assert np.dot(M[0].astype(int), M[2].astype(int)) == 0
+
+    np.testing.assert_array_equal(
+        P_c,
+        np.array(
+            [
+                [0, 0, 1],
+                [1, 0, 0],
+                [0, 1, 0],
+            ],
+            dtype=object,
+        ),
+    )
+    np.testing.assert_array_equal(
+        Q_c,
+        np.array(
+            [
+                [0, 0, 1],
+                [1, 0, 0],
+                [0, 1, 0],
+            ],
+            dtype=object,
+        ),
+    )
+
+
+def test_canonicalize_pq_paired_preserves_paired_inplane_basis():
+    P = np.array([[0, 0, 1], [2, 1, 0], [-1, 2, 0]], dtype=float)
+    Q = np.array([[0, 0, 1], [1, 2, 0], [-2, 1, 0]], dtype=float)
+
+    P_c, Q_c = canonicalize_pq_paired(P, Q)
+
+    assert det3_int(P_c) > 0
+    assert det3_int(Q_c) > 0
+
+    assert np.dot(P_c[0], P_c[1]) == 0
+    assert np.dot(P_c[0], P_c[2]) == 0
+    assert np.dot(Q_c[0], Q_c[1]) == 0
+    assert np.dot(Q_c[0], Q_c[2]) == 0
+
+    _assert_rows_are_primitive(P_c)
+    _assert_rows_are_primitive(Q_c)
 
 
 def test_canonicalize_pq_paired_idempotent():
@@ -180,80 +235,145 @@ def test_canonicalize_pq_paired_scaled_equivalent_inplane_rows():
     P_a = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
     P_b = np.array([[0, 0, 1], [2, 0, 0], [0, 3, 0]], dtype=float)
     Q = np.array([[0, 0, 1], [1, 0, 0], [0, 1, 0]], dtype=float)
-    Pa, _ = canonicalize_pq_paired(P_a, Q)
-    Pb, _ = canonicalize_pq_paired(P_b, Q.copy())
-    np.testing.assert_array_equal(Pa, Pb)
+
+    P_a_c, Q_a_c = canonicalize_pq_paired(P_a, Q)
+    P_b_c, Q_b_c = canonicalize_pq_paired(P_b, Q.copy())
+
+    np.testing.assert_array_equal(P_a_c, P_b_c)
+    np.testing.assert_array_equal(Q_a_c, Q_b_c)
 
 
-@pytest.mark.parametrize("P,Q", [
-    (np.array([[0.5, 0, 0], [0, 1, 0], [0, 0, 1]],
-     dtype=float), np.eye(3, dtype=float)),
-    (np.eye(3, dtype=float), np.array(
-        [[0.5, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)),
-    (np.array([[1, 0, 0], [0, 1.5, 0], [0, 0, 1]],
-     dtype=float), np.eye(3, dtype=float)),
-])
-def test_canonicalize_pq_paired_non_integer_raises(P, Q):
-    with pytest.raises(CrystallographyValueError):
+@pytest.mark.parametrize(
+    ("P", "Q"),
+    [
+        pytest.param(
+            np.array([[1.5, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            id="noninteger-P",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, 1.5, 0], [0, 0, 1]], dtype=float),
+            id="noninteger-Q",
+        ),
+    ],
+)
+def test_canonicalize_pq_paired_rejects_invalid_values(P, Q):
+    with pytest.raises(CrystallographyValueError, match="integer-valued"):
         canonicalize_pq_paired(P, Q)
 
 
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 # recover_exact_row_rotation_from_paired_pq
-# ---------------------------------------------------------------------------
+# --------------------------------------------------------------------------------------
 
-def test_recover_exact_row_rotation_sigma5_correct_N():
-    P = np.array(SIGMA5_TWIST_PRIMITIVE_P, dtype=float)
-    Q = np.array(SIGMA5_TWIST_PRIMITIVE_Q, dtype=float)
+
+def test_recover_exact_row_rotation_returns_sigma5_denominator():
+    P, Q = _sigma5_twist_primitive_pair()
     rot = recover_exact_row_rotation_from_paired_pq(P, Q)
-    assert rot.N == 5
+    assert rot.denominator == 5
 
 
 def test_recover_exact_row_rotation_satisfies_row_rotation_contract():
-    P = np.array(SIGMA5_TWIST_PRIMITIVE_P, dtype=float)
-    Q = np.array(SIGMA5_TWIST_PRIMITIVE_Q, dtype=float)
+    P, Q = _sigma5_twist_primitive_pair()
     rot = recover_exact_row_rotation_from_paired_pq(P, Q)
 
-    P_int = np.round(P).astype(object)
-    Q_int = np.round(Q).astype(object)
-    M = np.asarray(rot.M, dtype=object)
-    N = int(rot.N)
+    P_int = np.asarray(P, dtype=object)
+    Q_int = np.asarray(Q, dtype=object)
+    M = np.asarray(rot.matrix, dtype=object)
+    N = int(rot.denominator)
 
     for p_row, q_row in zip(P_int, Q_int):
         np.testing.assert_array_equal(p_row @ M, N * q_row)
 
 
 def test_recover_exact_row_rotation_result_is_valid_scaled_rotation():
-    P = np.array(SIGMA5_TWIST_PRIMITIVE_P, dtype=float)
-    Q = np.array(SIGMA5_TWIST_PRIMITIVE_Q, dtype=float)
+    P, Q = _sigma5_twist_primitive_pair()
     rot = recover_exact_row_rotation_from_paired_pq(P, Q)
     assert_scaled_rotation(rot)  # should not raise
 
 
-def test_recover_exact_row_rotation_singular_P_raises():
-    P = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+@pytest.mark.parametrize(
+    ("P", "Q"),
+    [
+        pytest.param(
+            np.array([[1.5, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float),
+            IDENTITY_PQ,
+            id="noninteger-P",
+        ),
+        pytest.param(
+            IDENTITY_PQ,
+            np.array([[1, 0, 0], [0, 1.5, 0], [0, 0, 1]], dtype=float),
+            id="noninteger-Q",
+        ),
+    ],
+)
+def test_recover_exact_row_rotation_rejects_invalid_values(P, Q):
+    with pytest.raises(CrystallographyValueError, match="integer-valued"):
+        recover_exact_row_rotation_from_paired_pq(P, Q)
+
+
+def test_recover_exact_row_rotation_rejects_singular_p():
+    P = np.array(
+        [
+            [1, 0, 0],
+            [2, 0, 0],
+            [0, 1, 0],
+        ],
+        dtype=float,
+    )
     Q = np.eye(3, dtype=float)
+
     with pytest.raises(CrystallographyValueError, match="singular"):
         recover_exact_row_rotation_from_paired_pq(P, Q)
 
 
-def test_recover_exact_row_rotation_non_integer_P_raises():
-    P = np.array([[1.5, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    Q = np.eye(3, dtype=float)
-    with pytest.raises(CrystallographyValueError):
-        recover_exact_row_rotation_from_paired_pq(P, Q)
-
-
-def test_recover_exact_row_rotation_non_integer_Q_raises():
+def test_recover_exact_row_rotation_rejects_non_proper_rotation():
     P = np.eye(3, dtype=float)
-    Q = np.array([[1.5, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    with pytest.raises(CrystallographyValueError):
+    Q = np.diag([-1, 1, 1]).astype(float)
+
+    with pytest.raises(CrystallographyValueError, match="exact proper rotation"):
         recover_exact_row_rotation_from_paired_pq(P, Q)
 
 
-def test_recover_exact_row_rotation_non_proper_rotation_raises():
-    # P and Q that don't encode a proper rotation
-    P = np.array([[1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
-    Q = np.array([[2, 0, 0], [0, 3, 0], [0, 0, 4]], dtype=float)
-    with pytest.raises(CrystallographyValueError):
-        recover_exact_row_rotation_from_paired_pq(P, Q)
+def test_recover_exact_row_rotation_normalizes_negative_det_p():
+    P = np.diag([-1, 1, 1]).astype(float)
+    Q = P.copy()
+
+    rot = recover_exact_row_rotation_from_paired_pq(P, Q)
+
+    assert rot.denominator == 1
+    np.testing.assert_array_equal(rot.matrix, np.eye(3, dtype=object))
+
+
+# --------------------------------------------------------------------------------------
+# Shared validation
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        pytest.param(canonicalize_pq, id="canonicalize-pq"),
+        pytest.param(canonicalize_pq_paired, id="canonicalize-pq-paired"),
+        pytest.param(recover_exact_row_rotation_from_paired_pq, id="recover-rotation"),
+    ],
+)
+def test_pq_functions_reject_wrong_shape(func):
+    with pytest.raises(CrystallographyValueError, match="shape"):
+        func(np.eye(2, dtype=float), IDENTITY_PQ)
+
+
+@pytest.mark.parametrize(
+    "func",
+    [
+        pytest.param(canonicalize_pq, id="canonicalize-pq"),
+        pytest.param(canonicalize_pq_paired, id="canonicalize-pq-paired"),
+    ],
+)
+def test_canonicalize_pq_functions_reject_zero_rows(func):
+    P = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+    Q = IDENTITY_PQ
+
+    with pytest.raises(CrystallographyValueError, match="zero row"):
+        func(P, Q)

@@ -1,16 +1,16 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 """Zhang 2021 UO2 grain boundary dataset for GBOpt tests.
 
-Static reference data extracted from Zhang et al., J. Am. Ceram. Soc.
-(2021). The row table preserves the public ``BOUNDARIES`` dictionary
-while keeping repeated schema fields in one reconstruction block.
+Static reference data extracted from Zhang et al., J. Am. Ceram. Soc. (2021). The row
+table preserves the public ``BOUNDARIES`` dictionary while keeping repeated schema
+fields in one reconstruction block.
 """
 
 from __future__ import annotations
 
-
 _ANGLE_FIELDS = ("alpha", "beta", "gamma", "theta", "phi")
 
+# fmt:off
 # Each row stores:
 # name, type, axis_set, misorientation, angles, P, Q,
 # UO2_Basak, CeO2_Gotte or None, Zhang UO2
@@ -1440,6 +1440,7 @@ _BOUNDARY_ROWS = (
         2.0, None, 2.0,
     ),
 )
+# fmt:on
 
 
 def _reference_energy(uo2_basak: float, ceo2_gotte: float | None) -> dict[str, float]:
@@ -1462,7 +1463,15 @@ BOUNDARIES: dict[str, dict] = {
         "source": "Zhang2021",
     }
     for (
-        name, gb_type, axis_set, misorientation, angles, P, Q,
-        uo2_basak, ceo2_gotte, zhang_uo2_energy,
+        name,
+        gb_type,
+        axis_set,
+        misorientation,
+        angles,
+        P,
+        Q,
+        uo2_basak,
+        ceo2_gotte,
+        zhang_uo2_energy,
     ) in _BOUNDARY_ROWS
 }

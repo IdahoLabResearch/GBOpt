@@ -2,14 +2,12 @@
 
 """Plane-specific crystallographic lattice operations.
 
-Operates on Miller plane covectors and CSL bases to find in-plane lattice
-vectors, null-space bases, and supercell enumerations. Consumes raw CSL
-basis arrays from csl.py but does not import csl.py directly; the interface
-between the two modules is plain numpy arrays. Plane-preservation logic
-for scaled rotations also lives here since it requires primitive plane
-normalization.
+Operates on Miller plane covectors and CSL bases to find in-plane lattice vectors and
+null-space bases. Consumes raw CSL basis arrays from csl.py but does not import csl.py
+directly; the interface between the two modules is plain numpy arrays.
+Plane-preservation logic for scaled rotations also lives here since it requires
+primitive plane normalization.
 """
-
 
 from __future__ import annotations
 
@@ -18,18 +16,17 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 
+from GBOpt.Utils.integer_linalg import cross_int3, dot_int
 from GBOpt.Utils.integer_normal_forms import (
     ExactNormalFormError,
-    _dot_int,
-    hnf_2d_supercells,
     primitive_integer_null_basis_3d,
 )
 
-from .integer import as_int_array, as_int_vector, row_gcd_reduce_int
+from ._guards import _require_cubic
+from .integer import as_int_array, as_int_vector, row_gcd_reduce
 from .rotation import scaled_row_image
 from .types import (
     CrystallographyDivisibilityError,
-    CrystallographyNotImplementedError,
     CrystallographyValueError,
     InPlaneBasis,
     Int3,
@@ -42,19 +39,18 @@ def primitive_plane(plane_covector: ArrayLike) -> Int3:
 
     :param plane_covector: Integer Miller plane normal ``[h, k, l]``.
     :return: GCD-reduced covector with the original sign convention preserved.
-    :raises CrystallographyValueError: If the covector is not length 3, contains
-        non-integers, or is the zero vector.
+    :raises CrystallographyValueError: If the covector is the zero vector.
     """
-    vec = list(as_int_vector(plane_covector, 3, "plane_covector"))
-    gcd_value = math.gcd(*[abs(v) for v in vec])
-    if gcd_value == 0:
-        raise CrystallographyValueError("plane covector h must not be the zero vector.")
-    a, b, c = tuple(value // gcd_value for value in vec)
-    return a, b, c
+    vec = as_int_array(plane_covector, (3,), "plane_covector")
+    if not any(vec):
+        raise CrystallographyValueError("plane_covector must not be the zero vector.")
+    reduced = row_gcd_reduce(vec)
+    h, k, l = tuple(int(v) for v in reduced)
+    return h, k, l
 
 
 def plane_null_basis(
-    plane_int: np.ndarray,
+    plane_int: ArrayLike,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return a primitive integer basis for the null space of ``plane_int``.
 
@@ -65,135 +61,131 @@ def plane_null_basis(
     * ``cross(e1, e2) == plane_int`` (the basis spans the full integer plane lattice
         without gaps).
 
-    The construction applies unimodular column operations to ``[h, k, l]`` until it
-    becomes ``[1, 0, 0]``, tracking the transformations in V in GL_3(Z).  Because V is
-    unimodular, columns 1 and 2 of V are exactly the primitive null vectors.
+    Delegates to ``primitive_integer_null_basis_3d`` and returns its two null basis
+    columns as exact integer object arrays.
 
     :param plane_int: Primitive boundary-plane normal as an integer 3-vector. Must be
-        non-zero and GCD-reduced (``gcd(|h|, |k|, |l|) == 1``). Callers are responsible
-        for reducing via ``_row_gcd_reduce`` first.
-    :return: ``(e1, e2)`` as float arrays.
+        nonzero and GCD-reduced (``gcd(|h|, |k|, |l|) == 1``). Callers are responsible
+        for reducing via ``row_gcd_reduce`` first.
+    :return: ``(e1, e2)`` as object arrays.
     :raises CrystallographyValueError: If ``plane_int`` is the zero vector or not
         primitive.
     """
-    vec = np.array(
-        [int(plane_int[0]), int(plane_int[1]), int(plane_int[2])], dtype=int
-    )
-    if not any(vec):
+    plane_arr = as_int_vector(plane_int, 3, "plane_int")
+    if not any(plane_arr):
+        raise CrystallographyValueError("plane_int must not be the zero vector.")
+    if math.gcd(*map(abs, plane_arr)) != 1:
         raise CrystallographyValueError(
-            "plane_int must not be the zero vector."
-        )
-    if math.gcd(math.gcd(abs(int(vec[0])), abs(int(vec[1]))), abs(int(vec[2]))) != 1:
-        raise CrystallographyValueError(
-            f"plane_int {vec.tolist()} is not primitive "
-            "(gcd of components != 1). Call _row_gcd_reduce first."
+            f"plane_int {plane_arr} is not primitive "
+            "(gcd of components != 1). Call row_gcd_reduce first."
         )
 
     try:
-        basis = primitive_integer_null_basis_3d(vec)
+        basis = primitive_integer_null_basis_3d(plane_arr)
     except ExactNormalFormError as exc:
         raise CrystallographyValueError(str(exc)) from exc
-    return basis[:, 0].astype(float), basis[:, 1].astype(float)
+    return (
+        basis[:, 0].astype(object, copy=False),
+        basis[:, 1].astype(object, copy=False),
+    )
 
 
-def inplane_area_index(P: np.ndarray) -> int:
-    """Return the integer area index of P's in-plane rows in P[0]'s plane.
+def inplane_area_index(matrix: ArrayLike) -> int:
+    """Return the integer area index of ``P``'s in-plane rows in ``P[0]``'s plane.
 
-    Validates that P[1] and P[2] are actually in the plane defined by P[0]
-    (i.e., ``dot(P[1], plane) == 0`` and ``dot(P[2], plane) == 0``).  Also
-    validates that all entries are close to integers before rounding.
+    The area index is computed as ``dot(cross(matrix[1], matrix[2]), plane_normal) /
+    dot(plane_normal, plane_normal)``. It equals the area of the in-plane parallelogram
+    measured in units of the primitive plane-normal length.
 
-    :param P: 3x3 integer-valued orientation matrix (row 0 = plane normal,
-        rows 1-2 = in-plane vectors).
+    :param matrix: 3 by 3 integer-valued orientation matrix, where row 0 is the plane
+        normal and rows 1-2 are in-plane vectors.
     :return: Positive integer area index.
-    :raises CrystallographyValueError: If P[0] is zero, P[1]/P[2] are not in-plane,
-        rows are not integer-valued, or the area index is zero.
+    :raises CrystallographyValueError: If ``matrix[0]`` is zero, ``matrix[1]`` or
+        ``matrix[2]`` is not in the boundary plane, the projected area is not divisible
+        by the plane norm squared, or the area index is zero.
     """
-    P_arr = np.asarray(P, dtype=float)
-    if not np.allclose(P_arr, np.round(P_arr), atol=1e-9, rtol=0.0):
+    int_matrix = as_int_array(matrix, (3, 3), "matrix")
+
+    plane_normal = row_gcd_reduce(int_matrix[0])
+    plane_norm_sq = dot_int(plane_normal, plane_normal)
+    if plane_norm_sq == 0:
         raise CrystallographyValueError(
-            "P rows must be integer-valued for area-index computation; "
-            f"got non-integer entries in P={P_arr.tolist()}."
+            "Cannot compute area index for a zero boundary plane."
         )
-    P_int = np.round(P_arr).astype(int)
-    plane = row_gcd_reduce_int(P_int[0])
-    denom = _dot_int(plane, plane)
-    if denom == 0:
-        raise CrystallographyValueError(
-            "Cannot compute area index for a zero boundary plane.")
-    for row_idx in (1, 2):
-        proj = _dot_int(P_int[row_idx], plane)
+
+    for row_idx, row in enumerate(int_matrix[1:], start=1):
+        proj = dot_int(row, plane_normal)
         if proj != 0:
             raise CrystallographyValueError(
-                f"P row {row_idx} {P_int[row_idx].tolist()} is not in the boundary "
-                f"plane {plane.tolist()} (dot product = {proj}, expected 0). "
-                "P[1] and P[2] must be integer lattice vectors lying in the plane "
-                "defined by the primitive normal P[0]."
+                f"Matrix row {row_idx} {row.tolist()} is not in the "
+                f"boundary plane {plane_normal.tolist()} (dot product = {proj}, "
+                "expected 0). matrix[1] and matrix[2] must be integer lattice vectors "
+                "lying in the plane defined by the primitive normal matrix[0]."
             )
-    cross = np.cross(P_int[1], P_int[2])
-    numer = abs(_dot_int(cross, plane))
-    if numer % denom != 0:
+
+    cross = cross_int3(int_matrix[1], int_matrix[2])
+    projected_area = abs(dot_int(cross, plane_normal))
+    if projected_area % plane_norm_sq != 0:
         raise CrystallographyValueError(
             "In-plane rows do not define an integer area index for the boundary plane."
         )
-    index = numer // denom
+
+    index = projected_area // plane_norm_sq
     if index == 0:
         raise CrystallographyValueError(
-            "In-plane area index is zero; P[1] and P[2] may be parallel or zero."
+            "In-plane area index is zero; matrix[1] and matrix[2] may be parallel or "
+            "zero."
         )
     return int(index)
 
 
 def inplane_basis_from_csl(
     csl_basis: np.ndarray,
-    plane_covector: tuple,
+    plane_covector: ArrayLike,
     *,
     lattice_metric: np.ndarray | None = None,
 ) -> InPlaneBasis:
     """Find two CSL vectors lying in an integer boundary plane.
 
+    Projects the plane covector onto the CSL column basis to obtain integer coordinates,
+    computes the null space of those coordinates to find CSL column combinations whose
+    3D images lie in the plane, then reconstructs the full 3D vectors.
+
     :param csl_basis: 3 by 3 integer CSL basis.
     :param plane_covector: Integer Miller plane normal ``[h, k, l]`` defining
         ``plane_covector @ v == 0``.
-    :param lattice_metric: Reserved non-cubic metric hook; only ``None`` is
-        currently supported.
+    :param lattice_metric: Reserved non-cubic metric hook; only ``None`` is currently
+        supported. Keyword argument, optional, defaults to ``None``.
     :return: In-plane CSL basis and diagnostic coefficient data.
-    :raises CrystallographyValueError: If inputs are invalid or the projected basis is
-        rank deficient.
+    :raises CrystallographyValueError: If projected null-basis construction fails, the
+        constructed in-plane CSL vectors are linearly dependent, or the constructed
+        basis is not in the plane.
     """
-    _reject_non_cubic_metric(lattice_metric)
-    C = as_int_array(csl_basis, (3, 3), "csl_basis")
-    plane = primitive_plane(plane_covector)
-    h_vec = np.array(plane, dtype=object)
-    d = C.T @ h_vec
-    coeffs = primitive_integer_null_basis_3d(d)
+    _require_cubic(lattice_metric)
+    int_basis = as_int_array(csl_basis, (3, 3), "csl_basis")
+    plane_prim = primitive_plane(plane_covector)
+    plane_cov_obj = np.array(plane_prim, dtype=object)
+    csl_projections = int_basis.T @ plane_cov_obj
+    try:
+        null_coeffs = primitive_integer_null_basis_3d(csl_projections)
+    except ExactNormalFormError as exc:
+        raise CrystallographyValueError(str(exc)) from exc
 
-    basis = C @ coeffs
-    basis = _verify_projected_basis(basis)
-    residual = h_vec @ basis
-    if residual[0] != 0 or residual[1] != 0:
+    basis = (int_basis @ null_coeffs).astype(object, copy=False)
+
+    cross = cross_int3(basis[:, 0], basis[:, 1])
+    if not any(cross):
+        raise CrystallographyValueError("in-plane CSL vectors are linearly dependent.")
+
+    if np.any(plane_cov_obj @ basis != 0):
         raise CrystallographyValueError(
-            "constructed in-plane basis is not in the plane.")
+            "Constructed in-plane basis is not in the plane."
+        )
     return InPlaneBasis(
         basis=basis,
-        coefficients=coeffs,
-        plane_covector=plane,
+        coefficients=null_coeffs,
+        plane_covector=plane_prim,
     )
-
-
-def enumerate_inplane_hnf_supercells(
-    inplane_basis: np.ndarray,
-    index: int,
-) -> list[np.ndarray]:
-    """Return all index-``n`` supercells of an in-plane CSL basis.
-
-    :param inplane_basis: 3 by 2 integer in-plane basis.
-    :param index: Positive supercell index.
-    :return: List of 3 by 2 integer supercell bases.
-    :raises CrystallographyValueError: If ``inplane_basis`` is not integer-valued.
-    """
-    basis = as_int_array(inplane_basis, (3, 2), "inplane_basis")
-    return [basis @ H for H in hnf_2d_supercells(index)]
 
 
 def rotation_preserves_plane(
@@ -204,11 +196,16 @@ def rotation_preserves_plane(
 ) -> bool:
     """Return whether a row-convention rotation preserves a boundary plane.
 
+    The rotation preserves the plane when ``plane @ M / N`` is exactly integer-valued
+    and GCD-reduces to the same primitive covector as ``plane``, where ``M`` and ``N``
+    are the numerator matrix and denominator of ``rotation``.
+
     :param rotation: Row-convention scaled rotation.
     :param plane: Integer boundary-plane covector.
-    :param allow_antiparallel: If true, accept the opposite primitive normal.
-    :returns: True when ``plane @ M / N`` maps to the same primitive plane.
-    :raises CrystallographyValueError: If ``plane`` is invalid.
+    :param allow_antiparallel: If ``True``, accept the opposite primitive normal.
+        Keyword argument, optional, defaults to ``False``.
+    :return: ``True`` when the rotation maps the plane to itself, or to its opposite if
+        ``allow_antiparallel`` is ``True``.
     """
     plane_int = np.asarray(primitive_plane(plane), dtype=object)
 
@@ -216,48 +213,16 @@ def rotation_preserves_plane(
         image = scaled_row_image(
             plane_int,
             rotation,
-            require_divisible=True,
+            allow_inexact=False,
         )
     except CrystallographyDivisibilityError:
         return False
 
-    image_plane = np.asarray(primitive_plane(image), dtype=object)
+    image_plane = primitive_plane(image)
 
-    if np.array_equal(image_plane, plane_int):
-        return True
-    if allow_antiparallel and np.array_equal(image_plane, -plane_int):
-        return True
-    return False
-
-
-def _reject_non_cubic_metric(metric: np.ndarray | None) -> None:
-    """Reject non-cubic lattice metrics reserved for a later extension.
-
-    ``metric`` is intended to represent a future 3 by 3 lattice metric tensor
-    for non-cubic crystals. Exact CSL support is currently implemented only
-    for the implicit cubic identity metric, so callers must pass ``None``.
-
-    NOTE: This is a temporary guard, and it (and it's companion method in `rotation.py`
-    and `quaternion.py`) should be centralized properly when fully implemented.
-    """
-    if metric is not None:
-        raise CrystallographyNotImplementedError(
-            "non-cubic lattice metrics are not implemented"
-        )
-
-
-def _verify_projected_basis(basis: np.ndarray) -> np.ndarray:
-    """Validate and return a rank-two projected basis.
-
-    :param basis: 3 by 2 integer-valued matrix whose columns are proposed
-        in-plane CSL vectors.
-    :return: Object-dtype copy of ``basis``.
-    :raises CrystallographyValueError: If the two vectors are linearly dependent.
-    """
-    cross = np.cross(basis[:, 0].astype(int), basis[:, 1].astype(int))
-    if not any(cross):
-        raise CrystallographyValueError("in-plane CSL vectors are linearly dependent.")
-    return basis.astype(object)
+    target = tuple(int(v) for v in plane_int)
+    opposite = tuple(-v for v in target)
+    return image_plane == target or (allow_antiparallel and image_plane == opposite)
 
 
 __all__ = [
@@ -265,6 +230,5 @@ __all__ = [
     "plane_null_basis",
     "inplane_area_index",
     "inplane_basis_from_csl",
-    "enumerate_inplane_hnf_supercells",
     "rotation_preserves_plane",
 ]

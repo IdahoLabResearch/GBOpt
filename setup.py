@@ -15,8 +15,7 @@ setup(
         "spglib",
     ],
     extras_require={
-        "test": ["pytest"],
-        "test-full": ["pytest", "sympy"],
+        "test": ["pytest"]
     },
     author="Chaitanya Bhave and Jarin French",
     author_email="chaitanya.bhave@inl.gov and jarin.french@inl.gov",

@@ -4,12 +4,12 @@
 
 Import user-facing exact utilities from this package directly, for example::
 
-    from GBOpt.crystallography import csl_spec_to_embedding, canonicalize_pq
+    from GBOpt.crystallography import csl_exact_spec_to_embedding, ``canonicalize_pq``
 """
 
 from .boundary import (
     csl_approx_spec_to_embedding,
-    csl_spec_to_embedding,
+    csl_exact_spec_to_embedding,
     pq_spec_to_embedding,
     primitive_bicrystal_atom_count,
 )
@@ -37,7 +37,7 @@ from .types import (
 
 __all__ = [
     "csl_approx_spec_to_embedding",
-    "csl_spec_to_embedding",
+    "csl_exact_spec_to_embedding",
     "pq_spec_to_embedding",
     "primitive_bicrystal_atom_count",
     "CoincidenceCheck",

@@ -1,5 +1,9 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+"""Tests for exact integer supercell construction and enumeration."""
+
+from itertools import product
+
 import numpy as np
 import pytest
 
@@ -8,147 +12,408 @@ from GBOpt.gbmaker_supercell import (
     _integer_membership,
     build_supercell_matrix,
     enumerate_supercell_origins,
+    supercell_axis_numerators,
 )
 
-SIGMA5_RIGHT_GRAIN = [[4, -3, 0], [3, 4, 0], [0, 0, 1]]
-SIGMA5_RIGHT_GRAIN_ARRAY = np.array(SIGMA5_RIGHT_GRAIN, dtype=int)
+# ---------------------------------------------------------------------------
+# Shared inputs
+# ---------------------------------------------------------------------------
+
+IDENTITY_ROWS = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
+SIGMA5_RIGHT_GRAIN_ROWS = ((4, -3, 0), (3, 4, 0), (0, 0, 1))
+OBLIQUE_INDEX2_ROWS = ((1, -1, 0), (1, 1, 0), (0, 0, 1))
+
+INVALID_3X3_INTEGER_MATRICES = [
+    pytest.param(
+        [[1.5, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "integer-valued",
+        id="non-integer-entry",
+    ),
+    pytest.param(
+        [[np.nan, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "finite",
+        id="non-finite-entry",
+    ),
+    pytest.param(
+        [[True, 0, 0], [0, 1, 0], [0, 0, 1]],
+        "not an integer",
+        id="boolean-entry",
+    ),
+    pytest.param(
+        [[1, 0], [0, 1]],
+        "shape",
+        id="wrong-shape",
+    ),
+]
 
 
-@pytest.fixture
-def sigma5_membership_data():
-    return {
-        "det_S": integer_det3(SIGMA5_RIGHT_GRAIN),
-        "adj_S": integer_adj3(SIGMA5_RIGHT_GRAIN),
-    }
+def _int_matrix(rows) -> np.ndarray:
+    """Return shared matrix rows as a fresh object-dtype array."""
+    return np.array(rows, dtype=object)
 
 
-def test_integer_membership_accepts_origin(sigma5_membership_data):
-    assert _integer_membership(
-        [0, 0, 0],
-        sigma5_membership_data["adj_S"],
-        sigma5_membership_data["det_S"],
-        1,
-        1,
-        1,
-    )
+def _origin_set(origins: np.ndarray) -> set[tuple[int, int, int]]:
+    """Return integer origins as an order-independent set of tuples."""
+    return {tuple(int(value) for value in row) for row in origins}
 
 
-def test_integer_membership_counts_identity_repeated_cell():
-    adj_I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]]
-    det_I = 1
-
-    accepted = sum(
-        _integer_membership([x, y, z], adj_I, det_I, 3, 2, 1)
-        for x in range(-1, 5)
-        for y in range(-1, 4)
-        for z in range(-1, 3)
-    )
-
-    assert accepted == 3 * 2 * 1
-
-
-def test_integer_membership_rejects_exclusive_upper_boundary(sigma5_membership_data):
-    assert not _integer_membership(
-        [0, 0, 1],
-        sigma5_membership_data["adj_S"],
-        sigma5_membership_data["det_S"],
-        1,
-        1,
-        1,
-    )
-
-
-def test_integer_membership_normalizes_negative_determinant_sign():
-    matrix = [[0, 1, 0], [1, 0, 0], [0, 0, 1]]
-    det_S = integer_det3(matrix)
-
-    assert det_S == -1
-    assert _integer_membership(
-        [0, 0, 0],
-        integer_adj3(matrix),
-        det_S,
-        1,
-        1,
-        1,
-    )
-
-
-def test_build_supercell_matrix_accepts_identity_p():
-    P = np.eye(3, dtype=float)
-
-    S = build_supercell_matrix(P)
-
-    np.testing.assert_array_equal(S, np.eye(3, dtype=int))
-
-
-def test_build_supercell_matrix_accepts_sigma5_right_grain():
-    Q = SIGMA5_RIGHT_GRAIN_ARRAY.astype(float)
-
-    S = build_supercell_matrix(Q)
-
-    np.testing.assert_array_equal(S, SIGMA5_RIGHT_GRAIN_ARRAY)
+# ---------------------------------------------------------------------------
+# _integer_membership
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
-    "P_bad",
+    ("origin", "expected"),
     [
-        np.array([[1.1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float),
-        np.array([[np.nan, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float),
-        np.array([[1, 0], [0, 1]], dtype=float),
+        pytest.param((0, 0, 0), True, id="lower-corner"),
+        pytest.param((2, 1, 0), True, id="last-interior-origin"),
+        pytest.param((-1, 0, 0), False, id="below-x"),
+        pytest.param((0, -1, 0), False, id="below-y"),
+        pytest.param((0, 0, -1), False, id="below-z"),
+        pytest.param((3, 0, 0), False, id="exclusive-x-upper-bound"),
+        pytest.param((0, 2, 0), False, id="exclusive-y-upper-bound"),
+        pytest.param((0, 0, 1), False, id="exclusive-z-upper-bound"),
     ],
 )
-def test_build_supercell_matrix_rejects_invalid_input(P_bad):
-    with pytest.raises(ValueError):
-        build_supercell_matrix(P_bad)
+def test_integer_membership_uses_half_open_repeated_identity_cell(origin, expected):
+    identity = _int_matrix(IDENTITY_ROWS)
+
+    assert (
+        _integer_membership(
+            origin,
+            integer_adj3(identity),
+            integer_det3(identity),
+            3,
+            2,
+            1,
+        )
+        is expected
+    )
 
 
-def test_build_supercell_matrix_rejects_singular_matrix():
-    P = np.array([[1, 0, 0], [1, 0, 0], [0, 1, 0]], dtype=float)
+def test_integer_membership_normalizes_negative_determinant_numerators():
+    supercell = _int_matrix(((0, 1, 0), (2, 0, 0), (0, 0, 1)))
+    determinant = integer_det3(supercell)
+
+    assert determinant == -2
+    assert _integer_membership(
+        (1, 0, 0),
+        integer_adj3(supercell),
+        determinant,
+        1,
+        1,
+        1,
+    )
+
+
+# ---------------------------------------------------------------------------
+# build_supercell_matrix
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "orientation_rows",
+    [
+        pytest.param(IDENTITY_ROWS, id="identity"),
+        pytest.param(SIGMA5_RIGHT_GRAIN_ROWS, id="sigma5-right-grain"),
+        pytest.param(OBLIQUE_INDEX2_ROWS, id="oblique-index-2"),
+    ],
+)
+def test_build_supercell_matrix_returns_canonical_orientation_rows(orientation_rows):
+    orientation = np.array(orientation_rows, dtype=float)
+
+    result = build_supercell_matrix(orientation)
+
+    np.testing.assert_array_equal(result, _int_matrix(orientation_rows))
+
+
+@pytest.mark.parametrize(
+    ("bad_matrix", "match"),
+    INVALID_3X3_INTEGER_MATRICES,
+)
+def test_build_supercell_matrix_rejects_invalid_matrix(bad_matrix, match):
+    with pytest.raises(ValueError, match=match):
+        build_supercell_matrix(bad_matrix)
+
+
+def test_build_supercell_matrix_rejects_singular_array_like():
+    singular = [[1, 0, 0], [1, 0, 0], [0, 1, 0]]
 
     with pytest.raises(ValueError, match="singular"):
-        build_supercell_matrix(P)
+        build_supercell_matrix(singular)  # type: ignore[ty:invalid-argument-type]
 
 
-def test_enumerate_supercell_origins_returns_single_origin_for_identity_cell():
-    origins = enumerate_supercell_origins(np.eye(3, dtype=int), 1, 1, 1)
-
-    assert origins.shape == (1, 3)
-    np.testing.assert_array_equal(origins[0], [0, 0, 0])
-
-
-def test_enumerate_supercell_origins_counts_identity_repeated_cell():
-    origins = enumerate_supercell_origins(np.eye(3, dtype=int), 2, 2, 2)
-
-    assert len(origins) == 8
-
-
-def test_enumerate_supercell_origins_counts_sigma5_unit_repeat():
-    origins = enumerate_supercell_origins(SIGMA5_RIGHT_GRAIN_ARRAY, 1, 1, 1)
-
-    assert len(origins) == 25
-
-
-def test_enumerate_supercell_origins_has_no_duplicates():
-    origins = enumerate_supercell_origins(SIGMA5_RIGHT_GRAIN_ARRAY, 2, 1, 1)
-
-    assert len({tuple(row) for row in origins.tolist()}) == len(origins)
-
-
-@pytest.mark.parametrize("repeats", [(1, 1, 1), (2, 1, 1), (1, 2, 3)])
-def test_enumerate_supercell_origins_count_matches_repeats_times_index(repeats):
-    origins = enumerate_supercell_origins(SIGMA5_RIGHT_GRAIN_ARRAY, *repeats)
-
-    assert len(origins) == np.prod(repeats) * abs(integer_det3(SIGMA5_RIGHT_GRAIN))
+@pytest.mark.parametrize(
+    "noncanonical_rows",
+    [
+        pytest.param(
+            ((2, 0, 0), (0, 1, 0), (0, 0, 1)),
+            id="nonprimitive-normal",
+        ),
+        pytest.param(
+            ((-1, 0, 0), (0, 1, 0), (0, 0, 1)),
+            id="left-handed",
+        ),
+        pytest.param(
+            ((1, 1, 0), (0, 1, 0), (0, 0, 1)),
+            id="normal-does-not-match-inplane-cross-product",
+        ),
+    ],
+)
+def test_build_supercell_matrix_rejects_noncanonical_orientation_rows(
+    noncanonical_rows,
+):
+    with pytest.raises(ValueError, match="canonical and right-handed"):
+        build_supercell_matrix(noncanonical_rows)
 
 
-def test_enumerate_supercell_origins_rejects_singular_matrix():
-    S = np.array([[1, 0, 0], [1, 0, 0], [0, 0, 1]], dtype=int)
+# ---------------------------------------------------------------------------
+# enumerate_supercell_origins
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("supercell_rows", "repeats", "expected"),
+    [
+        pytest.param(
+            IDENTITY_ROWS,
+            (2, 2, 2),
+            set(product(range(2), repeat=3)),
+            id="identity-2x2x2",
+        ),
+        pytest.param(
+            OBLIQUE_INDEX2_ROWS,
+            (1, 1, 1),
+            {(0, 0, 0), (1, 0, 0)},
+            id="oblique-index-2",
+        ),
+    ],
+)
+def test_enumerate_supercell_origins_returns_known_origin_set(
+    supercell_rows,
+    repeats,
+    expected,
+):
+    origins = enumerate_supercell_origins(
+        _int_matrix(supercell_rows),
+        *repeats,
+    )
+
+    assert origins.shape == (len(expected), 3)
+    assert _origin_set(origins) == expected
+
+
+@pytest.mark.parametrize(
+    "repeats",
+    [
+        pytest.param((1, 1, 1), id="unit-repeat"),
+        pytest.param((2, 1, 1), id="repeated-normal"),
+        pytest.param((1, 2, 3), id="repeated-inplane"),
+    ],
+)
+def test_enumerate_supercell_origins_satisfies_count_uniqueness_and_membership(
+    repeats,
+):
+    supercell = _int_matrix(SIGMA5_RIGHT_GRAIN_ROWS)
+    origins = enumerate_supercell_origins(supercell, *repeats)
+    determinant = integer_det3(supercell)
+    adjugate = np.asarray(integer_adj3(supercell), dtype=object)
+    numerators = np.asarray(origins, dtype=object) @ adjugate
+    upper_bounds = np.asarray(repeats, dtype=object) * determinant
+
+    assert origins.shape == (int(np.prod(repeats)) * determinant, 3)
+    assert len(np.unique(origins, axis=0)) == len(origins)
+    assert np.all(numerators >= 0)
+    assert np.all(numerators < upper_bounds)
+
+
+@pytest.mark.parametrize(
+    ("bad_supercell", "match"),
+    INVALID_3X3_INTEGER_MATRICES,
+)
+def test_enumerate_supercell_origins_rejects_invalid_supercell(
+    bad_supercell,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        enumerate_supercell_origins(bad_supercell, 1, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("supercell", "match"),
+    [
+        pytest.param(
+            [[1, 0, 0], [1, 0, 0], [0, 0, 1]],
+            "non-singular",
+            id="singular",
+        ),
+        pytest.param(
+            [[0, 1, 0], [1, 0, 0], [0, 0, 1]],
+            "positive determinant",
+            id="negative-determinant",
+        ),
+    ],
+)
+def test_enumerate_supercell_origins_rejects_invalid_determinant(
+    supercell,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        enumerate_supercell_origins(supercell, 1, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("repeats", "match"),
+    [
+        pytest.param((0, 1, 1), "repeat_x", id="zero-x"),
+        pytest.param((1, -1, 1), "repeat_y", id="negative-y"),
+        pytest.param((1, 1, 1.5), "repeat_z", id="float-z"),
+        pytest.param((True, 1, 1), "repeat_x", id="boolean-x"),
+        pytest.param((1, np.bool_(True), 1), "repeat_y", id="numpy-boolean-y"),
+    ],
+)
+def test_enumerate_supercell_origins_rejects_invalid_repeat_count(repeats, match):
+    with pytest.raises(ValueError, match=match):
+        enumerate_supercell_origins(_int_matrix(IDENTITY_ROWS), *repeats)
+
+
+def test_enumerate_supercell_origins_accepts_numpy_integer_repeat_counts():
+    origins = enumerate_supercell_origins(
+        _int_matrix(IDENTITY_ROWS),
+        np.int64(2),  # type: ignore[ty:invalid-argument-type]
+        np.int64(1),  # type: ignore[ty:invalid-argument-type]
+        np.int64(1),  # type: ignore[ty:invalid-argument-type]
+    )
+
+    assert _origin_set(origins) == {(0, 0, 0), (1, 0, 0)}
+
+
+# ---------------------------------------------------------------------------
+# supercell_axis_numerators
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("axis", "expected"),
+    [
+        pytest.param(0, [0, 1], id="axis-0"),
+        pytest.param(1, [0, 1], id="axis-1"),
+        pytest.param(2, [0, 0], id="axis-2"),
+    ],
+)
+def test_supercell_axis_numerators_returns_known_oblique_numerators(axis, expected):
+    origins = np.array([[0, 0, 0], [1, 0, 0]], dtype=object)
+
+    numerators = supercell_axis_numerators(
+        _int_matrix(OBLIQUE_INDEX2_ROWS),
+        origins,
+        axis=axis,
+    )
+
+    np.testing.assert_array_equal(numerators, np.array(expected, dtype=object))
+    assert numerators.dtype == object
+    assert all(type(value) is int for value in numerators)
+
+
+def test_supercell_axis_numerators_normalizes_negative_determinant_sign():
+    supercell = _int_matrix(((0, 1, 0), (2, 0, 0), (0, 0, 1)))
+
+    numerators = supercell_axis_numerators(
+        supercell,
+        [[1, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+        axis=1,
+    )
+
+    np.testing.assert_array_equal(numerators, np.array([1], dtype=object))
+
+
+def test_supercell_axis_numerators_preserves_large_exact_integers():
+    large = 10**20
+
+    numerators = supercell_axis_numerators(
+        _int_matrix(IDENTITY_ROWS),
+        [[large, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+        axis=0,
+    )
+
+    np.testing.assert_array_equal(numerators, np.array([large], dtype=object))
+    assert type(numerators[0]) is int
+
+
+@pytest.mark.parametrize(
+    ("bad_supercell", "match"),
+    INVALID_3X3_INTEGER_MATRICES,
+)
+def test_supercell_axis_numerators_rejects_invalid_supercell(
+    bad_supercell,
+    match,
+):
+    with pytest.raises(ValueError, match=match):
+        supercell_axis_numerators(
+            bad_supercell,
+            [[0, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "axis",
+    [
+        pytest.param(-1, id="negative"),
+        pytest.param(3, id="too-large"),
+        pytest.param(1.5, id="float"),
+        pytest.param(True, id="boolean"),
+        pytest.param(np.bool_(False), id="numpy-boolean"),
+    ],
+)
+def test_supercell_axis_numerators_rejects_invalid_axis(axis):
+    with pytest.raises(ValueError, match="axis must be 0, 1, or 2"):
+        supercell_axis_numerators(
+            _int_matrix(IDENTITY_ROWS),
+            [[0, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+            axis=axis,
+        )
+
+
+def test_supercell_axis_numerators_accepts_numpy_integer_axis():
+    numerators = supercell_axis_numerators(
+        _int_matrix(IDENTITY_ROWS),
+        [[1, 2, 3]],  # type: ignore[ty:invalid-argument-type]
+        axis=np.int64(2),  # type: ignore[ty:invalid-argument-type]
+    )
+
+    np.testing.assert_array_equal(numerators, np.array([3], dtype=object))
+
+
+@pytest.mark.parametrize(
+    ("bad_origins", "match"),
+    [
+        pytest.param([0, 0, 0], r"shape \(N, 3\)", id="one-dimensional"),
+        pytest.param([[0, 0], [1, 1]], r"shape \(N, 3\)", id="wrong-width"),
+        pytest.param(
+            [[0.5, 0, 0]],
+            "integer-valued",
+            id="non-integer-entry",
+        ),
+        pytest.param(
+            [[True, 0, 0]],
+            "not an integer",
+            id="boolean-entry",
+        ),
+    ],
+)
+def test_supercell_axis_numerators_rejects_invalid_origins(bad_origins, match):
+    with pytest.raises(ValueError, match=match):
+        supercell_axis_numerators(
+            _int_matrix(IDENTITY_ROWS),
+            bad_origins,
+        )
+
+
+def test_supercell_axis_numerators_rejects_singular_supercell():
+    singular = [[1, 0, 0], [1, 0, 0], [0, 0, 1]]
 
     with pytest.raises(ValueError, match="non-singular"):
-        enumerate_supercell_origins(S, 1, 1, 1)
-
-
-@pytest.mark.parametrize("repeats", [(0, 1, 1), (1, -1, 1), (1.0, 1, 1)])
-def test_enumerate_supercell_origins_rejects_invalid_repeat_count(repeats):
-    with pytest.raises(ValueError, match="positive integer"):
-        enumerate_supercell_origins(np.eye(3, dtype=int), *repeats)
+        supercell_axis_numerators(
+            singular,  # type: ignore[ty:invalid-argument-type]
+            [[0, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+        )
