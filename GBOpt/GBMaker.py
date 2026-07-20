@@ -13,7 +13,13 @@ from typing import Any
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from GBOpt.BoundarySpec import BoundarySpecError, CSLApproxSpec, CSLExactSpec, PQSpec
+from GBOpt.BoundarySpec import (
+    BoundarySpecError,
+    CSLApproxSpec,
+    CSLExactSpec,
+    FiveDOFSpec,
+    PQSpec,
+)
 from GBOpt.crystallography import (
     csl_approx_spec_to_embedding,
     csl_exact_spec_to_embedding,
@@ -465,6 +471,7 @@ class GBMaker:
         a0: float,
         structure: str,
         atom_types,
+        misorientation=None,
         gb_thickness: float = 0.0,
         repeat_factor=2,
         x_dim_min: float = 50,
@@ -486,6 +493,8 @@ class GBMaker:
         :param a0: Crystal lattice parameter (Angstroms).
         :param structure: Crystal structure string.
         :param atom_types: Atom type string or tuple of strings.
+        :param misorientation: Optional legacy 5-DOF parameters to retain on
+            the constructed object. Exact embeddings default to zeros.
         :param gb_thickness: Width of the GB region (Angstroms), default 0.
         :param repeat_factor: In-plane repeat factor(s), default 2.
         :param x_dim_min: Minimum grain thickness in x (Angstroms), default 50.
@@ -503,8 +512,10 @@ class GBMaker:
             Keyword parameter, optional, defaults to ``"both"``.
         :return: Fully initialized GBMaker instance.
         """
+        if misorientation is None:
+            misorientation = np.zeros(5)
         return cls(
-            a0, structure, gb_thickness, np.zeros(5), atom_types,
+            a0, structure, gb_thickness, np.asarray(misorientation), atom_types,
             _embedding=embedding,
             _mismatch_tol=mismatch_tol,
             _mismatch_max_cells=mismatch_max_cells,
@@ -539,13 +550,14 @@ class GBMaker:
 
         Supported boundary types and currently implemented construction modes are:
 
-        ============= =========== ======================
-        Boundary type exact       approximate
-        ============= =========== ======================
-        PQSpec        yes         planned; raises
-        CSLExactSpec  yes         planned; raises
-        CSLApproxSpec no; raises  yes
-        ============= =========== ======================
+        ============= =========== ====================== ============
+        Boundary type exact       approximate            prefer_exact
+        ============= =========== ====================== ============
+        PQSpec        yes         planned; raises        yes
+        CSLExactSpec  yes         planned; raises        yes
+        CSLApproxSpec no; raises  yes                    warn -> yes
+        FiveDOFSpec   not yet     yes                    warn -> yes
+        ============= =========== ====================== ============
 
         When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is set
         from ``repeat_factor`` and the larger left/right in-plane period along each
@@ -564,23 +576,26 @@ class GBMaker:
         :param a0: Crystal lattice parameter (Angstroms).
         :param structure: Crystal structure string.
         :param atom_types: Atom type string or tuple of atom type strings.
-        :param boundary: Boundary-spec dataclass. Currently supported values are
-            ``PQSpec``, ``CSLExactSpec``, and ``CSLApproxSpec``.
-        :param mode: Construction mode. ``"exact"`` uses exact integer P/Q matrices;
-            ``"approximate"`` uses floating-point rotation matrices. Optional, defaults
-            to ``"exact"``.
-        :param gb_thickness: Width of the grain-boundary region (Angstroms). Keyword
-            parameter, optional, defaults to ``0.0``.
+        :param boundary: A boundary-spec dataclass. Currently supported values are
+            ``PQSpec``, ``CSLExactSpec``, ``CSLApproxSpec``, or ``FiveDOFSpec``.
+        :param mode: Construction mode - ``"exact"`` uses exact integer P/Q matrices
+            (requires ``PQSpec`` or ``CSLExactSpec``); ``"approximate"`` uses
+            floating-point rotation matrices (required for ``CSLApproxSpec`` and
+            ``FiveDOFSpec``). ``"prefer_exact"`` uses exact construction when available
+            and warns before falling back to approximate construction otherwise.
+            Optional, defaults to ``"exact"``.
+        :param gb_thickness: Width of the GB region (Angstroms). Keyword parameter,
+            optional, defaults tp ``0.0``.
         :param repeat_factor: In-plane repeat factor or repeat factors. A single integer
             applies to both in-plane axes; a two-value sequence applies to y and z
             respectively. Keyword parameter, optional, defaults to ``2``.
-        :param x_dim_min: Minimum size of one grain in the x dimension (Angstroms).
+        :param x_dim_min: Minimum  size of one grain in the x dimension (Angstroms).
             Keyword parameter, optional, defaults to ``50``.
-        :param vacuum: Vacuum thickness around the grains in the x dimension
-            (Angstroms). Keyword parameter, optional, defaults to ``10``.
+        :param vacuum: Vacuum thickness around the grains the x dimension (Angstroms).
+            Keyword parameter, optional, defaults to ``10``.
         :param interaction_distance: Maximum atom interaction distance (Angstroms).
             Keyword parameter, optional, defaults to ``15.0``.
-        :param gb_id: Grain-boundary identifier. Keyword parameter, optional, defaults
+        :param gb_id: Grain boundary identifier. Keyword parameter, optional, defaults
             to ``1``.
         :param mismatch_tol: Maximum allowed relative mismatch for commensurate in-plane
             repeat search. ``None`` disables mismatch accommodation. For example,
@@ -611,18 +626,18 @@ class GBMaker:
         strain_grain = cls.__validate_strain_grain(strain_grain)
 
         if isinstance(boundary, PQSpec):
-            if mode != "exact":
+            if mode == "approximate":
                 raise NotImplementedError(
-                    f"Construction mode {mode!r} is not yet supported for PQSpec; "
-                    "only mode='exact' is currently implemented."
+                    f"Construction mode '{mode}' is not yet supported for PQSpec; "
+                    f"use mode='exact' or mode='prefer_exact'."
                 )
             embedding = pq_spec_to_embedding(boundary)
 
         elif isinstance(boundary, CSLExactSpec):
-            if mode != "exact":
+            if mode == "approximate":
                 raise NotImplementedError(
-                    f"Construction mode {mode!r} is not yet supported for "
-                    "CSLExactSpec; only mode='exact' is currently implemented."
+                    f"Construction mode '{mode}' is not yet supported for CSLExactSpec; "
+                    f"use mode='exact' or mode='prefer_exact'."
                 )
             embedding = csl_exact_spec_to_embedding(boundary)
 
@@ -633,25 +648,53 @@ class GBMaker:
                     "quaternion is available for exactification. Use CSLExactSpec "
                     "for an exact construction, or mode='approximate'."
                 )
-            if mode != "approximate":
-                raise NotImplementedError(
-                    f"Construction mode {mode!r} is not yet supported for "
-                    "CSLApproxSpec; only mode='approximate' is currently "
-                    "implemented."
+            if mode == "prefer_exact":
+                warnings.warn(
+                    "CSLApproxSpec cannot be exactified from a floating-point "
+                    "angle; falling back to mode='approximate'.",
+                    UserWarning,
+                    stacklevel=2,
                 )
             embedding = csl_approx_spec_to_embedding(boundary)
+
+        elif isinstance(boundary, FiveDOFSpec):
+            if mode == "exact":
+                try:
+                    P, Q = exactify_five_dof(np.asarray(boundary.params, dtype=float))
+                except NotImplementedError as exc:
+                    raise BoundarySpecError(
+                        "FiveDOFSpec exactification is not yet implemented; "
+                        "use mode='approximate' or mode='prefer_exact'."
+                    ) from exc
+                embedding = pq_spec_to_embedding(PQSpec(P=P, Q=Q))
+            elif mode == "prefer_exact":
+                try:
+                    P, Q = exactify_five_dof(np.asarray(boundary.params, dtype=float))
+                except (BoundarySpecError, NotImplementedError) as exc:
+                    warnings.warn(
+                        "FiveDOFSpec exactification failed; falling back to "
+                        f"mode='approximate'. Reason: {exc}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+                    embedding = five_dof_spec_to_embedding(boundary)
+                else:
+                    embedding = pq_spec_to_embedding(PQSpec(P=P, Q=Q))
+            else:
+                embedding = five_dof_spec_to_embedding(boundary)
 
         else:
             raise NotImplementedError(
                 "from_boundary_spec does not yet support boundary objects of type "
                 f"{type(boundary).__name__}."
             )
-
+        misorientation = boundary.params if isinstance(boundary, FiveDOFSpec) else None
         return cls._from_boundary_embedding(
             embedding,
             a0=a0,
             structure=structure,
             atom_types=atom_types,
+            misorientation=misorientation,
             gb_thickness=gb_thickness,
             repeat_factor=repeat_factor,
             x_dim_min=x_dim_min,
@@ -1603,7 +1646,7 @@ class GBMaker:
             }
         )
 
-        if self.__embedding is not None:
+        if self.__embedding is not None and self.__embedding.source != "five_dof":
             # Trust the embedding's coherence flag directly; it is set by
             # the input adapter and reflects the exact construction intent.
             coherent = self.__embedding.coherent

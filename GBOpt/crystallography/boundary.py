@@ -20,6 +20,7 @@ from GBOpt.BoundarySpec import (
     BoundarySpecOrthogonalityError,
     CSLApproxSpec,
     CSLExactSpec,
+    FiveDOFSpec,
     PQSpec,
 )
 from GBOpt.Utils.integer_linalg import cross_int3
@@ -233,6 +234,36 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     R_right = R_left @ R_mis
 
     return embedding_from_rotation_rows(R_left, R_right, source="csl")
+
+
+def five_dof_spec_to_embedding(spec: FiveDOFSpec) -> BoundaryEmbedding:
+    """Convert a FiveDOFSpec to a legacy-equivalent approximate embedding.
+
+    The five parameters use GBMaker's legacy convention: ``[alpha, beta, gamma, theta,
+    phi]`` where the first three entries are a ZXZ misorientation and the final two
+    entries are boundary inclination rotations about lab y and z. Exactification is
+    intentionally not attempted here; Stage E owns that bounded rationalization path.
+
+    :param spec: A validated ``FiveDOFSpec`` instance.
+    :return: ``BoundaryEmbedding`` with ``exact=False``, no P/Q matrices, and
+        ``source="five_dof"``.
+    """
+    params = np.asarray(spec.params, dtype=float)
+    R_mis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
+    R_incl = (
+        Rotation.from_euler("z", params[4])
+        * Rotation.from_euler("y", params[3])
+    ).as_matrix()
+
+    return BoundaryEmbedding(
+        P=None,
+        Q=None,
+        R_left=R_incl,
+        R_right=R_incl @ R_mis,
+        exact=False,
+        coherent=False,
+        source="five_dof",
+    )
 
 
 def primitive_bicrystal_atom_count(
