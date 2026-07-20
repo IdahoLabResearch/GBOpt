@@ -10,6 +10,7 @@ Usage
     python GBOpt/Utils/gb_params.py canonicalize --P ... --Q ...
     python GBOpt/Utils/gb_params.py self_test
 """
+from __future__ import annotations
 
 import argparse
 import json
@@ -33,10 +34,10 @@ from GBOpt.BoundarySpec import (  # noqa: E402
     FiveDOFSpec,
     PQSpec,
 )
-from GBOpt.Utils.gb_exact import (  # noqa: E402
+from GBOpt.crystallography import (
     canonicalize_pq,
     csl_approx_spec_to_embedding,
-    csl_spec_to_embedding,
+    csl_exact_spec_to_embedding,
     exactify_five_dof,
 )
 
@@ -493,7 +494,7 @@ def _csl_payload(
             sigma=sigma_int,
             quat=quat_int,
         )
-        csl_spec_to_embedding(spec, max_exact_atoms=max_exact_atoms)
+        csl_exact_spec_to_embedding(spec, max_exact_atoms=max_exact_atoms)
         payload = {
             "format": "csl",
             "exact": True,
@@ -622,7 +623,7 @@ def _convert_payload(
                 max_exact_atoms=max_exact_atoms,
             )
             if payload["exact"]:
-                embedding = csl_spec_to_embedding(
+                embedding = csl_exact_spec_to_embedding(
                     spec,
                     max_exact_atoms=max_exact_atoms,
                 )
@@ -632,7 +633,7 @@ def _convert_payload(
 
     if target == "pq":
         if source == "csl" and payload["exact"]:
-            embedding = csl_spec_to_embedding(
+            embedding = csl_exact_spec_to_embedding(
                 _csl_spec_from_payload(
                     payload,
                     max_exact_atoms=max_exact_atoms,

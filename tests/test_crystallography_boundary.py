@@ -362,12 +362,7 @@ def test_pq_spec_supplied_mode_does_not_fabricate_primitive_metadata_for_unrecov
 
     emb = pq_spec_to_embedding(spec)
 
-    _assert_embedding_flags(
-        emb,
-        exact=True,
-        coherent=True,
-        source="pq",
-    )
+    _assert_embedding_flags(emb, exact=True, coherent=True, source="pq")
     _assert_proper_rotation_pair(emb)
 
     assert emb.P is not None
@@ -626,7 +621,7 @@ def test_sigma5_twist_csl_embedding_pins_expected_primitive_pq_rows():
 
 def test_csl_approx_spec_to_embedding_flags(approx_sigma5_spec):
     emb = csl_approx_spec_to_embedding(approx_sigma5_spec)
-    _assert_embedding_flags(emb, exact=False, coherent=True, source="csl")
+    _assert_embedding_flags(emb, exact=False, coherent=False, source="csl")
 
 
 def test_csl_approx_spec_to_embedding_P_Q_are_none(approx_sigma5_spec):

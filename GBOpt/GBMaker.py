@@ -544,7 +544,7 @@ class GBMaker:
         a0: float,
         structure: str,
         atom_types: str | tuple[str, ...],
-        boundary: PQSpec | CSLExactSpec | CSLApproxSpec,
+        boundary: PQSpec | CSLExactSpec | CSLApproxSpec | FiveDOFSpec,
         mode: str = "exact",
         *,
         gb_thickness: float = 0.0,

@@ -174,7 +174,7 @@ def test_from_boundary_spec_rejects_exact_mode_for_cslapproxspec(build_gb):
 def test_from_boundary_spec_rejects_approximate_mode_for_exact_specs(build_gb, spec):
     with pytest.raises(
         NotImplementedError,
-        match=r"mode 'approximate' is not yet supported.*only mode='exact'",
+        match=r"mode 'approximate' is not yet supported.*mode='prefer_exact'",
     ):
         build_gb(spec, mode="approximate")
 

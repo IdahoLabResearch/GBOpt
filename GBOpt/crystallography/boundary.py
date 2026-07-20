@@ -207,7 +207,7 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     where ``R_mis`` is the rotation about the given axis by ``angle_deg``.
 
     :param spec: A ``CSLApproxSpec`` instance.
-    :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=True``, and
+    :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=False``, and
         ``source="csl"``.
     """
     plane = np.asarray(spec.plane, dtype=float)
@@ -233,7 +233,7 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     )
     R_right = R_left @ R_mis
 
-    return embedding_from_rotation_rows(R_left, R_right, source="csl")
+    return embedding_from_rotation_rows(R_left, R_right, source="csl", coherent=False)
 
 
 def five_dof_spec_to_embedding(spec: FiveDOFSpec) -> BoundaryEmbedding:
@@ -305,5 +305,6 @@ __all__ = [
     "pq_spec_to_embedding",
     "csl_exact_spec_to_embedding",
     "csl_approx_spec_to_embedding",
+    "five_dof_spec_to_embedding",
     "primitive_bicrystal_atom_count",
 ]
