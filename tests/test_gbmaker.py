@@ -468,6 +468,47 @@ def test_invalid_public_mismatch_arguments_raise(kwargs, match):
 
 
 # --------------------------------------------------------------------------------------
+# Approximate incoherent interfaces
+# --------------------------------------------------------------------------------------
+
+
+def _build_non_csl_approximate_boundary() -> GBMaker:
+    spec = CSLApproxSpec(
+        axis=[0, 0, 1],
+        plane=[1, 0, 0],
+        angle_deg=17.3,
+    )
+    return GBMaker.from_boundary_spec(
+        3.615,
+        "fcc",
+        "Cu",
+        spec,
+        mode="approximate",
+        gb_thickness=0.0,
+        repeat_factor=2,
+        x_dim_min=8.0,
+        vacuum=5.0,
+        interaction_distance=1.0,
+    )
+
+
+def test_non_csl_approximate_spec_builds_as_incoherent():
+    gb = _build_non_csl_approximate_boundary()
+
+    assert gb.whole_system.size > 0
+    assert gb.inplane_periodic == (False, False)
+    assert gb._GBMaker__embedding is not None
+    assert gb._GBMaker__embedding.coherent is False
+
+
+def test_non_csl_approximate_spec_caps_inplane_box():
+    gb = _build_non_csl_approximate_boundary()
+
+    assert gb.spacing["y"] <= 15.0 * gb.a0
+    assert gb.spacing["z"] <= 15.0 * gb.a0
+
+
+# --------------------------------------------------------------------------------------
 # Commensurate-pair search
 # --------------------------------------------------------------------------------------
 

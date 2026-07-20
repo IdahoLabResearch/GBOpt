@@ -1651,6 +1651,9 @@ class GBMaker:
             # the input adapter and reflects the exact construction intent.
             coherent = self.__embedding.coherent
             self.__inplane_periodic = (coherent, coherent)
+            if not coherent:
+                for axis in ("y", "z"):
+                    spacing[axis] = min(spacing[axis], threshold)
         else:
             inplane_periodic = []
             for key, val in spacing.items():
