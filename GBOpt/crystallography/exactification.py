@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .types import CrystallographyNotImplementedError
+
 
 def exactify_five_dof(
     params: np.ndarray,
@@ -15,12 +17,13 @@ def exactify_five_dof(
     """Convert five-DOF boundary parameters to exact canonical P/Q matrices.
 
     :param params: Five-DOF parameters ``[alpha, beta, gamma, theta, phi]`` in radians.
-    :param max_exact_atoms: Maximum permitted size of the resulting exact cell.
-        Keyword argument, optional, defaults to ``10000``.
+    :param max_exact_atoms: Maximum permitted size of the resulting exact cell. Keyword
+        argument, optional, defaults to ``10000``.
     :return: Canonical integer orientation matrices ``(P, Q)``.
-    :raises NotImplementedError: Five-DOF exactification is not yet implemented.
+    :raises CrystallographyNotImplementedError: Five-DOF exactification is not yet
+        implemented.
     """
-    raise NotImplementedError(
+    raise CrystallographyNotImplementedError(
         "Conversion from five-DOF parameters to exact canonical P/Q matrices "
         "is not implemented."
     )

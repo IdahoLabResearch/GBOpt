@@ -41,7 +41,7 @@ def _inclination_matrix(params: np.ndarray) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------------------
-# Floating-point direction and orientation validation
+# Direction and orientation validation
 # --------------------------------------------------------------------------------------
 
 
@@ -63,6 +63,7 @@ def test_normalize_direction_returns_unit_copy_without_mutating_input():
         pytest.param([1.0, 2.0], "shape", id="wrong-shape"),
         pytest.param([1.0, np.nan, 0.0], "finite", id="nan"),
         pytest.param([1.0, np.inf, 0.0], "finite", id="infinite"),
+        pytest.param(["bad", 0.0, 0.0], "finite three-component", id="nonnumeric"),
     ],
 )
 def test_normalize_direction_rejects_invalid_vectors(direction, match):
@@ -70,9 +71,24 @@ def test_normalize_direction_rejects_invalid_vectors(direction, match):
         normalize_direction(direction)
 
 
-@pytest.mark.parametrize("tol", [0.0, -1.0, np.inf, np.nan, True])
-def test_normalize_direction_rejects_invalid_tolerance(tol):
-    with pytest.raises(CrystallographyValueError):
+def test_normalize_direction_rejects_norm_equal_to_tolerance():
+    with pytest.raises(CrystallographyValueError, match="nonzero"):
+        normalize_direction([1.0, 0.0, 0.0], tol=1.0)
+
+
+@pytest.mark.parametrize(
+    ("tol", "match"),
+    [
+        pytest.param(0.0, "strictly positive", id="zero"),
+        pytest.param(-1.0, "strictly positive", id="negative"),
+        pytest.param(np.inf, "finite real number", id="infinite"),
+        pytest.param(np.nan, "finite real number", id="nan"),
+        pytest.param(True, "finite real number", id="boolean"),
+        pytest.param("bad", "finite real number", id="nonnumeric"),
+    ],
+)
+def test_normalize_direction_rejects_invalid_tolerance(tol, match):
+    with pytest.raises(CrystallographyValueError, match=match):
         normalize_direction([1.0, 0.0, 0.0], tol=tol)
 
 
@@ -105,6 +121,11 @@ def test_validate_orientation_matrix_normalizes_scaled_rows():
             "finite",
             id="nonfinite",
         ),
+        pytest.param(
+            [[1.0, 0.0, 0.0], [0.0, "bad", 0.0], [0.0, 0.0, 1.0]],
+            "finite 3 by 3 matrix",
+            id="nonnumeric",
+        ),
     ],
 )
 def test_validate_orientation_matrix_rejects_invalid_matrices(matrix, match):
@@ -112,8 +133,20 @@ def test_validate_orientation_matrix_rejects_invalid_matrices(matrix, match):
         validate_orientation_matrix(matrix)
 
 
+@pytest.mark.parametrize(
+    ("tol", "match"),
+    [
+        pytest.param(0.0, "strictly positive", id="nonpositive"),
+        pytest.param(True, "finite real number", id="boolean"),
+    ],
+)
+def test_validate_orientation_matrix_rejects_invalid_tolerance(tol, match):
+    with pytest.raises(CrystallographyValueError, match=match):
+        validate_orientation_matrix(np.eye(3), tol=tol)
+
+
 # --------------------------------------------------------------------------------------
-# Floating-point P/Q builders
+# Boundary orientation builders
 # --------------------------------------------------------------------------------------
 
 
@@ -171,22 +204,38 @@ def test_build_twist_orientations_preserves_boundary_normal():
     np.testing.assert_allclose(Q, P @ _axis_rotation(normal, angle_deg), atol=1.0e-12)
 
 
-def test_build_twist_orientations_projects_custom_reference():
-    P, _Q = build_twist_orientations(
-        [0.0, 0.0, 1.0],
-        45.0,
-        in_plane_reference=[1.0, 1.0, 5.0],
+def test_build_twist_orientations_uses_projected_custom_reference():
+    normal = np.array([0.0, 0.0, 1.0])
+    reference = np.array([1.0, 1.0, 5.0])
+    angle_deg = 45.0
+
+    P, Q = build_twist_orientations(
+        normal,
+        angle_deg,
+        in_plane_reference=reference,
     )
 
-    np.testing.assert_allclose(P[1], [1.0 / math.sqrt(2.0), 1.0 / math.sqrt(2.0), 0.0])
+    expected_in_plane = np.array([1.0, 1.0, 0.0]) / math.sqrt(2.0)
+    _assert_proper_orientation(P)
+    _assert_proper_orientation(Q)
+    np.testing.assert_allclose(P[0], normal)
+    np.testing.assert_allclose(P[1], expected_in_plane)
+    np.testing.assert_allclose(Q, P @ _axis_rotation(normal, angle_deg), atol=1.0e-12)
 
 
-def test_build_twist_orientations_rejects_parallel_reference():
-    with pytest.raises(CrystallographyValueError, match="must not be parallel"):
+@pytest.mark.parametrize(
+    ("reference", "match"),
+    [
+        pytest.param([0.0, 0.0, 0.0], "nonzero", id="zero"),
+        pytest.param([0.0, 0.0, 2.0], "must not be parallel", id="parallel"),
+    ],
+)
+def test_build_twist_orientations_rejects_invalid_custom_reference(reference, match):
+    with pytest.raises(CrystallographyValueError, match=match):
         build_twist_orientations(
             [0.0, 0.0, 1.0],
             45.0,
-            in_plane_reference=[0.0, 0.0, 2.0],
+            in_plane_reference=reference,
         )
 
 
@@ -208,6 +257,43 @@ def test_build_mixed_orientations_uses_axis_projection_by_default():
     np.testing.assert_allclose(Q, P @ _axis_rotation(axis, angle_deg), atol=1.0e-12)
 
 
+def test_build_mixed_orientations_uses_projected_custom_reference():
+    normal = np.array([0.0, 0.0, 1.0])
+    axis = np.array([1.0, 0.0, 1.0])
+    reference = np.array([0.0, 2.0, 3.0])
+    angle_deg = 30.0
+
+    P, Q = build_mixed_orientations(
+        normal,
+        axis,
+        angle_deg,
+        in_plane_reference=reference,
+    )
+
+    _assert_proper_orientation(P)
+    _assert_proper_orientation(Q)
+    np.testing.assert_allclose(P[0], normal)
+    np.testing.assert_allclose(P[1], [0.0, 1.0, 0.0])
+    np.testing.assert_allclose(Q, P @ _axis_rotation(axis, angle_deg), atol=1.0e-12)
+
+
+@pytest.mark.parametrize(
+    ("reference", "match"),
+    [
+        pytest.param([0.0, 0.0, 0.0], "nonzero", id="zero"),
+        pytest.param([0.0, 0.0, 2.0], "must not be parallel", id="parallel"),
+    ],
+)
+def test_build_mixed_orientations_rejects_invalid_custom_reference(reference, match):
+    with pytest.raises(CrystallographyValueError, match=match):
+        build_mixed_orientations(
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            30.0,
+            in_plane_reference=reference,
+        )
+
+
 @pytest.mark.parametrize(
     ("normal", "axis", "match"),
     [
@@ -221,7 +307,7 @@ def test_build_mixed_orientations_rejects_pure_boundaries(normal, axis, match):
 
 
 # --------------------------------------------------------------------------------------
-# Five-DOF conversion
+# Five-DOF encoding
 # --------------------------------------------------------------------------------------
 
 
@@ -276,6 +362,20 @@ def test_five_dof_from_axis_angle_suppresses_scipy_gimbal_lock_warning():
     np.testing.assert_allclose(reconstructed, _axis_rotation([0, 0, 1], 30.0))
 
 
+@pytest.mark.parametrize(
+    "angle_deg",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(np.nan, id="nan"),
+        pytest.param(np.inf, id="infinite"),
+        pytest.param("bad", id="nonnumeric"),
+    ],
+)
+def test_five_dof_from_axis_angle_rejects_invalid_angle(angle_deg):
+    with pytest.raises(CrystallographyValueError, match="finite real number"):
+        five_dof_from_axis_angle([0, 0, 1], angle_deg, [1, 0, 0])
+
+
 def test_five_dof_from_orientation_matrices_accepts_scaled_rows():
     angle_deg = 36.869898
     P_unit, Q_unit = build_tilt_orientations([3, 1, 0], [0, 0, 1], angle_deg)
@@ -307,11 +407,53 @@ def test_five_dof_from_orientation_matrices_warns_and_uses_p_normal():
     np.testing.assert_allclose(_inclination_matrix(params)[0], P[0], atol=1.0e-12)
 
 
-@pytest.mark.parametrize("normal_warning_deg", [-1.0, np.nan, np.inf, True])
+def test_five_dof_from_orientation_matrices_accepts_matching_supplied_normal_without_warning():
+    P = np.eye(3)
+    Q = _axis_rotation([0, 0, 1], 20.0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        params = five_dof_from_orientation_matrices(
+            P,
+            Q,
+            boundary_normal=[1.0, 1.0e-3, 0.0],
+            normal_warning_deg=1.0,
+        )
+
+    np.testing.assert_allclose(_inclination_matrix(params)[0], P[0], atol=1.0e-12)
+
+
+def test_five_dof_from_orientation_matrices_disables_normal_warning_at_180_degrees():
+    P = np.eye(3)
+    Q = _axis_rotation([0, 0, 1], 20.0)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        params = five_dof_from_orientation_matrices(
+            P,
+            Q,
+            boundary_normal=[-1.0, 0.0, 0.0],
+            normal_warning_deg=180.0,
+        )
+
+    np.testing.assert_allclose(_inclination_matrix(params)[0], P[0], atol=1.0e-12)
+
+
+@pytest.mark.parametrize(
+    ("normal_warning_deg", "match"),
+    [
+        pytest.param(-1.0, "non-negative", id="negative"),
+        pytest.param(np.nan, "finite real number", id="nan"),
+        pytest.param(np.inf, "finite real number", id="infinite"),
+        pytest.param(True, "finite real number", id="boolean"),
+        pytest.param("bad", "finite real number", id="nonnumeric"),
+    ],
+)
 def test_five_dof_from_orientation_matrices_rejects_invalid_warning_threshold(
     normal_warning_deg,
+    match,
 ):
-    with pytest.raises(CrystallographyValueError):
+    with pytest.raises(CrystallographyValueError, match=match):
         five_dof_from_orientation_matrices(
             np.eye(3),
             np.eye(3),
@@ -320,62 +462,71 @@ def test_five_dof_from_orientation_matrices_rejects_invalid_warning_threshold(
 
 
 # --------------------------------------------------------------------------------------
-# orientation_matrices_from_five_dof
+# Five-DOF decoding and round trips
 # --------------------------------------------------------------------------------------
 
 
-def test_orientation_matrices_from_five_dof_reconstructs_frames():
-    params = np.array(
-        [
-            np.radians(20.0),
-            np.radians(35.0),
-            np.radians(-10.0),
-            np.radians(15.0),
-            np.radians(-25.0),
-        ]
-    )
+def test_five_dof_decoding_reconstructs_left_inclination_and_relative_misorientation(
+) -> None:
+    params = np.radians([20.0, 35.0, -10.0, 15.0, -25.0])
 
     R_left, R_right = orientation_matrices_from_five_dof(params)
 
-    expected_misorientation = Rotation.from_euler(
-        "ZXZ",
-        params[:3],
-    ).as_matrix()
+    expected_misorientation = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
     expected_left = (
         Rotation.from_euler("z", params[4])
         * Rotation.from_euler("y", params[3])
     ).as_matrix()
 
-    np.testing.assert_allclose(R_left, expected_left, atol=1e-12)
+    _assert_proper_orientation(R_left)
+    _assert_proper_orientation(R_right)
+    np.testing.assert_allclose(R_left, expected_left, atol=1.0e-12)
     np.testing.assert_allclose(
         R_left.T @ R_right,
         expected_misorientation,
-        atol=1e-12,
+        atol=1.0e-12,
     )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param(
+            np.radians([20.0, 35.0, -10.0, 15.0, -25.0]),
+            id="general",
+        ),
+        pytest.param(
+            np.radians([30.0, 0.0, 20.0, 15.0, -25.0]),
+            id="zxz-gimbal-lock",
+        ),
+        pytest.param(
+            np.radians([10.0, 20.0, 30.0, 0.0, -90.0]),
+            id="inclination-singularity",
+        ),
+    ],
+)
+def test_orientation_matrix_five_dof_round_trip_preserves_frames(params):
+    expected_left, expected_right = orientation_matrices_from_five_dof(params)
+
+    encoded = five_dof_from_orientation_matrices(expected_left, expected_right)
+    actual_left, actual_right = orientation_matrices_from_five_dof(encoded)
+
+    np.testing.assert_allclose(actual_left, expected_left, atol=1.0e-12)
+    np.testing.assert_allclose(actual_right, expected_right, atol=1.0e-12)
 
 
 @pytest.mark.parametrize(
     ("params", "message"),
     [
         pytest.param(
-            [],
-            r"params must have shape \(5,\)",
-            id="empty",
-        ),
-        pytest.param(
             [0.0, 0.0, 0.0, 0.0],
             r"params must have shape \(5,\)",
-            id="too-short",
-        ),
-        pytest.param(
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            r"params must have shape \(5,\)",
-            id="too-long",
+            id="wrong-length",
         ),
         pytest.param(
             [[0.0, 0.0, 0.0, 0.0, 0.0]],
             r"params must have shape \(5,\)",
-            id="two-dimensional",
+            id="wrong-rank",
         ),
         pytest.param(
             [np.nan, 0.0, 0.0, 0.0, 0.0],
@@ -385,18 +536,27 @@ def test_orientation_matrices_from_five_dof_reconstructs_frames():
         pytest.param(
             [0.0, np.inf, 0.0, 0.0, 0.0],
             "params must contain only finite values",
-            id="positive-infinity",
+            id="infinite",
         ),
         pytest.param(
-            [0.0, 0.0, -np.inf, 0.0, 0.0],
-            "params must contain only finite values",
-            id="negative-infinity",
+            ["bad", 0.0, 0.0, 0.0, 0.0],
+            "params must be a finite five-element sequence",
+            id="nonnumeric",
         ),
     ],
 )
-def test_orientation_matrices_from_five_dof_rejects_invalid_params(
-    params,
-    message,
-):
+def test_orientation_matrices_from_five_dof_rejects_invalid_params(params, message):
     with pytest.raises(CrystallographyValueError, match=message):
         orientation_matrices_from_five_dof(params)
+
+
+@pytest.mark.parametrize(
+    ("tol", "match"),
+    [
+        pytest.param(0.0, "strictly positive", id="nonpositive"),
+        pytest.param(True, "finite real number", id="boolean"),
+    ],
+)
+def test_orientation_matrices_from_five_dof_rejects_invalid_tolerance(tol, match):
+    with pytest.raises(CrystallographyValueError, match=match):
+        orientation_matrices_from_five_dof(np.zeros(5), tol=tol)

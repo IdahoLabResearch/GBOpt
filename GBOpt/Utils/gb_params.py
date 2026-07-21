@@ -2,10 +2,6 @@
 
 """Thin CLI for converting grain-boundary descriptions into GBOpt core formats.
 
-Boundary-spec dataclasses own core-format validation, and the crystallography package
-owns all domain conversion. This module is limited to tagged-JSON schema handling,
-human-readable reporting, command dispatch, and serialization.
-
 Examples
 --------
 Convert an axis-angle description to five-DOF JSON::

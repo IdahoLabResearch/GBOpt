@@ -27,7 +27,7 @@ _DEFAULT_ORIENTATION_TOL = 1.0e-10
 _DEFAULT_NORMAL_WARNING_DEG = 1.0
 
 # ---------------------------------------------------------------------------
-# Floating-point row-orientation construction and conversion
+# Validation and normalization
 # ---------------------------------------------------------------------------
 
 
@@ -126,6 +126,32 @@ def normalize_direction(
         non-finite values, or has norm no greater than ``tol``.
     """
     tol = _validated_tolerance(tol, "tol")
+    return _normalize_direction(direction, name, tol=tol)
+
+
+def _normalize_direction(
+    direction: object,
+    name: str,
+    *,
+    tol: float,
+) -> np.ndarray:
+    """Normalize a three-component direction using a prevalidated tolerance.
+
+    This internal helper converts ``direction`` to a finite ``float64`` vector, verifies
+    that its Euclidean norm is greater than ``tol``, and returns the corresponding unit
+    vector. Unlike :func:`normalize_direction`, it does not validate ``tol``; callers
+    should use it only after validating a shared tolerance value.
+
+    :param direction: Array-like object containing exactly three finite numeric
+        components. The direction need not already have unit length.
+    :param name: Human-readable argument name used in validation error messages.
+    :param tol: Prevalidated, finite, strictly positive lower bound for the direction's
+        Euclidean norm.
+    :return: Unit-length ``numpy.float64`` vector with shape ``(3,)``.
+    :raises CrystallographyValueError: If ``direction`` cannot be converted to a
+        three-component numeric vector, contains a non-finite value, or has a norm less
+        than or equal to ``tol``.
+    """
     vector = _vector3(direction, name)
     norm = float(np.linalg.norm(vector))
     if norm <= tol:
@@ -156,6 +182,39 @@ def validate_orientation_matrix(
         row-wise orientation matrix.
     """
     tol = _validated_tolerance(tol, "tol")
+    return _validate_orientation_matrix(matrix, name, tol=tol)
+
+
+def _validate_orientation_matrix(
+    matrix: object,
+    name: str,
+    *,
+    tol: float,
+) -> np.ndarray:
+    """Normalize and validate a row-wise orientation matrix.
+
+    Each row identifies the crystal direction aligned with one Cartesian laboratory
+    axis. The candidate matrix is converted to ``float64``, checked for the required
+    shape and finite values, and normalized row by row. The normalized rows must form a
+    mutually orthogonal, right-handed frame.
+
+    Unlike :func:`validate_orientation_matrix`, this internal helper assumes that
+    ``tol`` has already been validated as finite and strictly positive. It is intended
+    for call paths that reuse one tolerance across multiple validation operations.
+
+    :param matrix: Array-like candidate orientation matrix with shape ``(3, 3)``. Its
+        rows may have arbitrary nonzero magnitudes but must become mutually orthogonal
+        and right-handed after normalization.
+    :param name: Human-readable matrix name used in validation error messages.
+    :param tol: Prevalidated absolute tolerance used for minimum row norms, Gram-matrix
+        orthogonality error, and deviation of the normalized determinant from ``+1``.
+    :return: Row-normalized ``numpy.float64`` matrix with shape ``(3, 3)`` whose rows
+        form a proper right-handed orthonormal frame.
+    :raises CrystallographyValueError: If ``matrix`` cannot be converted to a numeric
+        array, does not have shape ``(3, 3)``, contains non-finite values, contains a
+        row whose norm is less than or equal to ``tol``, is not orthogonal within
+        ``tol``, or is not right-handed within ``tol``.
+    """
     try:
         candidate = np.asarray(matrix, dtype=np.float64)
     except (TypeError, ValueError) as exc:
@@ -171,8 +230,9 @@ def validate_orientation_matrix(
         raise CrystallographyValueError(f"{name} must contain only finite values.")
 
     norms = np.linalg.norm(candidate, axis=1)
-    if np.any(norms <= tol):
-        row = int(np.flatnonzero(norms <= tol)[0])
+    zero_rows = norms <= tol
+    if np.any(zero_rows):
+        row = int(np.flatnonzero(zero_rows)[0])
         raise CrystallographyValueError(
             f"{name} row {row} must be nonzero; got norm {norms[row]:.3e}."
         )
@@ -187,7 +247,7 @@ def validate_orientation_matrix(
             f"maximum Gram-matrix error is {gram_error:.3e}."
         )
 
-    determinant = float(np.linalg.det(normalized))
+    determinant = float(np.dot(normalized[0], np.cross(normalized[1], normalized[2])))
     if abs(determinant - 1.0) > tol:
         raise CrystallographyValueError(
             f"{name} must be right-handed after normalization; "
@@ -195,6 +255,11 @@ def validate_orientation_matrix(
         )
 
     return normalized
+
+
+# ---------------------------------------------------------------------------
+# Orientation-frame construction
+# ---------------------------------------------------------------------------
 
 
 def _project_into_plane(
@@ -206,11 +271,11 @@ def _project_into_plane(
 ) -> np.ndarray:
     """Project a direction into the plane perpendicular to a unit normal.
 
-    The supplied direction is first validated and normalized. Its component parallel to
-    ``normal`` is then removed, and the remaining in-plane component is normalized.
+    The supplied direction is validated, projected directly, and the remaining in-plane
+    component is normalized.
 
-    This private helper assumes that ``normal`` has already been validated as a finite
-    unit vector with shape ``(3,)``.
+    This private helper assumes that ``normal`` is a finite unit vector with shape
+    ``(3,)`` and that ``tol`` is finite and strictly positive.
 
     :param direction: Array-like three-component direction to project. It need not be
         normalized, but it must be finite and nonzero.
@@ -222,15 +287,20 @@ def _project_into_plane(
         magnitude and determining whether the projected component is effectively zero.
     :return: A unit-length ``numpy.float64`` vector with shape ``(3,)`` that lies in the
         plane perpendicular to ``normal``.
-    :raises CrystallographyValueError: If ``tol`` is invalid; if ``direction`` cannot be
-        interpreted as a finite, nonzero three-component vector; or if ``direction`` is
-        parallel to ``normal`` within ``tol`` and therefore has no nonzero in-plane
-        projection.
+    :raises CrystallographyValueError: If ``direction`` cannot be interpreted as a
+        finite, nonzero three-component vector, or if it is parallel to ``normal``
+        within ``tol`` and therefore has no nonzero in-plane projection.
     """
-    direction_hat = normalize_direction(direction, name, tol=tol)
-    projected = direction_hat - np.dot(direction_hat, normal) * normal
+    vector = _vector3(direction, name)
+    vector_norm = float(np.linalg.norm(vector))
+    if vector_norm <= tol:
+        raise CrystallographyValueError(
+            f"{name} must be nonzero; got norm {vector_norm:.3e}."
+        )
+
+    projected = vector - np.dot(vector, normal) * normal
     projected_norm = float(np.linalg.norm(projected))
-    if projected_norm <= tol:
+    if projected_norm <= tol * vector_norm:
         raise CrystallographyValueError(
             f"{name} must not be parallel to the boundary normal."
         )
@@ -249,8 +319,8 @@ def _default_in_plane_reference(
     Selecting the least-aligned basis vector avoids an unstable projection from a seed
     that is nearly parallel to the normal.
 
-    This private helper assumes that ``normal`` has already been validated as a finite
-    unit vector with shape ``(3,)``.
+    This private helper assumes that ``normal`` is a finite unit vector with shape
+    ``(3,)`` and that ``tol`` is finite and strictly positive.
 
     :param normal: Validated unit vector with shape ``(3,)`` defining the boundary-plane
         normal.
@@ -258,88 +328,39 @@ def _default_in_plane_reference(
         normalizing the selected Cartesian seed.
     :return: A unit-length ``numpy.float64`` vector with shape ``(3,)`` lying in the
         plane perpendicular to ``normal``.
-    :raises CrystallographyValueError: If ``tol`` is invalid or if the selected
-        Cartesian seed cannot be projected to a nonzero in-plane direction within
-        ``tol``.
+    :raises CrystallographyValueError: If the selected Cartesian seed cannot be
+        projected to a nonzero in-plane direction within ``tol``.
     """
-    basis = np.eye(3, dtype=np.float64)
-    seed = basis[int(np.argmin(np.abs(basis @ normal)))]
+    seed = np.zeros(3, dtype=np.float64)
+    seed[int(np.argmin(np.abs(normal)))] = 1.0
     return _project_into_plane(seed, normal, name="in-plane reference", tol=tol)
 
 
-def _orientation_from_normal_and_in_plane(
-    boundary_normal: object,
-    in_plane_direction: object,
-    *,
-    project_in_plane: bool,
-    tol: float,
-    name: str,
+def _orientation_from_unit_vectors(
+    normal: np.ndarray,
+    in_plane: np.ndarray,
 ) -> np.ndarray:
-    """Construct a right-handed row-wise orientation matrix.
+    """Construct a row-wise orientation matrix from two trusted unit vectors.
 
-    Row 0 is the normalized boundary normal. Row 1 is derived from the supplied in-plane
-    direction. Row 2 is the normalized cross product of rows 0 and 1, completing a
-    right-handed basis.
+    The boundary normal becomes the first row and the supplied in-plane direction
+    becomes the second row. Their normalized cross product becomes the third row,
+    producing a right-handed orientation frame.
 
-    When ``project_in_plane`` is true, the component of ``in_plane_direction`` parallel
-    to the boundary normal is removed before row 1 is normalized. When it is false, the
-    supplied direction must already be perpendicular to the boundary normal within
-    ``tol``.
+    This helper performs no input validation. Callers must provide finite, unit-length
+    vectors with shape ``(3,)`` that are mutually perpendicular. Supplying zero,
+    parallel, non-unit, or malformed vectors may produce a non-orthonormal matrix or
+    non-finite values.
 
-    :param boundary_normal: Array-like three-component boundary normal used to construct
-        row 0. It need not be normalized, but it must be finite and nonzero.
-    :param in_plane_direction: Array-like three-component direction used to construct
-        row 1. It need not be normalized, but it must be finite and nonzero.
-    :param project_in_plane: Whether to project ``in_plane_direction`` into the plane
-        perpendicular to ``boundary_normal``. If false, the function instead requires
-        the two normalized directions to be perpendicular within ``tol``.
-    :param tol: Strictly positive numerical tolerance used for vector validation,
-        normalization, perpendicularity testing, cross-product degeneracy testing, and
-        final orientation-matrix validation.
-    :param name: Human-readable name assigned to the constructed orientation matrix and
-        included in final validation error messages.
-    :return: A normalized, right-handed ``numpy.float64`` orientation matrix with shape
-        ``(3, 3)`` whose rows represent the boundary normal, first in-plane direction,
-        and completing in-plane direction.
-    :raises CrystallographyValueError: If ``tol`` is invalid; if either input direction
-        is malformed, non-finite, or zero within ``tol``; if ``project_in_plane`` is
-        false and the directions are not perpendicular within ``tol``; if the directions
-        do not define a nondegenerate basis; or if the constructed matrix fails
-        orthogonality or handedness validation.
+    :param normal: Finite unit vector with shape ``(3,)`` defining the boundary normal
+        and first orientation row.
+    :param in_plane: Finite unit vector with shape ``(3,)`` perpendicular to ``normal``
+        and defining the second orientation row.
+    :return: ``numpy.float64`` matrix with shape ``(3, 3)`` whose rows are ``normal``,
+        ``in_plane``, and the normalized cross product ``normal x in_plane``.
     """
-    normal = normalize_direction(boundary_normal, "boundary normal", tol=tol)
-    if project_in_plane:
-        in_plane = _project_into_plane(
-            in_plane_direction,
-            normal,
-            name="in-plane direction",
-            tol=tol,
-        )
-    else:
-        in_plane = normalize_direction(
-            in_plane_direction,
-            "in-plane direction",
-            tol=tol,
-        )
-        dot = float(np.dot(normal, in_plane))
-        if abs(dot) > tol:
-            raise CrystallographyValueError(
-                "in-plane direction must be perpendicular to the boundary normal; "
-                f"normalized dot product is {dot:.3e}."
-            )
-
     third = np.cross(normal, in_plane)
-    third_norm = float(np.linalg.norm(third))
-    if third_norm <= tol:
-        raise CrystallographyValueError(
-            "boundary normal and in-plane direction do not define an orientation."
-        )
-
-    return validate_orientation_matrix(
-        np.vstack((normal, in_plane, third / third_norm)),
-        name,
-        tol=tol,
-    )
+    third /= np.linalg.norm(third)
+    return np.stack((normal, in_plane, third))
 
 
 def _axis_angle_rotation(
@@ -365,14 +386,21 @@ def _axis_angle_rotation(
         normalized ``numpy.float64`` rotation axis with shape ``(3,)``, ``rotation`` is
         the corresponding proper ``numpy.float64`` rotation matrix with shape ``(3,
         3)``, and ``angle`` is the validated angle as a Python ``float`` in degrees.
-    :raises CrystallographyValueError: If ``tol`` is invalid; if ``rotation_axis``
-        cannot be interpreted as a finite, nonzero three-component vector; or if
-        ``angle_deg`` is boolean, non-real, or non-finite.
+    This private helper assumes that ``tol`` is finite and strictly positive.
+
+    :raises CrystallographyValueError: If ``rotation_axis`` cannot be interpreted as a
+        finite, nonzero three-component vector, or if ``angle_deg`` is boolean,
+        non-real, or non-finite.
     """
-    axis = normalize_direction(rotation_axis, "rotation axis", tol=tol)
+    axis = _normalize_direction(rotation_axis, "rotation axis", tol=tol)
     angle = _finite_float(angle_deg, "angle_deg")
     rotation = Rotation.from_rotvec(axis * math.radians(angle)).as_matrix()
     return axis, rotation, angle
+
+
+# ---------------------------------------------------------------------------
+# Boundary orientation builders
+# ---------------------------------------------------------------------------
 
 
 def build_tilt_orientations(
@@ -400,7 +428,7 @@ def build_tilt_orientations(
     :return: ``(P, Q)`` normalized row-orientation matrices.
     """
     tol = _validated_tolerance(tol, "tol")
-    normal = normalize_direction(
+    normal = _normalize_direction(
         left_boundary_normal,
         "left boundary normal",
         tol=tol,
@@ -413,14 +441,8 @@ def build_tilt_orientations(
             f"product is {dot:.3e}."
         )
 
-    P = _orientation_from_normal_and_in_plane(
-        normal,
-        axis,
-        project_in_plane=False,
-        tol=tol,
-        name="P",
-    )
-    Q = validate_orientation_matrix(P @ rotation, "Q", tol=tol)
+    P = _orientation_from_unit_vectors(normal, axis)
+    Q = P @ rotation
     return P, Q
 
 
@@ -448,7 +470,7 @@ def build_symmetric_tilt_orientations(
     :return: ``(P, Q)`` normalized row-orientation matrices.
     """
     tol = _validated_tolerance(tol, "tol")
-    median = normalize_direction(
+    median = _normalize_direction(
         median_boundary_normal,
         "median boundary normal",
         tol=tol,
@@ -465,33 +487,18 @@ def build_symmetric_tilt_orientations(
             f"normalized dot product is {dot:.3e}."
         )
 
-    left_half_rotation = Rotation.from_rotvec(
-        axis * math.radians(-0.5 * angle)
-    ).as_matrix()
     right_half_rotation = Rotation.from_rotvec(
         axis * math.radians(0.5 * angle)
     ).as_matrix()
-    left_normal = median @ left_half_rotation
+    left_normal = median @ right_half_rotation.T
     right_normal = median @ right_half_rotation
 
-    P = _orientation_from_normal_and_in_plane(
-        left_normal,
-        axis,
-        project_in_plane=False,
-        tol=tol,
-        name="P",
-    )
-    Q = _orientation_from_normal_and_in_plane(
-        right_normal,
-        axis,
-        project_in_plane=False,
-        tol=tol,
-        name="Q",
-    )
+    P = _orientation_from_unit_vectors(left_normal, axis)
+    Q = P @ full_rotation
 
-    if not np.allclose(P @ full_rotation, Q, atol=10.0 * tol, rtol=0.0):
+    if not np.allclose(Q[0], right_normal, atol=10.0 * tol, rtol=0.0):
         raise CrystallographyValueError(
-            "symmetric-tilt construction failed its relative-rotation invariant."
+            "symmetric-tilt construction failed its right-normal invariant."
         )
 
     left_deviation = P[0] - np.dot(P[0], median) * median
@@ -530,7 +537,7 @@ def build_twist_orientations(
     :return: ``(P, Q)`` normalized row-orientation matrices.
     """
     tol = _validated_tolerance(tol, "tol")
-    normal = normalize_direction(boundary_normal, "boundary normal", tol=tol)
+    normal = _normalize_direction(boundary_normal, "boundary normal", tol=tol)
     _, rotation, _ = _axis_angle_rotation(normal, angle_deg, tol=tol)
 
     if in_plane_reference is None:
@@ -543,14 +550,8 @@ def build_twist_orientations(
             tol=tol,
         )
 
-    P = _orientation_from_normal_and_in_plane(
-        normal,
-        in_plane,
-        project_in_plane=False,
-        tol=tol,
-        name="P",
-    )
-    Q = validate_orientation_matrix(P @ rotation, "Q", tol=tol)
+    P = _orientation_from_unit_vectors(normal, in_plane)
+    Q = P @ rotation
 
     if not np.allclose(P[0], Q[0], atol=10.0 * tol, rtol=0.0):
         raise CrystallographyValueError(
@@ -582,7 +583,7 @@ def build_mixed_orientations(
     :return: ``(P, Q)`` normalized row-orientation matrices.
     """
     tol = _validated_tolerance(tol, "tol")
-    normal = normalize_direction(
+    normal = _normalize_direction(
         left_boundary_normal,
         "left boundary normal",
         tol=tol,
@@ -607,15 +608,14 @@ def build_mixed_orientations(
         name="in-plane reference",
         tol=tol,
     )
-    P = _orientation_from_normal_and_in_plane(
-        normal,
-        in_plane,
-        project_in_plane=False,
-        tol=tol,
-        name="P",
-    )
-    Q = validate_orientation_matrix(P @ rotation, "Q", tol=tol)
+    P = _orientation_from_unit_vectors(normal, in_plane)
+    Q = P @ rotation
     return P, Q
+
+
+# ---------------------------------------------------------------------------
+# Five-degree-of-freedom conversions
+# ---------------------------------------------------------------------------
 
 
 def inclination_from_normal(
@@ -632,10 +632,20 @@ def inclination_from_normal(
     :param tol: Numerical tolerance. Keyword parameter, optional.
     :return: ``(theta, phi)`` in radians.
     """
-    normal = normalize_direction(boundary_normal, "boundary normal", tol=tol)
+    tol = _validated_tolerance(tol, "tol")
+    normal = _normalize_direction(boundary_normal, "boundary normal", tol=tol)
+    return _inclination_from_unit_normal(normal, tol=tol)
+
+
+def _inclination_from_unit_normal(
+    normal: np.ndarray,
+    *,
+    tol: float,
+) -> tuple[float, float]:
+    """Return inclination angles for an already normalized boundary normal."""
     nx, ny, nz = normal
-    phi = float(math.asin(float(np.clip(-ny, -1.0, 1.0))))
-    theta = 0.0 if abs(abs(ny) - 1.0) <= tol else float(math.atan2(nz, nx))
+    phi = math.asin(np.clip(-ny, -1.0, 1.0))
+    theta = 0.0 if abs(abs(ny) - 1.0) <= tol else math.atan2(nz, nx)
     return theta, phi
 
 
@@ -704,7 +714,8 @@ def five_dof_from_axis_angle(
     tol = _validated_tolerance(tol, "tol")
     _, rotation, _ = _axis_angle_rotation(rotation_axis, angle_deg, tol=tol)
     alpha, beta, gamma = _zxz_euler_angles(rotation)
-    theta, phi = inclination_from_normal(boundary_normal, tol=tol)
+    normal = _normalize_direction(boundary_normal, "boundary normal", tol=tol)
+    theta, phi = _inclination_from_unit_normal(normal, tol=tol)
     return np.array([alpha, beta, gamma, theta, phi], dtype=np.float64)
 
 
@@ -738,21 +749,24 @@ def five_dof_from_orientation_matrices(
             "normal_warning_deg must be non-negative."
         )
 
-    P_norm = validate_orientation_matrix(P, "P", tol=tol)
-    Q_norm = validate_orientation_matrix(Q, "Q", tol=tol)
+    P_norm = _validate_orientation_matrix(P, "P", tol=tol)
+    Q_norm = _validate_orientation_matrix(Q, "Q", tol=tol)
     rotation = P_norm.T @ Q_norm
     alpha, beta, gamma = _zxz_euler_angles(rotation)
 
     normal_from_P = P_norm[0]
     if boundary_normal is not None:
-        supplied = normalize_direction(
+        supplied = _normalize_direction(
             boundary_normal,
             "boundary normal",
             tol=tol,
         )
         cosine = float(np.clip(np.dot(normal_from_P, supplied), -1.0, 1.0))
-        discrepancy_deg = math.degrees(math.acos(cosine))
-        if discrepancy_deg > warning_deg:
+        warning_cosine = (
+            math.cos(math.radians(warning_deg)) if warning_deg < 180.0 else -1.0
+        )
+        if cosine < warning_cosine:
+            discrepancy_deg = math.degrees(math.acos(cosine))
             warnings.warn(
                 "Supplied boundary normal differs from P[0] by "
                 f"{discrepancy_deg:.2f} degrees; using P[0] for inclination.",
@@ -760,7 +774,7 @@ def five_dof_from_orientation_matrices(
                 stacklevel=2,
             )
 
-    theta, phi = inclination_from_normal(normal_from_P, tol=tol)
+    theta, phi = _inclination_from_unit_normal(normal_from_P, tol=tol)
     return np.array([alpha, beta, gamma, theta, phi], dtype=np.float64)
 
 
@@ -815,15 +829,12 @@ def orientation_matrices_from_five_dof(
         "ZXZ",
         [alpha, beta, gamma],
     ).as_matrix()
-    left = (
-        Rotation.from_euler("z", phi)
-        * Rotation.from_euler("y", theta)
-    ).as_matrix()
+    left = Rotation.from_euler("ZY", [phi, theta]).as_matrix()
     right = left @ misorientation
 
     return (
-        validate_orientation_matrix(left, "R_left", tol=tol),
-        validate_orientation_matrix(right, "R_right", tol=tol),
+        _validate_orientation_matrix(left, "R_left", tol=tol),
+        _validate_orientation_matrix(right, "R_right", tol=tol),
     )
 
 
@@ -836,5 +847,6 @@ __all__ = [
     "five_dof_from_orientation_matrices",
     "inclination_from_normal",
     "normalize_direction",
+    "orientation_matrices_from_five_dof",
     "validate_orientation_matrix",
 ]
