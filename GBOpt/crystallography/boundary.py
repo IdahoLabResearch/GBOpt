@@ -34,6 +34,7 @@ from .embedding import (
     primitive_metadata,
 )
 from .integer import row_gcd_reduce
+from .orientation import orientation_matrices_from_five_dof
 from .plane import inplane_area_index, plane_null_basis, rotation_preserves_plane
 from .pq import (
     canonicalize_pq_paired,
@@ -237,32 +238,37 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
 
 
 def five_dof_spec_to_embedding(spec: FiveDOFSpec) -> BoundaryEmbedding:
-    """Convert a FiveDOFSpec to a legacy-equivalent approximate embedding.
+    """Convert a validated ``FiveDOFSpec`` to an approximate embedding.
 
-    The five parameters use GBMaker's legacy convention: ``[alpha, beta, gamma, theta,
-    phi]`` where the first three entries are a ZXZ misorientation and the final two
-    entries are boundary inclination rotations about lab y and z. Exactification is
-    intentionally not attempted here; Stage E owns that bounded rationalization path.
+    The boundary adapter translates the validated five-DOF specification into
+    floating-point row-orientation matrices through
+    :func:`orientation_matrices_from_five_dof`, then delegates ``BoundaryEmbedding``
+    construction and final rotation validation to :func:`embedding_from_rotation_rows`.
 
-    :param spec: A validated ``FiveDOFSpec`` instance.
-    :return: ``BoundaryEmbedding`` with ``exact=False``, no P/Q matrices, and
-        ``source="five_dof"``.
+    Exactification is intentionally not attempted here. Five-DOF rationalization into
+    exact integer P/Q matrices belongs to the separate exactification path.
+
+    :param spec: Validated five-DOF boundary specification containing ``[alpha, beta,
+        gamma, theta, phi]`` in radians.
+    :return: Approximate ``BoundaryEmbedding`` with ``P=None``, ``Q=None``,
+        ``exact=False``, ``coherent=False``, and ``source="five_dof"``.
+    :raises BoundarySpecError: If the five-DOF values cannot be translated into proper
+        floating-point orientation matrices.
+    :raises BoundarySpecOrthogonalityError: If the translated left or right rows do not
+        form a proper orientation matrix during embedding construction.
     """
-    params = np.asarray(spec.params, dtype=float)
-    R_mis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
-    R_incl = (
-        Rotation.from_euler("z", params[4])
-        * Rotation.from_euler("y", params[3])
-    ).as_matrix()
+    try:
+        R_left, R_right = orientation_matrices_from_five_dof(spec.params)
+    except CrystallographyValueError as exc:
+        raise BoundarySpecError(
+            f"Invalid five-DOF orientation: {exc}"
+        ) from exc
 
-    return BoundaryEmbedding(
-        P=None,
-        Q=None,
-        R_left=R_incl,
-        R_right=R_incl @ R_mis,
-        exact=False,
-        coherent=False,
+    return embedding_from_rotation_rows(
+        R_left,
+        R_right,
         source="five_dof",
+        coherent=False,
     )
 
 

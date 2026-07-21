@@ -146,7 +146,9 @@ def test_from_boundary_spec_equivalent_exact_specs_build_equivalent_bicrystals(
 # --------------------------------------------------------------------------------------
 
 
-def test_from_boundary_spec_approximate_csl_builds_finite_monatomic_bicrystal(build_gb):
+def test_from_boundary_spec_approximate_csl_builds_finite_incoherent_bicrystal(
+    build_gb
+):
     gb = build_gb(SIGMA5_TILT_APPROX_SPEC, mode="approximate")
 
     assert gb.left_grain.size > 0
@@ -154,7 +156,7 @@ def test_from_boundary_spec_approximate_csl_builds_finite_monatomic_bicrystal(bu
     assert gb.whole_system.size == gb.left_grain.size + gb.right_grain.size
     assert set(gb.whole_system["name"]) == {"Cu"}
     assert np.isfinite(_positions(gb.whole_system)).all()
-    assert gb.inplane_periodic == (True, True)
+    assert gb.inplane_periodic == (False, False)
 
 
 # --------------------------------------------------------------------------------------

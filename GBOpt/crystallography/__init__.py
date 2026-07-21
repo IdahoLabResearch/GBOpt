@@ -18,6 +18,17 @@ from .csl import (
     dsc_basis,
 )
 from .exactification import exactify_five_dof
+from .orientation import (
+    build_mixed_orientations,
+    build_symmetric_tilt_orientations,
+    build_tilt_orientations,
+    build_twist_orientations,
+    five_dof_from_axis_angle,
+    five_dof_from_orientation_matrices,
+    inclination_from_normal,
+    normalize_direction,
+    validate_orientation_matrix,
+)
 from .pq import (
     canonicalize_pq,
     canonicalize_pq_paired,
@@ -44,6 +55,15 @@ __all__ = [
     "csl_from_scaled_rotation",
     "dsc_basis",
     "exactify_five_dof",
+    "build_mixed_orientations",
+    "build_symmetric_tilt_orientations",
+    "build_tilt_orientations",
+    "build_twist_orientations",
+    "five_dof_from_axis_angle",
+    "five_dof_from_orientation_matrices",
+    "inclination_from_normal",
+    "normalize_direction",
+    "validate_orientation_matrix",
     "canonicalize_pq",
     "canonicalize_pq_paired",
     "recover_exact_row_rotation_from_paired_pq",

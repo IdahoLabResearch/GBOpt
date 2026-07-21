@@ -21,6 +21,7 @@ from GBOpt.Utils.integer_linalg import cross_int3, dot_int
 
 from .csl import csl_from_scaled_rotation
 from .integer import as_int_array, integer_det3, row_gcd_reduce
+from .orientation import validate_orientation_matrix
 from .plane import inplane_area_index, inplane_basis_from_csl
 from .pq import canonicalize_pq, canonicalize_pq_paired
 from .reduction import gauss_reduce_2d
@@ -31,23 +32,36 @@ from .rotation import (
 from .types import CrystallographyValueError, InPlaneBasis, ScaledRotation
 
 
-def _as_float_matrix(matrix: np.ndarray) -> np.ndarray:
-    """Return matrix as a float ndarray for numerical rotation operations.
+def _validated_rotation_rows(
+    matrix: np.ndarray,
+    name: str,
+) -> np.ndarray:
+    """Return normalized proper rotation rows with embedding-layer exceptions.
 
-    :param matrix: Input matrix to convert to a float array.
-    :return: Float ndarray view or copy produced by np.asarray.
+    Delegates floating-point row-orientation validation to
+    :func:`GBOpt.crystallography.orientation.validate_orientation_matrix`. This keeps
+    normalization, shape checking, finite-value checking, orthogonality checking, and
+    handedness checking in the orientation module while preserving the exception type
+    expected by boundary-embedding callers.
+
+    :param matrix: Candidate 3 by 3 row-orientation matrix. Rows may have arbitrary
+        nonzero magnitudes but must be finite, mutually orthogonal after normalization,
+        and right-handed.
+    :param name: Human-readable matrix name included in validation error messages.
+    :return: Normalized ``float64`` row-orientation matrix with shape ``(3, 3)``.
+    :raises BoundarySpecOrthogonalityError: If ``matrix`` has the wrong shape, contains
+        non-finite or zero rows, is not orthogonal after row normalization, or is not
+        right-handed.
     """
-    return np.asarray(matrix, dtype=float)
-
-
-def _as_object_int_matrix(matrix: np.ndarray, name: str) -> np.ndarray:
-    """Return matrix as an exact object-dtype integer matrix.
-
-    :param matrix: Input matrix to convert to an object-dtype integer array.
-    :param name: Name used in validation error messages.
-    :return: 3 by 3 exact integer ndarray.
-    """
-    return as_int_array(matrix, (3, 3), name)
+    try:
+        return validate_orientation_matrix(matrix, name)
+    except CrystallographyValueError as exc:
+        message = str(exc)
+        if "right-handed" in message:
+            message = f"{name} is not a proper rotation matrix: {message}"
+        elif "orthogonal" in message:
+            message = f"{name} is not an orthogonal rotation matrix: {message}"
+        raise BoundarySpecOrthogonalityError(message) from exc
 
 
 def _csl_inplane(row_rotation: ScaledRotation, plane_int: np.ndarray) -> InPlaneBasis:
@@ -68,42 +82,6 @@ def _csl_inplane(row_rotation: ScaledRotation, plane_int: np.ndarray) -> InPlane
         return inplane_basis_from_csl(csl.basis_hnf, tuple(int(x) for x in plane_int))
     except CrystallographyValueError as exc:
         raise BoundarySpecError(str(exc)) from exc
-
-
-def _normalize_rotation_rows(matrix: np.ndarray) -> np.ndarray:
-    """Return a copy of M with each row normalized to unit length.
-
-    :param matrix: 3 by 3 float matrix whose rows are to be normalized.
-    :return: 3 by 3 float matrix with unit-length rows.
-    :raises BoundarySpecError: If any row is the zero row (norm == 0).
-    """
-    matrix_float = _as_float_matrix(matrix)
-    norms = np.linalg.norm(matrix_float, axis=1, keepdims=True)
-    if np.any(norms == 0):
-        raise BoundarySpecError(f"Zero row present in matrix: {matrix}")
-    return matrix_float / norms
-
-
-def _assert_proper_rotation_rows(R_left: np.ndarray, R_right: np.ndarray) -> None:
-    """Raise if either rotation matrix is not a proper rotation.
-
-    :param R_left: Left-grain rotation matrix.
-    :param R_right: Right-grain rotation matrix.
-    :raises BoundarySpecOrthogonalityError: If either matrix is not orthogonal or has
-        determinant not equal to ``1``.
-    """
-    identity = np.eye(3)
-    for name, R in (("R_left", R_left), ("R_right", R_right)):
-        orthogonal = np.allclose(R @ R.T, identity, atol=1e-10)
-        proper = abs(np.linalg.det(R) - 1) < 1e-10
-        if not orthogonal:
-            raise BoundarySpecOrthogonalityError(
-                f"{name} is not an orthogonal rotation matrix (R @ R.T != I)."
-            )
-        if not proper:
-            raise BoundarySpecOrthogonalityError(
-                f"{name} is not a proper rotation matrix (det(R) != 1)."
-            )
 
 
 def primitive_metadata(
@@ -130,8 +108,8 @@ def primitive_metadata(
         and boundary plane. Keyword argument, required.
     :param plane: Primitive boundary-plane normal as a length-3 integer array. Keyword
         argument, required.
-    :param rotation_denominator: Denominator ``N`` of the exact scaled rotation
-        ``R = M / N`` associated with this boundary. Keyword argument, required.
+    :param rotation_denominator: Denominator ``N`` of the exact scaled rotation ``R = M
+        / N`` associated with this boundary. Keyword argument, required.
     :param input_area_index: In-plane area index of caller-provided ``P`` rows, when
         available. Must be an integer multiple of ``primitive_area_index`` when
         supplied. Keyword argument, optional, defaults to ``None``.
@@ -140,9 +118,9 @@ def primitive_metadata(
         not required to be related by divisibility to ``primitive_area_index``. Keyword
         argument, optional, defaults to ``None``.
     :return: Boundary metadata attached to ``BoundaryEmbedding``.
-    :raises BoundarySpecError: If an area index is not positive, if
-        ``input_area_index`` is supplied but is not an integer multiple of
-        ``primitive_area_index``, or if metadata construction fails validation.
+    :raises BoundarySpecError: If an area index is not positive, if ``input_area_index``
+        is supplied but is not an integer multiple of ``primitive_area_index``, or if
+        metadata construction fails validation.
     """
     if basis_mode not in ("primitive", "supplied"):
         raise BoundarySpecError(
@@ -192,7 +170,7 @@ def embedding_from_pq(
     Q_canon: np.ndarray,
     *,
     source: str,
-    metadata=None,
+    metadata: PrimitiveCellMetadata | None = None,
 ) -> BoundaryEmbedding:
     """Build a ``BoundaryEmbedding`` from canonical P and Q matrices.
 
@@ -205,11 +183,12 @@ def embedding_from_pq(
         no metadata is available. Keyword argument, optional, defaults to ``None``.
     :return: ``BoundaryEmbedding`` with ``exact=True``, ``coherent=True``, and
         ``source`` as supplied. ``R_left`` and ``R_right`` are constructed by
-        normalizing each row of ``P_canon`` and ``Q_canon`` to unit length respectively.
+        normalizing and validating the rows of ``P_canon`` and ``Q_canon``.
+    :raises BoundarySpecOrthogonalityError: If either matrix has malformed, non-finite,
+        zero, non-orthogonal, or left-handed rows.
     """
-    R_left = _normalize_rotation_rows(P_canon)
-    R_right = _normalize_rotation_rows(Q_canon)
-    _assert_proper_rotation_rows(R_left, R_right)
+    R_left = _validated_rotation_rows(P_canon, "R_left")
+    R_right = _validated_rotation_rows(Q_canon, "R_right")
     return BoundaryEmbedding(
         P=P_canon,
         Q=Q_canon,
@@ -240,14 +219,13 @@ def embedding_from_rotation_rows(
         the returned ``BoundaryEmbedding``. Keyword argument, required.
     :param coherent: Whether the approximate embedding represents a coherent boundary
         construction. Keyword argument, optional, defaults to ``True``.
-    :return: Approximate ``BoundaryEmbedding`` with ``P=None``, ``Q=None``, and
-        ``exact=False``.
-    :raises BoundarySpecOrthogonalityError: If either rotation matrix is not orthogonal
-        or has determinant not equal to ``1``.
+    :return: Approximate ``BoundaryEmbedding`` with normalized ``R_left`` and
+        ``R_right``, ``P=None``, ``Q=None``, and ``exact=False``.
+    :raises BoundarySpecOrthogonalityError: If either matrix has malformed, non-finite,
+        zero, non-orthogonal, or left-handed rows.
     """
-    R_left = _as_float_matrix(R_left)
-    R_right = _as_float_matrix(R_right)
-    _assert_proper_rotation_rows(R_left, R_right)
+    R_left = _validated_rotation_rows(R_left, "R_left")
+    R_right = _validated_rotation_rows(R_right, "R_right")
 
     return BoundaryEmbedding(
         P=None,
@@ -391,9 +369,8 @@ def orthogonal_embedding_from_row_rotation_and_plane(
     # Validate the returned orientation frames before computing optional metadata
     # from those rows. This preserves BoundarySpecOrthogonalityError for malformed
     # canonical rows.
-    R_left = _normalize_rotation_rows(P_canon)
-    R_right = _normalize_rotation_rows(Q_canon)
-    _assert_proper_rotation_rows(R_left, R_right)
+    R_left = _validated_rotation_rows(P_canon, "R_left")
+    R_right = _validated_rotation_rows(Q_canon, "R_right")
 
     orientation_area_index = inplane_area_index(P_canon)
 
