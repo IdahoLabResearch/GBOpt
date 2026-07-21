@@ -13,9 +13,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from olmsted2009_boundaries import BOUNDARIES as OLMSTED_2009_BOUNDARIES
 from scipy.spatial import KDTree
-from zhang2021_boundaries import BOUNDARIES as ZHANG_2021_BOUNDARIES
 
 from GBOpt.Atom import Atom, AtomValueError
 from GBOpt.BoundarySpec import CSLApproxSpec, CSLExactSpec, PQSpec
@@ -32,6 +30,12 @@ from GBOpt.GBMaker import (
     wrap_reduced_coordinate,
 )
 from GBOpt.UnitCell import UnitCell
+from tests.data.olmsted_2009_fcc_gb_energies import (
+    BOUNDARIES as OLMSTED_2009_BOUNDARIES,
+)
+from tests.data.zhang_2022_uo2_ceo2_gb_energies import (
+    BOUNDARIES as ZHANG_2022_BOUNDARIES,
+)
 
 # --------------------------------------------------------------------------------------
 # Shared helpers
@@ -1717,7 +1721,7 @@ class TestGBMakerGenerateGrain(unittest.TestCase):
         )
 
     def _periodic_inplane_cases(self):
-        mixed_entry = ZHANG_2021_BOUNDARIES[
+        mixed_entry = ZHANG_2022_BOUNDARIES[
             "sigma5_100_2_1_1_2bar_1bar_1bar_mixed"
         ]
 
@@ -2183,7 +2187,7 @@ class TestGBMakerGenerateGB(unittest.TestCase):
         for boundary_name in case_names:
             with self.subTest(boundary=boundary_name):
                 misorientation = np.asarray(
-                    ZHANG_2021_BOUNDARIES[boundary_name]["misorientation"],
+                    ZHANG_2022_BOUNDARIES[boundary_name]["misorientation"],
                     dtype=float,
                 )
                 probe = GBMaker(
@@ -2891,7 +2895,7 @@ ZHANG_2021_EXACT_CASES = tuple(
         _zhang_basis_mode(entry),
         id=name,
     )
-    for name, entry in ZHANG_2021_BOUNDARIES.items()
+    for name, entry in ZHANG_2022_BOUNDARIES.items()
 )
 
 OLMSTED_2009_EXACT_CASES = tuple(

@@ -1,9 +1,7 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
-"""Zhang 2021 UO2 grain boundary dataset for GBOpt tests.
+"""Zhang 2022 UO2 grain boundary dataset for GBOpt tests.
 
-Static reference data extracted from Zhang et al., J. Am. Ceram. Soc. (2021). The row
-table preserves the public ``BOUNDARIES`` dictionary while keeping repeated schema
-fields in one reconstruction block.
+Static reference data extracted from Zhang et al., J. Am. Ceram. Soc. (2022).
 """
 
 from __future__ import annotations
@@ -1460,7 +1458,7 @@ BOUNDARIES: dict[str, dict] = {
         "Q": Q,
         "ref_energy_J_m2": _reference_energy(uo2_basak, ceo2_gotte),
         "zhang_uo2_energy": zhang_uo2_energy,
-        "source": "Zhang2021",
+        "source": "Zhang2022",
     }
     for (
         name,

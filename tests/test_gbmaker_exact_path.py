@@ -10,6 +10,7 @@ from GBOpt.Atom import Atom
 from GBOpt.BoundarySpec import CSLExactSpec, PQSpec
 from GBOpt.crystallography import pq_spec_to_embedding
 from GBOpt.GBMaker import GBMaker
+from tests.data.zhang_2022_uo2_ceo2_gb_energies import BOUNDARIES
 
 # --------------------------------------------------------------------------------------
 # Shared boundary specifications and material data
@@ -406,13 +407,8 @@ def test_vacuum_zero_preserves_rocksalt_stoichiometry_in_each_grain_and_system(
 
 def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometry():
     """Cover the external fluorite case that previously leaked basis offsets in x."""
-    zhang_boundaries = pytest.importorskip(
-        "zhang2021_boundaries",
-        reason="optional Zhang boundary dataset is not installed",
-    )
-    entry = zhang_boundaries.BOUNDARIES[
-        "sigma53_100_0_7_2bar_0_2bar_7_STGB"
-    ]
+
+    entry = BOUNDARIES["sigma53_100_0_7_2bar_0_2bar_7_STGB"]
     spec = PQSpec(P=entry["P"], Q=entry["Q"])
 
     with pytest.warns(UserWarning, match=r"Recommended repeat factor is at least 2\."):

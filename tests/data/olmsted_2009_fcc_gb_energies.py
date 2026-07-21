@@ -2,8 +2,6 @@
 """Olmsted 2009 fcc grain boundary dataset for GBOpt tests.
 
 Static reference data extracted from Olmsted et al., Acta Mater. 57 (2009) 3694-3703.
-The compact rows below preserve the public ``BOUNDARIES`` dictionary used by tests while
-avoiding repeated field names for every boundary entry.
 """
 
 from __future__ import annotations
