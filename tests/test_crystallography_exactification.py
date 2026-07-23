@@ -5,6 +5,7 @@
 import numpy as np
 import pytest
 
+import GBOpt.crystallography.exactification as exactification_module
 from GBOpt.BoundarySpec import BoundarySpecError, PQSpec
 from GBOpt.crystallography.boundary import pq_spec_to_embedding
 from GBOpt.crystallography.exactification import (
@@ -240,7 +241,10 @@ def test_exactify_five_dof_rejects_sigma_above_limit():
 def test_exactify_five_dof_rejects_small_max_denominator():
     with pytest.raises(
         CrystallographyValueError,
-        match="could not be exactified within max_denominator=2",
+        match=(
+            r"max_denominator=2.*angle_tol=1e-09.*"
+            r"angular error"
+        ),
     ):
         exactify_five_dof(SIGMA5_PARAMS, max_denominator=2)
 
@@ -267,11 +271,6 @@ def test_exactify_five_dof_rejects_inexact_boundary_plane():
         )
 
 
-def test_exactify_five_dof_enforces_exact_cell_size_limit():
-    with pytest.raises(BoundarySpecError, match="exceeds max_exact_atoms"):
-        exactify_five_dof(SIGMA5_PARAMS, max_exact_atoms=4)
-
-
 def test_exactify_five_dof_rejects_non_cubic_lattice_metric():
     with pytest.raises(
         CrystallographyNotImplementedError,
@@ -283,7 +282,16 @@ def test_exactify_five_dof_rejects_non_cubic_lattice_metric():
 @pytest.mark.parametrize(
     ("keyword", "value"),
     [
-        pytest.param("max_exact_atoms", 0, id="nonpositive-max-exact-atoms"),
+        pytest.param(
+            "max_primitive_area_index",
+            0,
+            id="nonpositive-max-primitive-area-index",
+        ),
+        pytest.param(
+            "max_pq_determinant",
+            0,
+            id="nonpositive-max-pq-determinant",
+        ),
         pytest.param("max_sigma", True, id="boolean-max-sigma"),
         pytest.param("max_denominator", 1.5, id="noninteger-max-denominator"),
         pytest.param("angle_tol", 0.0, id="nonpositive-angle-tolerance"),
@@ -307,3 +315,90 @@ def test_exactify_five_dof_zero_parameters_return_identity_pq():
 
     np.testing.assert_array_equal(P, expected)
     np.testing.assert_array_equal(Q, expected)
+
+
+def test_exactify_five_dof_enforces_primitive_area_limit():
+    with pytest.raises(
+        BoundarySpecError,
+        match="max_primitive_area_index=4",
+    ):
+        exactify_five_dof(
+            SIGMA5_PARAMS,
+            max_primitive_area_index=4,
+        )
+
+
+def test_exactify_five_dof_enforces_pq_determinant_limit():
+    with pytest.raises(
+        BoundarySpecError,
+        match="max_pq_determinant=24",
+    ):
+        exactify_five_dof(
+            SIGMA5_PARAMS,
+            max_pq_determinant=24,
+        )
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected"),
+    [
+        pytest.param(
+            [1.0e308, 1.0e308, 0.0],
+            [1, 1, 0],
+            id="large-finite-components",
+        ),
+        pytest.param(
+            [1.0e-320, 0.0, 0.0],
+            [1, 0, 0],
+            id="subnormal-components",
+        ),
+    ],
+)
+def test_rationalize_direction_is_scale_safe(direction, expected):
+    result = _rationalize_direction(
+        direction,
+        max_denominator=100,
+        tol=1.0e-12,
+        name="direction",
+    )
+
+    np.testing.assert_array_equal(result, expected)
+
+
+def test_exactify_five_dof_accepts_candidate_within_requested_angle_tolerance():
+    params = SIGMA5_PARAMS.copy()
+    params[0] += 1.0e-8
+
+    P, Q = exactify_five_dof(
+        params,
+        max_denominator=3,
+        angle_tol=1.0e-7,
+    )
+
+    expected_P, expected_Q = exactify_five_dof(SIGMA5_PARAMS)
+    np.testing.assert_array_equal(P, expected_P)
+    np.testing.assert_array_equal(Q, expected_Q)
+
+
+def test_exactify_five_dof_forwards_pq_determinant_limit_to_final_pairing(
+    monkeypatch,
+):
+    original_pairing = exactification_module._paired_pq_from_direction_rows
+    received_kwargs = {}
+
+    def record_pairing(*args, **kwargs):
+        received_kwargs.update(kwargs)
+        return original_pairing(*args, **kwargs)
+
+    monkeypatch.setattr(
+        exactification_module,
+        "_paired_pq_from_direction_rows",
+        record_pairing,
+    )
+
+    exactification_module.exactify_five_dof(
+        SIGMA5_PARAMS,
+        max_pq_determinant=100,
+    )
+
+    assert received_kwargs["max_pq_determinant"] == 100

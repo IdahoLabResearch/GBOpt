@@ -153,19 +153,20 @@ def canonicalize_pq_paired(
 
     Corresponding rows may be reduced by different GCD factors. Consequently, the
     returned matrices preserve paired directions but are not guaranteed to satisfy ``Q
-    == P @ R`` for one exact scaled rotation. Use
-    :func:`recover_exact_row_rotation_from_paired_pq` only when the input row scales are
-    known to encode an exact algebraic P/Q pair.
+    == P @ R`` for one exact scaled rotation. Exact rotation recovery should only be
+    attempted when the input row scales are known to encode an exact algebraic P/Q pair.
 
-    This function does not canonicalize the full physical grain-boundary equivalence
-    class; grain exchange, crystal symmetry, and translation equivalences are not
+    This operation does not canonicalize the full physical grain-boundary equivalence
+    class. Grain exchange, crystal symmetry, and translation equivalences are not
     considered.
 
     :param P: 3 by 3 integer-valued reference-grain orientation rows.
-    :param Q: 3 by 3 integer-valued orientation rows corresponding row-by-row with
+    :param Q: 3 by 3 integer-valued orientation rows corresponding row by row with
         ``P``.
     :return: Canonical ``(P, Q)`` directional representations as object-dtype integer
         matrices.
+    :raises CrystallographyValueError: If either matrix fails exact integer validation
+        or a canonical matrix contains a zero row.
     """
     P_int = as_int_array(P, (3, 3), "P")
     Q_int = as_int_array(Q, (3, 3), "Q")

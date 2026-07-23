@@ -451,16 +451,44 @@ def test_csl_exact_spec_to_embedding_twist_rotations_derive_from_final_pq():
 
 
 def test_csl_exact_spec_to_embedding_large_denominator_stays_exact():
-    spec = CSLExactSpec(axis=[128, 1, 1], plane=[1, 0, 0], quat=[128, 128, 1, 1])
-    emb = csl_exact_spec_to_embedding(spec, max_exact_atoms=10**9)
+    spec = CSLExactSpec(
+        axis=[128, 1, 1],
+        plane=[1, 0, 0],
+        quat=[128, 128, 1, 1],
+    )
+
+    emb = csl_exact_spec_to_embedding(
+        spec,
+        max_primitive_area_index=10**9,
+        max_pq_determinant=10**9,
+    )
+
     assert emb.exact is True
     assert emb.P is not None
     assert emb.Q is not None
-    for R in (emb.R_left, emb.R_right):
-        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
-    np.testing.assert_array_equal(emb.P.astype(int), np.eye(3, dtype=int))
-    expected_Q = np.array([[16383, 0, 256], [256, 0, -16383], [0, 1, 0]], dtype=int)
-    np.testing.assert_array_equal(emb.Q.astype(int), expected_Q)
+
+    for rotation in (emb.R_left, emb.R_right):
+        np.testing.assert_allclose(
+            rotation @ rotation.T,
+            np.eye(3),
+            atol=1e-10,
+        )
+
+    np.testing.assert_array_equal(
+        emb.P.astype(int),
+        np.eye(3, dtype=int),
+    )
+    np.testing.assert_array_equal(
+        emb.Q.astype(int),
+        np.array(
+            [
+                [16383, 0, 256],
+                [256, 0, -16383],
+                [0, 1, 0],
+            ],
+            dtype=int,
+        ),
+    )
 
 
 # --------------------------------------------------------------------------------------

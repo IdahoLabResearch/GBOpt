@@ -451,6 +451,32 @@ def test_convert_rejects_boolean_sigma(capsys):
     assert "sigma must not be boolean" in stderr
 
 
+def test_convert_pq_to_five_dof_enforces_max_pq_determinant(capsys):
+    source = {
+        # fmt:off
+        "format": "pq",
+        "P": [[0, 0, 1], [3, 1, 0], [-1, 3, 0]],
+        "Q": [[0, 0, 1], [3, -1, 0], [1, 3, 0]],
+        "basis_mode": "supplied",
+        # fmt:on
+    }
+
+    stderr = _run_main_error(
+        capsys,
+        "convert",
+        "--to",
+        "five_dof",
+        "--max-pq-determinant",
+        9,
+        "--input-json",
+        json.dumps(source),
+    )
+
+    assert "Exact P/Q determinant exceeds max_pq_determinant=9" in stderr
+    assert "|det(P)|=10" in stderr
+    assert "|det(Q)|=10" in stderr
+
+
 # --------------------------------------------------------------------------------------
 # Input sources and command errors
 # --------------------------------------------------------------------------------------
@@ -493,15 +519,7 @@ def test_convert_rejects_malformed_json(capsys):
     "args",
     [
         pytest.param(
-            (
-                "exactify",
-                "--params",
-                0,
-                0,
-                0,
-                0,
-                0,
-            ),
+            ("exactify", "--params", 0, 0, 0, 0, 0),
             id="exactify-command",
         ),
         pytest.param(

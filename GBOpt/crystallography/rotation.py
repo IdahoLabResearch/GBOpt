@@ -80,20 +80,23 @@ def _scaled_row_images(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply a row-convention scaled rotation to exactly three integer rows.
 
-    This is the batched companion to ``scaled_row_image`` for 3 by 3 row matrices. It
-    validates ``rotation`` once, then applies ``row @ rotation.matrix /
-    rotation.denominator`` to each row of ``rows``. When a row image divides evenly by
-    the denominator, the exact integer image is returned. Otherwise, the corresponding
-    ``allow_inexact`` flag controls whether the primitive numerator direction is
+    This batched companion to ``scaled_row_image`` validates the rotation once and then
+    applies ``row @ rotation.matrix / rotation.denominator`` to each input row. Exactly
+    divisible images are returned directly. For an inexact image, the corresponding
+    ``allow_inexact`` flag determines whether the primitive numerator direction is
     returned or an exception is raised.
 
-    :param rows: 3 by 3 integer-valued row matrix. Each row is transformed independently
-        under ``rotation``.
+    :param rows: 3 by 3 integer-valued row matrix whose rows are transformed
+        independently.
     :param rotation: Row-convention scaled rotation to apply.
-    :param allow_inexact: Three Boolean flags, one per row.
-    :return: Three object-dtype integer arrays containing the transformed row images in
-        row order.
-    :raises CrystallographyDivisibilityError: If any row image is not exactly
+    :param allow_inexact: Three Boolean flags controlling whether each respective row
+        may return a primitive numerator direction instead of an exactly divisible
+        image. Keyword argument.
+    :return: Three object-dtype integer arrays containing the transformed rows in input
+        order.
+    :raises CrystallographyValueError: If ``rows`` or ``rotation`` fails exact
+        validation.
+    :raises CrystallographyDivisibilityError: If a row image is not exactly
         integer-valued and its corresponding ``allow_inexact`` flag is ``False``.
     """
     int_rows = as_int_array(rows, (len(rows), 3), "rows")

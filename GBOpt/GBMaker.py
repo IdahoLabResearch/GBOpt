@@ -27,6 +27,10 @@ from GBOpt.crystallography import (
     five_dof_spec_to_embedding,
     pq_spec_to_embedding,
 )
+from GBOpt.crystallography._limits import (
+    DEFAULT_MAX_PQ_DETERMINANT,
+    DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+)
 from GBOpt.crystallography.types import CrystallographyError
 from GBOpt.gbmaker_supercell import (
     build_supercell_matrix,
@@ -550,6 +554,8 @@ class GBMaker:
         boundary: PQSpec | CSLExactSpec | CSLApproxSpec | FiveDOFSpec,
         mode: str = "exact",
         *,
+        max_primitive_area_index: int = DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+        max_pq_determinant: int = DEFAULT_MAX_PQ_DETERMINANT,
         gb_thickness: float = 0.0,
         repeat_factor: int | Sequence[int] = 2,
         x_dim_min: float = 50,
@@ -560,84 +566,106 @@ class GBMaker:
         mismatch_max_cells: int = 50,
         strain_grain: str = "both",
     ) -> GBMaker:
-        """Build a GBMaker from a boundary-spec dataclass.
+        """Build a grain boundary from a boundary-spec dataclass.
 
-        Supported boundary types and currently implemented construction modes are:
+        The supported boundary types and construction behavior are:
 
-        ============= =========== ====================== ============
-        Boundary type exact       approximate            prefer_exact
-        ============= =========== ====================== ============
-        PQSpec        yes         planned; raises        yes
-        CSLExactSpec  yes         planned; raises        yes
-        CSLApproxSpec no; raises  yes                    warn -> yes
-        FiveDOFSpec   cubic CSL   yes                    warn -> yes
-        ============= =========== ====================== ============
+        ================ ================ ================== =========================
+        Boundary type    ``exact``        ``approximate``    ``prefer_exact``
+        ================ ================ ================== =========================
+        ``PQSpec``       exact P/Q        not implemented    exact P/Q
+        ``CSLExactSpec`` exact CSL        not implemented    exact CSL
+        ``CSLApproxSpec`` rejected        approximate        warning, then approximate
+        ``FiveDOFSpec``  exactify or fail approximate        exactify; warning fallback
+        ================ ================ ================== =========================
 
-        When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is set
-        from ``repeat_factor`` and the larger left/right in-plane period along each
-        in-plane axis. Exact construction requires the resulting box length to be
-        commensurate with both grains' in-plane periods; otherwise a
-        ``GBMakerValueError`` is raised.
+        For ``FiveDOFSpec``, exact construction is currently available only when the
+        floating-point boundary can be rationalized into a supported cubic CSL within
+        the configured exactification bounds and tolerances. Under ``mode="exact"``,
+        failure is reported as an exception. Under ``mode="prefer_exact"``, failure
+        emits a warning and uses the approximate orientation path.
 
-        When ``mismatch_tol`` is provided, GBMaker searches for integer repeat pairs
-        ``n_left*d_left ~= n_right*d_right`` within the requested tolerance, sets the
-        shared box from the chosen pair, and applies the requested lab-frame in-plane
-        strain policy. Exact construction raises ``GBMakerValueError`` if no
-        commensurate pair is found within ``mismatch_max_cells``. Approximate
-        construction emits a warning and falls back to the legacy repeat-factor box if
-        no commensurate pair is found.
+        ``max_primitive_area_index`` and ``max_pq_determinant`` are separate exact-cell
+        limits. The former bounds the minimal in-plane CSL topology where primitive
+        reconstruction is performed. It does not apply to
+        ``PQSpec(basis_mode="supplied")``. The latter bounds the absolute determinants
+        of the exact P/Q matrices used for grain construction. Both arguments are
+        validated as positive integers on every call, although they affect only
+        exact-construction paths.
 
-        :param a0: Crystal lattice parameter (Angstroms).
-        :param structure: Crystal structure string.
-        :param atom_types: Atom type string or tuple of atom type strings.
-        :param boundary: A boundary-spec dataclass. Currently supported values are
-            ``PQSpec``, ``CSLExactSpec``, ``CSLApproxSpec``, or ``FiveDOFSpec``.
-        :param mode: Construction mode - ``"exact"`` uses exact integer P/Q matrices
-            (requires ``PQSpec`` or ``CSLExactSpec``); ``"approximate"`` uses
-            floating-point rotation matrices (required for ``CSLApproxSpec`` and
-            ``FiveDOFSpec``). ``"prefer_exact"`` uses exact construction when available
-            and warns before falling back to approximate construction otherwise.
-            Optional, defaults to ``"exact"``.
-        :param gb_thickness: Width of the GB region (Angstroms). Keyword parameter,
-            optional, defaults tp ``0.0``.
-        :param repeat_factor: In-plane repeat factor or repeat factors. A single integer
-            applies to both in-plane axes; a two-value sequence applies to y and z
-            respectively. Keyword parameter, optional, defaults to ``2``.
-        :param x_dim_min: Minimum  size of one grain in the x dimension (Angstroms).
-            Keyword parameter, optional, defaults to ``50``.
-        :param vacuum: Vacuum thickness around the grains the x dimension (Angstroms).
-            Keyword parameter, optional, defaults to ``10``.
-        :param interaction_distance: Maximum atom interaction distance (Angstroms).
-            Keyword parameter, optional, defaults to ``15.0``.
-        :param gb_id: Grain boundary identifier. Keyword parameter, optional, defaults
-            to ``1``.
-        :param mismatch_tol: Maximum allowed relative mismatch for commensurate in-plane
-            repeat search. ``None`` disables mismatch accommodation. For example,
-            ``0.005`` permits 0.5% mismatch. Keyword parameter, optional, defaults to
-            ``None``.
+        When ``mismatch_tol`` is ``None``, the shared in-plane simulation box is derived
+        from ``repeat_factor`` and the larger left/right period along each in-plane
+        axis. Exact construction requires that box to be commensurate with both grains.
+
+        When ``mismatch_tol`` is provided, integer repeat pairs satisfying ``n_left *
+        d_left ~= n_right * d_right`` are searched up to ``mismatch_max_cells``. The
+        resulting lengths are reconciled according to ``strain_grain``. Exact
+        construction fails when no admissible pair exists; approximate construction
+        warns and falls back to the repeat-factor box.
+
+        :param a0: Crystal lattice parameter in Angstroms.
+        :param structure: Crystal structure name. Supported values are ``"fcc"``,
+            ``"bcc"``, ``"sc"``, ``"diamond"``, ``"fluorite"``, ``"rocksalt"``, and
+            ``"zincblende"``.
+        :param atom_types: Atom type string or tuple of atom type strings accepted by
+            ``UnitCell``.
+        :param boundary: Boundary specification to construct. Supported values are
+            ``PQSpec``, ``CSLExactSpec``, ``CSLApproxSpec``, and ``FiveDOFSpec``.
+        :param mode: Construction policy: ``"exact"``, ``"approximate"``, or
+            ``"prefer_exact"``. Optional, defaults to ``"exact"``.
+        :param max_primitive_area_index: Maximum permitted minimal in-plane CSL area
+            index for exact primitive reconstruction. This limit does not apply to
+            supplied-mode P/Q embeddings. Keyword argument, optional, defaults to
+            ``10000``.
+        :param max_pq_determinant: Maximum permitted absolute determinant of each exact
+            P/Q matrix used for construction. Keyword argument, optional, defaults to
+            ``10000``.
+        :param gb_thickness: Width of the grain-boundary region in Angstroms. Keyword
+            argument, optional, defaults to ``0.0``.
+        :param repeat_factor: In-plane repeat factor. A single integer applies to both
+            in-plane axes; a two-value sequence applies to y and z respectively. Keyword
+            argument, optional, defaults to ``2``.
+        :param x_dim_min: Minimum size of one grain along x in Angstroms. Keyword
+            argument, optional, defaults to ``50``.
+        :param vacuum: Vacuum thickness around the bicrystal along x in Angstroms.
+            Keyword argument, optional, defaults to ``10``.
+        :param interaction_distance: Maximum atom interaction distance in Angstroms.
+            In-plane dimensions are enlarged when necessary to satisfy twice this
+            distance. Keyword argument, optional, defaults to ``15.0``.
+        :param gb_id: Grain-boundary identifier. Keyword argument, optional, defaults to
+            ``1``.
+        :param mismatch_tol: Maximum permitted relative mismatch for the in-plane
+            commensurate-repeat search. ``None`` disables mismatch accommodation. For
+            example, ``0.005`` permits 0.5 percent mismatch. Keyword argument, optional,
+            defaults to ``None``.
         :param mismatch_max_cells: Maximum repeat count allowed for either grain in each
-            one-dimensional commensurability search. Keyword parameter, optional,
+            one-dimensional commensurability search. Keyword argument, optional,
             defaults to ``50``.
-        :param strain_grain: Grain strain policy used when mismatch accommodation is
-            active. ``"both"`` sets each in-plane box length to the average of the left
-            and right unstrained lengths; ``"left"`` preserves the right-grain length
-            and strains the left grain; ``"right"`` preserves the left-grain length and
-            strains the right grain. Ignored when ``mismatch_tol`` is ``None``. Keyword
-            parameter, optional, defaults to ``"both"``.
-        :return: Fully initialized GBMaker instance.
-        :raises BoundarySpecError: If the requested construction is incompatible with
-            the supplied boundary-spec type, such as ``CSLApproxSpec`` with
-            ``mode="exact"``, or if boundary-spec conversion fails.
-        :raises GBMakerValueError: If ``mode`` is not a string, if ``mismatch_tol``,
-            ``mismatch_max_cells``, or ``strain_grain`` is invalid, or if exact
-            construction cannot produce a commensurate in-plane box.
-        :raises NotImplementedError: If the requested boundary-spec type or construction
-            mode is planned for the boundary-spec API but is not yet implemented.
+        :param strain_grain: In-plane strain policy when mismatch accommodation is
+            active. ``"both"`` uses the average unstrained length, ``"left"`` preserves
+            the right-grain length, and ``"right"`` preserves the left-grain length.
+            Ignored when ``mismatch_tol`` is ``None``. Keyword argument, optional,
+            defaults to ``"both"``.
+        :return: Fully initialized ``GBMaker`` instance.
+        :raises BoundarySpecError: If the requested mode is incompatible with the
+            boundary type, exact boundary conversion or exactification fails, an
+            exact-cell limit is exceeded, or another boundary-spec construction error
+            occurs.
+        :raises NotImplementedError: If the boundary type is unsupported or the
+            requested type/mode combination is recognized but not implemented.
         """
         mode = cls.__validate_boundary_mode(mode)
         mismatch_tol = cls.__validate_mismatch_tol(mismatch_tol)
         mismatch_max_cells = cls.__validate_mismatch_max_cells(mismatch_max_cells)
         strain_grain = cls.__validate_strain_grain(strain_grain)
+        max_primitive_area_index = cls.__validate_exact_limit(
+            max_primitive_area_index,
+            "max_primitive_area_index",
+        )
+        max_pq_determinant = cls.__validate_exact_limit(
+            max_pq_determinant,
+            "max_pq_determinant",
+        )
 
         if isinstance(boundary, PQSpec):
             if mode == "approximate":
@@ -645,7 +673,11 @@ class GBMaker:
                     f"Construction mode '{mode}' is not yet supported for PQSpec; "
                     f"use mode='exact' or mode='prefer_exact'."
                 )
-            embedding = pq_spec_to_embedding(boundary)
+            embedding = pq_spec_to_embedding(
+                boundary,
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
+            )
 
         elif isinstance(boundary, CSLExactSpec):
             if mode == "approximate":
@@ -653,7 +685,11 @@ class GBMaker:
                     f"Construction mode '{mode}' is not yet supported for CSLExactSpec; "
                     f"use mode='exact' or mode='prefer_exact'."
                 )
-            embedding = csl_exact_spec_to_embedding(boundary)
+            embedding = csl_exact_spec_to_embedding(
+                boundary,
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
+            )
 
         elif isinstance(boundary, CSLApproxSpec):
             if mode == "exact":
@@ -676,17 +712,27 @@ class GBMaker:
 
             if mode == "exact":
                 try:
-                    P, Q = exactify_five_dof(params)
+                    P, Q = exactify_five_dof(
+                        params,
+                        max_primitive_area_index=max_primitive_area_index,
+                        max_pq_determinant=max_pq_determinant,
+                    )
                 except CrystallographyError as exc:
                     raise BoundarySpecError(str(exc)) from exc
 
                 embedding = pq_spec_to_embedding(
-                    PQSpec(P=P, Q=Q, basis_mode="primitive")
+                    PQSpec(P=P, Q=Q, basis_mode="primitive"),
+                    max_primitive_area_index=max_primitive_area_index,
+                    max_pq_determinant=max_pq_determinant,
                 )
 
             elif mode == "prefer_exact":
                 try:
-                    P, Q = exactify_five_dof(params)
+                    P, Q = exactify_five_dof(
+                        params,
+                        max_primitive_area_index=max_primitive_area_index,
+                        max_pq_determinant=max_pq_determinant,
+                    )
                 except (BoundarySpecError, CrystallographyError) as exc:
                     warnings.warn(
                         "FiveDOFSpec exactification failed; falling back to "
@@ -697,7 +743,9 @@ class GBMaker:
                     embedding = five_dof_spec_to_embedding(boundary)
                 else:
                     embedding = pq_spec_to_embedding(
-                        PQSpec(P=P, Q=Q, basis_mode="primitive")
+                        PQSpec(P=P, Q=Q, basis_mode="primitive"),
+                        max_primitive_area_index=max_primitive_area_index,
+                        max_pq_determinant=max_pq_determinant,
                     )
 
             else:
@@ -826,6 +874,25 @@ class GBMaker:
             )
 
         return value
+
+    @staticmethod
+    def __validate_exact_limit(value: object, name: str) -> int:
+        """Return a validated positive exact-construction limit."""
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value,
+            (int, np.integer),
+        ):
+            raise GBMakerValueError(
+                f"{name} must be a positive integer; got {value!r}."
+            )
+
+        limit = int(value)
+        if limit <= 0:
+            raise GBMakerValueError(
+                f"{name} must be a positive integer; got {value!r}."
+            )
+
+        return limit
 
     @staticmethod
     def __reduce_integer_row(row: np.ndarray) -> np.ndarray:

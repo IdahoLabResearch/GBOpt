@@ -1,5 +1,4 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
-from typing import Any
 
 import numpy as np
 import pytest
@@ -9,19 +8,25 @@ from GBOpt.BoundarySpec import (
     BoundaryEmbedding,
     BoundarySpecError,
     BoundarySpecOrthogonalityError,
+    PrimitiveCellMetadata,
 )
+from GBOpt.crystallography.csl import csl_from_scaled_rotation
 from GBOpt.crystallography.embedding import (
+    _exact_embedding_from_precomputed_csl,
     _paired_pq_from_direction_rows,
+    _validated_exact_orientation_rows,
     embedding_from_pq,
     embedding_from_rotation_rows,
     exact_embedding_from_row_rotation_and_plane,
     orthogonal_embedding_from_row_rotation_and_plane,
     primitive_embedding_from_row_rotation,
-    primitive_metadata,
 )
 from GBOpt.crystallography.integer import as_int_array
 from GBOpt.crystallography.plane import inplane_area_index
 from GBOpt.crystallography.pq import recover_exact_row_rotation_from_paired_pq
+from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
+from GBOpt.crystallography.rotation import transpose_rotation_convention
+from GBOpt.crystallography.types import CrystallographyValueError
 
 # --------------------------------------------------------------------------------------
 # Fixtures
@@ -38,21 +43,18 @@ def identity_orientation_rows():
 @pytest.fixture
 def sigma5_53deg_rotation():
     """Sigma5 [001] 53.13 deg scaled rotation -- quaternion (2, 0, 0, 1), N=5."""
-    from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
     return quaternion_to_scaled_rotation((2, 0, 0, 1))
 
 
 @pytest.fixture
 def sigma5_36deg_rotation():
     """Sigma5 [001] 36.87 deg scaled rotation -- quaternion (3, 0, 0, 1), N=10."""
-    from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
     return quaternion_to_scaled_rotation((3, 0, 0, 1))
 
 
 @pytest.fixture
 def sigma3_111_rotation():
     """Sigma3 [111] 60 deg twin scaled rotation -- quaternion (1, 1, 1, 0), N=3."""
-    from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
     return quaternion_to_scaled_rotation((1, 1, 1, 0))
 
 
@@ -74,149 +76,102 @@ def _assert_proper_rotation_pair(embedding, *, atol=1e-10):
 
 
 # --------------------------------------------------------------------------------------
-# primitive_metadata
+# _validated_exact_orientation_rows
 # --------------------------------------------------------------------------------------
 
 
-def test_primitive_metadata_valid_returns_metadata():
-    result = primitive_metadata(
-        basis_mode="primitive",
-        input_area_index=10,
-        primitive_area_index=5,
-        orientation_area_index=5,
-        plane=np.array([0, 0, 1]),
-        rotation_denominator=5,
+def test_validated_exact_orientation_rows_preserves_large_exact_rows():
+    large_value = 10**400
+    matrix = np.array(
+        [
+            [large_value, 0, 0],
+            [0, large_value + 1, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
     )
 
-    assert result.basis_mode == "primitive"
-    assert result.input_area_index == 10
-    assert result.primitive_area_index == 5
-    assert result.orientation_area_index == 5
-    assert result.input_reduction_index == 2
-    assert result.plane == (0, 0, 1)
-    assert result.rotation_denominator == 5
-    assert result.conventional_cell_multiplier == 10
+    result = _validated_exact_orientation_rows(matrix, "P")
 
-
-def test_primitive_metadata_supplied_mode_records_input_area_as_single_reduction():
-    result = primitive_metadata(
-        basis_mode="supplied",
-        input_area_index=5,
-        primitive_area_index=5,
-        orientation_area_index=5,
-        plane=np.array([0, 0, 1]),
-        rotation_denominator=5,
-    )
-
-    assert result.basis_mode == "supplied"
-    assert result.input_area_index == 5
-    assert result.primitive_area_index == 5
-    assert result.orientation_area_index == 5
-    assert result.input_reduction_index == 1
-    assert result.conventional_cell_multiplier == 10
-
-
-def test_primitive_metadata_requires_divisible_input_area_index():
-    with pytest.raises(BoundarySpecError, match="integer multiple"):
-        primitive_metadata(
-            basis_mode="primitive",
-            input_area_index=7,
-            primitive_area_index=5,
-            orientation_area_index=1,
-            plane=np.array([0, 0, 1]),
-            rotation_denominator=5,
-        )
-
-
-def test_primitive_metadata_allows_orientation_area_not_multiple_of_primitive_area():
-    result = primitive_metadata(
-        basis_mode="primitive",
-        input_area_index=None,
-        primitive_area_index=5,
-        orientation_area_index=1,
-        plane=np.array([0, 0, 1]),
-        rotation_denominator=5,
-    )
-
-    assert result.primitive_area_index == 5
-    assert result.orientation_area_index == 1
-    assert result.input_area_index is None
-    assert result.input_reduction_index is None
-
-
-def test_primitive_metadata_conventional_cell_multiplier_is_twice_primitive():
-    result = primitive_metadata(
-        basis_mode="primitive",
-        input_area_index=None,
-        primitive_area_index=5,
-        orientation_area_index=5,
-        plane=np.array([1, 0, 0]),
-        rotation_denominator=5,
-    )
-
-    assert result.conventional_cell_multiplier == 2 * result.primitive_area_index
-
-
-@pytest.mark.parametrize("basis_mode", ["orthogonal", "", None])
-def test_primitive_metadata_rejects_invalid_basis_mode(basis_mode):
-    with pytest.raises(BoundarySpecError, match="basis_mode"):
-        primitive_metadata(
-            basis_mode=basis_mode,
-            primitive_area_index=1,
-            plane=np.array([0, 0, 1]),
-            rotation_denominator=1,
-        )
+    assert result.shape == (3, 3)
+    assert result.dtype == object
+    assert all(type(value) is int for value in result.flat)
+    np.testing.assert_array_equal(result, matrix)
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match"),
+    ("matrix", "match"),
     [
         pytest.param(
-            {"primitive_area_index": 0},
-            "primitive_area_index",
-            id="primitive-area-index-zero",
+            np.eye(2, dtype=object),
+            "shape",
+            id="wrong-shape",
         ),
         pytest.param(
-            {"primitive_area_index": -1},
-            "primitive_area_index",
-            id="primitive-area-index-negative",
-        ),
-        pytest.param(
-            {"input_area_index": 0},
-            "input_area_index",
-            id="input-area-index-zero",
-        ),
-        pytest.param(
-            {"input_area_index": -1},
-            "input_area_index",
-            id="input-area-index-negative",
-        ),
-        pytest.param(
-            {"orientation_area_index": 0},
-            "orientation_area_index",
-            id="orientation-area-index-zero",
-        ),
-        pytest.param(
-            {"orientation_area_index": -1},
-            "orientation_area_index",
-            id="orientation-area-index-negative",
+            [
+                [1, 0, 0],
+                [0, 1.5, 0],
+                [0, 0, 1],
+            ],
+            "exactly integer-valued",
+            id="noninteger-entry",
         ),
     ],
 )
-def test_primitive_metadata_rejects_nonpositive_metadata_values(
-    kwargs: dict[str, Any],
-    match: str,
-):
-    params: dict[str, Any] = {
-        "basis_mode": "primitive",
-        "primitive_area_index": 1,
-        "plane": np.array([0, 0, 1]),
-        "rotation_denominator": 1,
-    }
-    params.update(kwargs)
+def test_validated_exact_orientation_rows_rejects_malformed_matrix(matrix, match):
+    with pytest.raises(CrystallographyValueError, match=match):
+        _validated_exact_orientation_rows(matrix, "P")
 
-    with pytest.raises(BoundarySpecError, match=match):
-        primitive_metadata(**params)
+
+def test_validated_exact_orientation_rows_rejects_zero_row():
+    matrix = np.array(
+        [
+            [1, 0, 0],
+            [0, 0, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
+    )
+
+    with pytest.raises(
+        CrystallographyValueError,
+        match="P row 1 must be nonzero",
+    ):
+        _validated_exact_orientation_rows(matrix, "P")
+
+
+def test_validated_exact_orientation_rows_rejects_nonorthogonal_rows():
+    matrix = np.array(
+        [
+            [1, 0, 0],
+            [1, 1, 0],
+            [0, 0, 1],
+        ],
+        dtype=object,
+    )
+
+    with pytest.raises(
+        CrystallographyValueError,
+        match=r"rows 0 and 1 have exact dot product 1",
+    ):
+        _validated_exact_orientation_rows(matrix, "P")
+
+
+def test_validated_exact_orientation_rows_rejects_left_handed_frame():
+    matrix = np.array(
+        [
+            [1, 0, 0],
+            [0, 1, 0],
+            [0, 0, -1],
+        ],
+        dtype=object,
+    )
+
+    with pytest.raises(
+        CrystallographyValueError,
+        match=r"right-handed.*exact determinant is -1",
+    ):
+        _validated_exact_orientation_rows(matrix, "P")
 
 
 # --------------------------------------------------------------------------------------
@@ -251,7 +206,7 @@ def test_embedding_from_pq_non_orthogonal_raises(identity_orientation_rows):
 
 def test_embedding_from_pq_passes_metadata(identity_orientation_rows):
     P, Q = identity_orientation_rows
-    meta = primitive_metadata(
+    meta = PrimitiveCellMetadata(
         basis_mode="primitive",
         input_area_index=None,
         primitive_area_index=1,
@@ -315,45 +270,36 @@ def test_embedding_from_rotation_rows_rejects_non_orthogonal_rotation():
 # --------------------------------------------------------------------------------------
 
 
-def test_primitive_embedding_exact_and_coherent(sigma5_53deg_rotation):
+def test_primitive_embedding_generates_successfully(sigma5_53deg_rotation):
     plane = np.array([0, 0, 1])
     result = primitive_embedding_from_row_rotation(
         sigma5_53deg_rotation, plane, source="csl"
     )
     assert result.exact is True
     assert result.coherent is True
-
-
-def test_primitive_embedding_preserves_source_label(sigma5_53deg_rotation):
-    plane = np.array([0, 0, 1])
-    result = primitive_embedding_from_row_rotation(
-        sigma5_53deg_rotation, plane, source="csl"
-    )
     assert result.source == "csl"
-
-
-def test_primitive_embedding_proper_rotations(sigma5_53deg_rotation):
-    plane = np.array([0, 0, 1])
-    result = primitive_embedding_from_row_rotation(
-        sigma5_53deg_rotation, plane, source="csl"
-    )
     _assert_proper_rotation_pair(result)
-
-
-def test_primitive_embedding_records_primitive_metadata(sigma5_53deg_rotation):
-    plane = np.array([0, 0, 1])
-    result = primitive_embedding_from_row_rotation(
-        sigma5_53deg_rotation, plane, source="csl"
-    )
     assert result.metadata is not None
     assert result.metadata.basis_mode == "primitive"
 
 
-def test_primitive_embedding_max_exact_atoms_raises(sigma5_53deg_rotation):
-    plane = np.array([0, 0, 1])
-    with pytest.raises(BoundarySpecError, match="max_exact_atoms"):
+def test_primitive_embedding_enforces_primitive_area_limit(sigma5_53deg_rotation):
+    with pytest.raises(BoundarySpecError, match="max_primitive_area_index=4"):
         primitive_embedding_from_row_rotation(
-            sigma5_53deg_rotation, plane, source="csl", max_exact_atoms=1
+            sigma5_53deg_rotation,
+            np.array([0, 0, 1]),
+            source="csl",
+            max_primitive_area_index=4,
+        )
+
+
+def test_primitive_embedding_enforces_pq_determinant_limit(sigma5_53deg_rotation):
+    with pytest.raises(BoundarySpecError, match="max_pq_determinant=4"):
+        primitive_embedding_from_row_rotation(
+            sigma5_53deg_rotation,
+            np.array([0, 0, 1]),
+            source="csl",
+            max_pq_determinant=4,
         )
 
 
@@ -387,9 +333,7 @@ def test_primitive_embedding_pq_rows_satisfy_row_rotation_contract(
         np.testing.assert_array_equal(image, q_row)
 
 
-def test_primitive_embedding_records_input_area_reduction_index(
-    sigma5_53deg_rotation,
-):
+def test_primitive_embedding_records_input_area_reduction_index(sigma5_53deg_rotation):
     plane = np.array([0, 0, 1])
 
     baseline = primitive_embedding_from_row_rotation(
@@ -419,23 +363,25 @@ def test_primitive_embedding_records_input_area_reduction_index(
 # --------------------------------------------------------------------------------------
 
 
-def test_orthogonal_embedding_exact_and_coherent(sigma5_53deg_rotation):
+def test_orthogonal_embedding_generates_successfully(sigma5_53deg_rotation):
     plane = np.array([1, 0, 0])
     result = orthogonal_embedding_from_row_rotation_and_plane(
         sigma5_53deg_rotation, plane, source="csl"
     )
     assert result.exact is True
     assert result.coherent is True
-
-
-def test_orthogonal_embedding_sigma5_rows_normalize_to_proper_rotations(
-    sigma5_53deg_rotation,
-):
-    plane = np.array([1, 0, 0])
-    result = orthogonal_embedding_from_row_rotation_and_plane(
-        sigma5_53deg_rotation, plane, source="csl"
-    )
     _assert_proper_rotation_pair(result)
+
+    assert result.P is not None
+    assert result.Q is not None
+    assert result.P.dtype == object
+    assert result.Q.dtype == object
+
+    P = as_int_array(result.P, (3, 3), "P")
+    Q = as_int_array(result.Q, (3, 3), "Q")
+
+    np.testing.assert_array_equal(P, result.P)
+    np.testing.assert_array_equal(Q, result.Q)
 
 
 def test_orthogonal_embedding_sigma3_111_proper_rotations(sigma3_111_rotation):
@@ -465,30 +411,24 @@ def test_orthogonal_embedding_sigma3_111_records_primitive_and_orientation_area_
     assert result.metadata.rotation_denominator == 3
 
 
-def test_orthogonal_embedding_max_exact_atoms_raises(sigma5_53deg_rotation):
-    plane = np.array([1, 0, 0])
-    with pytest.raises(BoundarySpecError, match="max_exact_atoms"):
+def test_orthogonal_embedding_enforces_primitive_area_limit(sigma5_53deg_rotation):
+    with pytest.raises(BoundarySpecError, match="max_primitive_area_index=4"):
         orthogonal_embedding_from_row_rotation_and_plane(
-            sigma5_53deg_rotation, plane, source="csl", max_exact_atoms=1
+            sigma5_53deg_rotation,
+            np.array([1, 0, 0]),
+            source="csl",
+            max_primitive_area_index=4,
         )
 
 
-def test_orthogonal_embedding_returns_exact_integer_pq_rows(sigma5_53deg_rotation):
-    plane = np.array([1, 0, 0])
-    result = orthogonal_embedding_from_row_rotation_and_plane(
-        sigma5_53deg_rotation, plane, source="csl"
-    )
-
-    assert result.P is not None
-    assert result.Q is not None
-    assert result.P.dtype == object
-    assert result.Q.dtype == object
-
-    P = as_int_array(result.P, (3, 3), "P")
-    Q = as_int_array(result.Q, (3, 3), "Q")
-
-    np.testing.assert_array_equal(P, result.P)
-    np.testing.assert_array_equal(Q, result.Q)
+def test_orthogonal_embedding_enforces_pq_determinant_limit(sigma5_53deg_rotation):
+    with pytest.raises(BoundarySpecError, match="max_pq_determinant=24"):
+        orthogonal_embedding_from_row_rotation_and_plane(
+            sigma5_53deg_rotation,
+            np.array([1, 0, 0]),
+            source="csl",
+            max_pq_determinant=24,
+        )
 
 
 def test_orthogonal_embedding_rows_are_orthogonal_integer_directions(
@@ -512,9 +452,7 @@ def test_orthogonal_embedding_rows_are_orthogonal_integer_directions(
     np.testing.assert_array_equal(Q_gram, np.diag(np.diag(Q_gram)))
 
 
-def test_orthogonal_embedding_records_input_area_reduction_index(
-    sigma5_53deg_rotation,
-):
+def test_orthogonal_embedding_records_input_area_reduction_index(sigma5_53deg_rotation):
     plane = np.array([1, 0, 0])
 
     baseline = orthogonal_embedding_from_row_rotation_and_plane(
@@ -539,9 +477,7 @@ def test_orthogonal_embedding_records_input_area_reduction_index(
     assert result.metadata.input_reduction_index == 4
 
 
-def test_orthogonal_embedding_preserves_sigma3_misorientation(
-    sigma3_111_rotation,
-):
+def test_orthogonal_embedding_preserves_sigma3_misorientation(sigma3_111_rotation):
     result = orthogonal_embedding_from_row_rotation_and_plane(
         sigma3_111_rotation,
         np.array([1, 1, 1]),
@@ -629,9 +565,7 @@ def test_paired_pq_from_direction_rows_builds_expected_sigma5_pair(
     np.testing.assert_array_equal(Q, expected_Q)
 
 
-def test_paired_pq_from_direction_rows_preserves_exact_rotation(
-    sigma5_53deg_rotation,
-):
+def test_paired_pq_from_direction_rows_preserves_exact_rotation(sigma5_53deg_rotation):
     P, Q = _paired_pq_from_direction_rows(
         np.eye(3, dtype=object),
         sigma5_53deg_rotation,
@@ -649,8 +583,6 @@ def test_paired_pq_from_direction_rows_preserves_exact_rotation(
 
 
 def test_paired_pq_from_direction_rows_enlarges_rows_as_exact_pairs():
-    from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
-
     identity_rotation = quaternion_to_scaled_rotation((1, 0, 0, 0))
 
     P, Q = _paired_pq_from_direction_rows(
@@ -673,14 +605,87 @@ def test_paired_pq_from_direction_rows_enlarges_rows_as_exact_pairs():
     assert inplane_area_index(P) == 3
 
 
+@pytest.mark.parametrize(
+    ("direction_rows", "match"),
+    [
+        pytest.param(
+            np.eye(2, dtype=object),
+            "shape",
+            id="wrong-shape",
+        ),
+        pytest.param(
+            [
+                [1, 0, 0],
+                [0, 1.5, 0],
+                [0, 0, 1],
+            ],
+            "exactly integer-valued",
+            id="noninteger-entry",
+        ),
+    ],
+)
+def test_paired_pq_from_direction_rows_rejects_malformed_direction_rows(
+    direction_rows,
+    match,
+    sigma5_53deg_rotation,
+):
+    with pytest.raises(CrystallographyValueError, match=match):
+        _paired_pq_from_direction_rows(
+            direction_rows,
+            sigma5_53deg_rotation,
+            primitive_area_index=5,
+        )
+
+
+@pytest.mark.parametrize(
+    "primitive_area_index",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(True, id="boolean"),
+        pytest.param(1.0, id="float"),
+    ],
+)
+def test_paired_pq_from_direction_rows_rejects_invalid_primitive_area_index(
+    primitive_area_index,
+    sigma5_53deg_rotation,
+):
+    with pytest.raises(
+        CrystallographyValueError,
+        match="primitive_area_index must be a positive integer",
+    ):
+        _paired_pq_from_direction_rows(
+            np.eye(3, dtype=object),
+            sigma5_53deg_rotation,
+            primitive_area_index=primitive_area_index,
+        )
+
+
+def test_paired_pq_from_direction_rows_enforces_final_pq_determinant_limit():
+    identity_rotation = quaternion_to_scaled_rotation((1, 0, 0, 0))
+
+    with pytest.raises(
+        BoundarySpecError,
+        match=(
+            r"max_pq_determinant=2.*"
+            r"\|det\(P\)\|=3.*"
+            r"\|det\(Q\)\|=3"
+        ),
+    ):
+        _paired_pq_from_direction_rows(
+            np.eye(3, dtype=object),
+            identity_rotation,
+            primitive_area_index=3,
+            max_pq_determinant=2,
+        )
+
+
 # --------------------------------------------------------------------------------------
 # exact_embedding_from_row_rotation_and_plane
 # --------------------------------------------------------------------------------------
 
 
-def test_exact_embedding_uses_primitive_path_for_preserved_plane(
-    sigma5_53deg_rotation,
-):
+def test_exact_embedding_uses_primitive_path_for_preserved_plane(sigma5_53deg_rotation):
     result = exact_embedding_from_row_rotation_and_plane(
         sigma5_53deg_rotation,
         np.array([0, 0, 1]),
@@ -706,12 +711,12 @@ def test_exact_embedding_falls_back_when_primitive_rows_are_not_orthogonal(
 
     monkeypatch.setattr(
         embedding_module,
-        "primitive_embedding_from_row_rotation",
+        "_primitive_embedding_from_inplane",
         reject_primitive,
     )
     monkeypatch.setattr(
         embedding_module,
-        "orthogonal_embedding_from_row_rotation_and_plane",
+        "_orthogonal_embedding_from_inplane",
         return_orthogonal,
     )
 
@@ -733,7 +738,7 @@ def test_exact_embedding_does_not_fallback_on_cell_size_error(
 
     monkeypatch.setattr(
         embedding_module,
-        "primitive_embedding_from_row_rotation",
+        "_primitive_embedding_from_inplane",
         reject_primitive,
     )
 
@@ -743,3 +748,90 @@ def test_exact_embedding_does_not_fallback_on_cell_size_error(
             np.array([0, 0, 1]),
             source="csl",
         )
+
+
+def test_exact_embedding_uses_primitive_path_for_antiparallel_plane(monkeypatch):
+    # A 180-degree rotation about y maps [1, 0, 0] to [-1, 0, 0].
+    row_rotation = quaternion_to_scaled_rotation((0, 0, 1, 0))
+    expected = object()
+
+    def return_primitive(*args, **kwargs):
+        return expected
+
+    def reject_orthogonal(*args, **kwargs):
+        pytest.fail(
+            "The orthogonal path should not be used when the plane normal "
+            "is preserved up to sign."
+        )
+
+    monkeypatch.setattr(
+        embedding_module,
+        "_primitive_embedding_from_inplane",
+        return_primitive,
+    )
+    monkeypatch.setattr(
+        embedding_module,
+        "_orthogonal_embedding_from_inplane",
+        reject_orthogonal,
+    )
+
+    result = exact_embedding_from_row_rotation_and_plane(
+        row_rotation,
+        np.array([1, 0, 0]),
+        source="csl",
+    )
+
+    assert result is expected
+
+
+def test_exact_embedding_constructs_primitive_antiparallel_plane():
+    row_rotation = quaternion_to_scaled_rotation((0, 0, 1, 0))
+
+    result = exact_embedding_from_row_rotation_and_plane(
+        row_rotation,
+        np.array([1, 0, 0]),
+        source="csl",
+    )
+
+    assert result.exact is True
+    assert result.coherent is True
+    assert result.metadata is not None
+    assert result.metadata.basis_mode == "primitive"
+    assert result.metadata.plane == (1, 0, 0)
+
+    expected_rotation = (
+        np.asarray(row_rotation.matrix, dtype=np.float64)
+        / row_rotation.denominator
+    )
+    np.testing.assert_allclose(
+        result.R_left.T @ result.R_right,
+        expected_rotation,
+        atol=1.0e-12,
+        rtol=0.0,
+    )
+
+
+def test_precomputed_csl_path_matches_public_exact_selector(sigma5_53deg_rotation):
+    plane = np.array([1, 0, 0], dtype=object)
+    column_rotation = transpose_rotation_convention(
+        sigma5_53deg_rotation
+    )
+    csl = csl_from_scaled_rotation(column_rotation)
+
+    expected = exact_embedding_from_row_rotation_and_plane(
+        sigma5_53deg_rotation,
+        plane,
+        source="csl",
+    )
+    actual = _exact_embedding_from_precomputed_csl(
+        sigma5_53deg_rotation,
+        plane,
+        csl,
+        source="csl",
+    )
+
+    np.testing.assert_array_equal(actual.P, expected.P)
+    np.testing.assert_array_equal(actual.Q, expected.Q)
+    np.testing.assert_allclose(actual.R_left, expected.R_left)
+    np.testing.assert_allclose(actual.R_right, expected.R_right)
+    assert actual.metadata == expected.metadata

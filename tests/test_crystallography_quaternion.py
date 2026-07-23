@@ -6,6 +6,7 @@ import pytest
 from crystallography_fixtures import CSL_SCENARIO_DICTS
 
 from GBOpt.crystallography.quaternion import (
+    _integer_quaternion_candidate_from_unit,
     integer_quaternion_from_unit,
     normalize_integer_quaternion,
     quaternion_to_rotation_matrix,
@@ -206,10 +207,38 @@ def test_integer_quaternion_from_unit_unrecoverable_quaternion_raises():
 def test_integer_quaternion_from_unit_accepts_numpy_max_denominator():
     result = integer_quaternion_from_unit(
         SIGMA5_QUAT_NORM,
-        max_denominator=np.int64(5),
+        max_denominator=np.int64(5),  # type: ignore[ty:invalid-argument-type]
     )
 
     assert result == (2, 0, 0, 1)
+
+
+def test_integer_quaternion_candidate_does_not_apply_fixed_match_tolerance():
+    perturbed = SIGMA5_QUAT_NORM.copy()
+    perturbed[0] += 1.0e-8
+    perturbed /= np.linalg.norm(perturbed)
+
+    result = _integer_quaternion_candidate_from_unit(
+        perturbed,
+        max_denominator=3,
+    )
+
+    assert result == SIGMA5_QUAT
+
+
+@pytest.mark.parametrize(
+    "quat",
+    [
+        pytest.param(["bad", 0, 0, 1], id="string-component"),
+        pytest.param(object(), id="non-array-object"),
+    ],
+)
+def test_integer_quaternion_from_unit_translates_conversion_errors(quat):
+    with pytest.raises(
+        CrystallographyValueError,
+        match="finite four-component quaternion",
+    ):
+        integer_quaternion_from_unit(quat)
 
 
 # --------------------------------------------------------------------------------------
@@ -259,15 +288,39 @@ def test_quaternion_to_rotation_matrix_sigma5_36deg_matches_expected():
 @pytest.mark.parametrize(
     ("quat", "match"),
     [
-        pytest.param([1, 0, 0], "length 4", id="too-short"),
-        pytest.param([[1, 0, 0, 0]], "length 4", id="two-dimensional-row"),
-        pytest.param(np.ones((2, 2)), "length 4", id="two-by-two"),
-        pytest.param([0.0, 0.0, 0.0, 0.0], "non-zero and finite", id="zero"),
-        pytest.param([np.nan, 0.0, 0.0, 1.0], "non-zero and finite", id="nan"),
-        pytest.param([np.inf, 0.0, 0.0, 1.0], "non-zero and finite", id="inf"),
-        pytest.param([1.5, 0.0, 0.0, 1.0], "integer-valued", id="non-unit-non-integer"),
+        pytest.param([1, 0, 0], r"shape \(4,\)", id="too-short"),
+        pytest.param([[1, 0, 0, 0]], r"shape \(4,\)", id="two-dimensional-row"),
+        pytest.param(np.ones((2, 2)), r"shape \(4,\)", id="two-by-two"),
+        pytest.param([0.0, 0.0, 0.0, 0.0], "non-zero", id="zero"),
+        pytest.param([np.nan, 0.0, 0.0, 1.0], "finite values", id="nan"),
+        pytest.param([np.inf, 0.0, 0.0, 1.0], "finite values", id="inf"),
+        pytest.param(
+            [1.5, 0.0, 0.0, 1.0],
+            "exact integer quaternion",
+            id="non-unit-non-integer",
+        ),
     ],
 )
-def test_quaternion_to_rotation_matrix_rejects_invalid_quaternions(quat, match):
+def test_quaternion_to_rotation_matrix_rejects_invalid_quaternions(
+    quat,
+    match,
+):
     with pytest.raises(CrystallographyValueError, match=match):
-        quaternion_to_rotation_matrix(np.array(quat, dtype=float))
+        quaternion_to_rotation_matrix(
+            np.array(quat, dtype=float),
+        )
+
+
+@pytest.mark.parametrize(
+    "quat",
+    [
+        pytest.param(["bad", 0, 0, 1], id="string-component"),
+        pytest.param(object(), id="non-array-object"),
+    ],
+)
+def test_quaternion_to_rotation_matrix_translates_conversion_errors(quat):
+    with pytest.raises(
+        CrystallographyValueError,
+        match="finite four-component quaternion",
+    ):
+        quaternion_to_rotation_matrix(quat)

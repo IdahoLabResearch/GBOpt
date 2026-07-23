@@ -22,17 +22,21 @@ from GBOpt.BoundarySpec import (
     CSLExactSpec,
     FiveDOFSpec,
     PQSpec,
+    PrimitiveCellMetadata,
 )
 from GBOpt.Utils.integer_linalg import cross_int3
 
+from ._limits import (
+    DEFAULT_MAX_PQ_DETERMINANT,
+    DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+)
 from .csl import csl_from_scaled_rotation
 from .embedding import (
+    _exact_embedding_from_precomputed_csl,
     embedding_from_pq,
     embedding_from_rotation_rows,
-    exact_embedding_from_row_rotation_and_plane,
     orthogonal_embedding_from_row_rotation_and_plane,
     primitive_embedding_from_row_rotation,
-    primitive_metadata,
 )
 from .integer import row_gcd_reduce
 from .orientation import orientation_matrices_from_five_dof
@@ -42,32 +46,41 @@ from .pq import (
     recover_exact_row_rotation_from_paired_pq,
 )
 from .quaternion import quaternion_to_scaled_rotation
-from .types import CrystallographyValueError
+from .rotation import transpose_rotation_convention
+from .types import CrystallographyError, CrystallographyValueError
 
 
-def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
-    """Convert a validated PQSpec to a BoundaryEmbedding.
+def pq_spec_to_embedding(
+    spec: PQSpec,
+    *,
+    max_primitive_area_index: int | None = None,
+    max_pq_determinant: int | None = None,
+) -> BoundaryEmbedding:
+    """Convert a validated ``PQSpec`` to a ``BoundaryEmbedding``.
 
-    ``spec.basis_mode`` controls how P/Q are interpreted:
+    ``spec.basis_mode`` controls how the P/Q matrices are interpreted.
 
-    * ``"primitive"`` requires paired P/Q rows that recover an exact row-convention
-      scaled rotation. The adapter attempts to rebuild the primitive in-plane CSL
-      embedding for that rotation and boundary plane. If the primitive in-plane CSL
-      basis cannot be represented as proper orthogonal GBMaker rotation rows, an exact
-      orthogonal embedding is used instead.
-    * ``"supplied"`` treats P/Q as the caller's supplied paired basis rows. Row
-      correspondence is preserved during canonicalization. Metadata is attached when an
-      exact row rotation can be recovered from the paired rows. In supplied mode,
-      ``exact=True`` means the returned P/Q define exact integer orientation rows and
-      proper left/right rotations. It does not imply that an exact paired row rotation
-      could be recovered; metadata is ``None`` when recovery is unavailable.
+    In ``"primitive"`` mode, the paired rows must recover an exact row-convention scaled
+    rotation. The adapter reconstructs the primitive in-plane CSL embedding for that
+    rotation and boundary plane. If that primitive representation cannot form proper
+    orthogonal orientation rows, an exact orthogonal embedding is used.
+
+    In ``"supplied"`` mode, the caller's paired basis rows are canonicalized without
+    primitive-cell reconstruction. Metadata is attached when an exact row rotation can
+    be recovered. An exact supplied-mode embedding does not imply that rotation recovery
+    succeeded; metadata is ``None`` when it did not.
 
     :param spec: Validated ``PQSpec`` instance.
+    :param max_primitive_area_index: Maximum permitted minimal in-plane CSL area index
+        during primitive reconstruction. This limit is not applied in ``"supplied"``
+        mode. Keyword argument, optional, defaults to ``None``.
+    :param max_pq_determinant: Maximum permitted absolute determinant of each returned
+        exact P/Q matrix. Keyword argument, optional, defaults to ``None``.
     :return: Canonical embedding with ``exact=True``, ``coherent=True``, and
         ``source="pq"``.
     :raises BoundarySpecError: If primitive mode cannot recover an exact paired
-        rotation, or if supplied-mode P/Q rows do not form proper rotations after row
-        normalization.
+        rotation, an exact-cell limit is exceeded, or supplied-mode rows do not produce
+        proper left- and right-grain rotations.
     """
     P_int = np.asarray(spec.P, dtype=object)
     Q_int = np.asarray(spec.Q, dtype=object)
@@ -91,6 +104,8 @@ def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
                 plane_int,
                 source="pq",
                 input_area_index=input_area_index,
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
             )
         except BoundarySpecOrthogonalityError:
             return orthogonal_embedding_from_row_rotation_and_plane(
@@ -98,6 +113,8 @@ def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
                 plane_int,
                 source="pq",
                 input_area_index=input_area_index,
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
             )
 
     # basis_mode == "supplied"
@@ -113,21 +130,26 @@ def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
         input_area_index = inplane_area_index(P_int)
         orientation_area_index = inplane_area_index(P_canon)
 
-        metadata = primitive_metadata(
+        metadata = PrimitiveCellMetadata(
             basis_mode="supplied",
             input_area_index=input_area_index,
             primitive_area_index=orientation_area_index,
             orientation_area_index=orientation_area_index,
-            plane=row_gcd_reduce(P_canon[0]),
-            rotation_denominator=int(row_rotation.denominator),
+            plane=tuple(int(value) for value in row_gcd_reduce(P_canon[0])),
+            rotation_denominator=row_rotation.denominator,
         )
 
     try:
+        # For basis_mode="supplied", max_pq_determinant applies to the returned P/Q
+        # matrices; max_primitive_area_index does not apply because supplied mode
+        # intentionally does not replace the supplied rows with a reconstructed
+        # primitive CSL embedding.
         return embedding_from_pq(
             P_canon,
             Q_canon,
             source="pq",
             metadata=metadata,
+            max_pq_determinant=max_pq_determinant,
         )
     except BoundarySpecOrthogonalityError as exc:
         raise BoundarySpecError(
@@ -137,63 +159,78 @@ def pq_spec_to_embedding(spec: PQSpec) -> BoundaryEmbedding:
 
 
 def csl_exact_spec_to_embedding(
-    spec: CSLExactSpec, *, max_exact_atoms: int = 10_000
+    spec: CSLExactSpec,
+    *,
+    max_primitive_area_index: int = DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+    max_pq_determinant: int = DEFAULT_MAX_PQ_DETERMINANT,
 ) -> BoundaryEmbedding:
-    """Convert a validated ``CSLExactSpec`` to a ``BoundaryEmbedding``.
+    """Convert a validated exact CSL specification to an exact embedding.
 
-    Assumes cubic symmetry.
+    The specification's integer quaternion is converted to an exact row-convention
+    scaled rotation. Its column-convention transpose is then used to construct the CSL.
+    When ``spec.sigma`` is supplied, it is checked against the Sigma value derived from
+    that CSL.
 
-    Embedding path selection: if the rotation preserves the boundary plane, a primitive
-    paired embedding is attempted first via ``primitive_embedding_from_row_rotation``.
-    If that raises ``BoundarySpecOrthogonalityError``, or if the rotation does not
-    preserve the plane, the orthogonal fallback
-    ``orthogonal_embedding_from_row_rotation_and_plane`` is used instead.
+    Embedding-path selection reuses the already-constructed CSL. A primitive embedding
+    is attempted for a plane-preserving rotation; otherwise, or when the primitive rows
+    are not orthogonal, an exact orthogonal embedding is selected.
 
-    :param spec: A ``CSLExactSpec`` instance.
-    :param max_exact_atoms: Cell-size guard passed to the primitive and orthogonal
-        embedding constructors. Keyword argument, optional, defaults to ``10_000``.
-    :return: ``BoundaryEmbedding`` with ``exact=True``, ``coherent=True``, and
-        ``source="csl"``.
-    :raises BoundarySpecError: If quaternion conversion fails, or if the provided
-        ``sigma`` does not match the CSL sigma derived from the quaternion.
+    :param spec: Validated exact CSL boundary specification.
+    :param max_primitive_area_index: Maximum permitted minimal in-plane CSL area index.
+        Keyword argument, optional, defaults to ``DEFAULT_MAX_PRIMITIVE_AREA_INDEX``.
+    :param max_pq_determinant: Maximum permitted absolute determinant of each returned
+        exact P/Q matrix. Keyword argument, optional, defaults to
+        ``DEFAULT_MAX_PQ_DETERMINANT``.
+    :return: Exact coherent ``BoundaryEmbedding`` with ``source="csl"`` and
+        primitive-cell metadata.
+    :raises BoundarySpecError: If quaternion or CSL construction fails, ``spec.sigma``
+        does not match the derived Sigma value, exact embedding construction fails, or
+        an exact-cell limit is exceeded.
     """
     try:
-        rot = quaternion_to_scaled_rotation(tuple(spec.quat))
-    except CrystallographyValueError as exc:
+        row_rotation = quaternion_to_scaled_rotation(tuple(spec.quat))
+        column_rotation = transpose_rotation_convention(row_rotation)
+        csl = csl_from_scaled_rotation(column_rotation)
+    except CrystallographyError as exc:
         raise BoundarySpecError(str(exc)) from exc
 
-    if spec.sigma is not None:
-        quat_int = rot.quaternion
-        csl_sigma = csl_from_scaled_rotation(rot).sigma
-        if csl_sigma != int(spec.sigma):
-            raise BoundarySpecError(
-                f"Sigma mismatch: quaternion "
-                f"{list(quat_int)} "  # type: ignore[ty:invalid-argument-type]
-                f"gives {csl_sigma=}, but {spec.sigma=} was provided."
-            )
+    if spec.sigma is not None and csl.sigma != spec.sigma:
+        raise BoundarySpecError(
+            f"Sigma mismatch: quaternion {list(row_rotation.quaternion)} "
+            f"gives csl_sigma={csl.sigma}, but spec.sigma={spec.sigma} "
+            "was provided."
+        )
 
-    return exact_embedding_from_row_rotation_and_plane(
-        rot,
-        spec.plane,
-        source="csl",
-        max_exact_atoms=max_exact_atoms,
+    plane_int = row_gcd_reduce(
+        np.asarray(spec.plane, dtype=object)
     )
+
+    try:
+        return _exact_embedding_from_precomputed_csl(
+            row_rotation,
+            plane_int,
+            csl,
+            source="csl",
+            max_primitive_area_index=max_primitive_area_index,
+            max_pq_determinant=max_pq_determinant,
+        )
+    except CrystallographyError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
 
 def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
-    """Convert a ``CSLApproxSpec`` to a ``BoundaryEmbedding`` using the approximate
-    path.
+    """Convert a ``CSLApproxSpec`` to an approximate ``BoundaryEmbedding``.
 
-    Constructs floating-point ``R_left`` and ``R_right`` from the given plane and
-    axis/angle misorientation. ``P`` and ``Q`` are set to ``None`` because no exact
-    integer matrices are available.
+    Floating-point ``R_left`` and ``R_right`` matrices are constructed from the
+    specified boundary plane and axis-angle misorientation. ``P`` and ``Q`` are ``None``
+    because this path does not construct exact integer orientation matrices.
 
-    ``R_left`` is built so that its first row is the unit boundary-plane normal. The
-    remaining two rows are an integer null-basis direction of the plane and its
-    cross-product complement, giving a proper rotation. ``R_right = R_left @ R_mis``,
-    where ``R_mis`` is the rotation about the given axis by ``angle_deg``.
+    ``R_left`` is formed with the unit boundary-plane normal as its first row, an
+    integer null-basis direction as its second row, and their cross-product complement
+    as its third row. The right-grain orientation is then computed as ``R_left @
+    R_mis``.
 
-    :param spec: A ``CSLApproxSpec`` instance.
+    :param spec: Validated approximate CSL boundary specification.
     :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=False``, and
         ``source="csl"``.
     """
@@ -226,22 +263,21 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
 def five_dof_spec_to_embedding(spec: FiveDOFSpec) -> BoundaryEmbedding:
     """Convert a validated ``FiveDOFSpec`` to an approximate embedding.
 
-    The boundary adapter translates the validated five-DOF specification into
-    floating-point row-orientation matrices through
-    :func:`orientation_matrices_from_five_dof`, then delegates ``BoundaryEmbedding``
-    construction and final rotation validation to :func:`embedding_from_rotation_rows`.
+    The validated five-DOF parameters are converted to floating-point left- and
+    right-grain row-orientation matrices by ``orientation_matrices_from_five_dof``.
+    Construction and final validation of the embedding are then delegated to
+    ``embedding_from_rotation_rows``.
 
-    Exactification is intentionally not attempted here. Five-DOF rationalization into
-    exact integer P/Q matrices belongs to the separate exactification path.
+    This adapter intentionally does not attempt exactification. Rationalization of
+    five-DOF values into exact integer P/Q matrices belongs to the separate
+    exactification path.
 
     :param spec: Validated five-DOF boundary specification containing ``[alpha, beta,
         gamma, theta, phi]`` in radians.
     :return: Approximate ``BoundaryEmbedding`` with ``P=None``, ``Q=None``,
         ``exact=False``, ``coherent=False``, and ``source="five_dof"``.
-    :raises BoundarySpecError: If the five-DOF values cannot be translated into proper
+    :raises BoundarySpecError: If the five-DOF values cannot be converted into proper
         floating-point orientation matrices.
-    :raises BoundarySpecOrthogonalityError: If the translated left or right rows do not
-        form a proper orientation matrix during embedding construction.
     """
     try:
         R_left, R_right = orientation_matrices_from_five_dof(spec.params)
