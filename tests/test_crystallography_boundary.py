@@ -22,6 +22,7 @@ from GBOpt.crystallography.pq import (
     recover_exact_row_rotation_from_paired_pq,
 )
 from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
+from GBOpt.crystallography.types import CrystallographyValueError
 
 # --------------------------------------------------------------------------------------
 # Shared test data
@@ -296,6 +297,27 @@ def test_pq_spec_primitive_orthogonal_fallback_preserves_input_reduction_metadat
         emb.metadata.input_reduction_index
         == emb.metadata.input_area_index // emb.metadata.primitive_area_index
     )
+
+
+def test_pq_spec_primitive_translates_crystallography_failure(monkeypatch):
+    def raise_primitive_failure(*args, **kwargs):
+        raise CrystallographyValueError("forced primitive validation failure")
+
+    monkeypatch.setattr(
+        "GBOpt.crystallography.boundary.primitive_embedding_from_row_rotation",
+        raise_primitive_failure,
+    )
+
+    spec = PQSpec(
+        P=list(SIGMA5_TWIST_PRIMITIVE_P),
+        Q=list(SIGMA5_TWIST_PRIMITIVE_Q),
+    )
+
+    with pytest.raises(
+        BoundarySpecError,
+        match="forced primitive validation failure",
+    ):
+        pq_spec_to_embedding(spec)
 
 
 # --------------------------------------------------------------------------------------

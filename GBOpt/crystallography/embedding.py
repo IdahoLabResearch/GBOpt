@@ -41,7 +41,13 @@ from .rotation import (
     _scaled_row_images,
     transpose_rotation_convention,
 )
-from .types import CrystallographyValueError, CSLResult, InPlaneBasis, ScaledRotation
+from .types import (
+    CrystallographyError,
+    CrystallographyValueError,
+    CSLResult,
+    InPlaneBasis,
+    ScaledRotation,
+)
 
 
 def _validated_exact_orientation_rows(
@@ -280,7 +286,7 @@ def _csl_from_row_rotation(row_rotation: ScaledRotation) -> CSLResult:
     try:
         column_rotation = transpose_rotation_convention(row_rotation)
         return csl_from_scaled_rotation(column_rotation)
-    except CrystallographyValueError as exc:
+    except CrystallographyError as exc:
         raise BoundarySpecError(str(exc)) from exc
 
 
@@ -313,6 +319,7 @@ def _inplane_from_row_rotation(row_rotation: ScaledRotation, plane_int: np.ndarr
     :param row_rotation: Exact row-convention scaled rotation.
     :param plane_int: Primitive boundary-plane normal as a length-3 integer array.
     :return: In-plane CSL basis for the given plane.
+    :raises BoundarySpecError: If CSL construction or in-plane basis construction fails.
     """
     csl = _csl_from_row_rotation(row_rotation)
     return _inplane_from_csl(csl, plane_int)
@@ -341,6 +348,11 @@ def embedding_from_pq(
     :return: ``BoundaryEmbedding`` with ``exact=True``, ``coherent=True``, and
         ``source`` as supplied. ``R_left`` and ``R_right`` are constructed by
         normalizing and validating the rows of ``P_canon`` and ``Q_canon``.
+    :raises CrystallographyValueError: If ``max_pq_determinant`` is invalid or either
+        P/Q matrix fails exact integer validation.
+    :raises BoundarySpecError: If either P/Q determinant exceeds ``max_pq_determinant``.
+    :raises BoundarySpecOrthogonalityError: If the normalized P or Q rows do not form a
+        proper rotation frame.
     """
     _enforce_pq_determinant_limit(
         P_canon,
@@ -383,6 +395,8 @@ def embedding_from_rotation_rows(
         construction. Keyword argument, optional, defaults to ``True``.
     :return: Approximate ``BoundaryEmbedding`` with normalized ``R_left`` and
         ``R_right``, ``P=None``, ``Q=None``, and ``exact=False``.
+    :raises BoundarySpecOrthogonalityError: If either matrix is malformed, non-finite,
+        degenerate, nonorthogonal after row normalization, or not right-handed.
     """
     R_left = _validated_rotation_rows(R_left, "R_left")
     R_right = _validated_rotation_rows(R_right, "R_right")
@@ -434,6 +448,12 @@ def _primitive_embedding_from_inplane(
         defaults to ``None``.
     :return: Exact coherent primitive ``BoundaryEmbedding`` with primitive-cell
         metadata.
+    :raises CrystallographyValueError: If exact integer input, area-index calculation,
+        or limit validation fails.
+    :raises CrystallographyDivisibilityError: If an in-plane CSL direction does not have
+        an exactly integral image under ``row_rotation``.
+    :raises BoundarySpecError: If an exact-cell limit is exceeded or the resulting P/Q
+        matrices cannot form a valid embedding.
     """
     p1 = inplane.basis[:, 0]
     p2 = inplane.basis[:, 1]
@@ -501,6 +521,10 @@ def primitive_embedding_from_row_rotation(
         exact embedding and the final exactly paired P/Q matrices. Keyword argument,
         optional, defaults to ``None``.
     :return: Exact coherent ``BoundaryEmbedding`` with primitive-cell metadata.
+    :raises CrystallographyValueError: If the plane, exact integer data, or an exact
+        construction limit is malformed.
+    :raises BoundarySpecError: If CSL or in-plane construction fails, an exact-cell
+        limit is exceeded, or proper P/Q orientation frames cannot be constructed.
     """
     plane_int = row_gcd_reduce(np.asarray(plane, dtype=object))
     inplane = _inplane_from_row_rotation(row_rotation, plane_int)
@@ -553,6 +577,10 @@ def _orthogonal_embedding_from_inplane(
         defaults to ``None``.
     :return: Exact coherent orthogonal ``BoundaryEmbedding`` with primitive-cell
         metadata.
+    :raises CrystallographyValueError: If exact integer validation, basis reduction, or
+        area-index construction fails.
+    :raises BoundarySpecError: If an exact-cell limit is exceeded or the resulting P/Q
+        matrices cannot form a valid embedding.
     """
     v1 = inplane.basis[:, 0]
     v2 = inplane.basis[:, 1]
@@ -629,6 +657,10 @@ def orthogonal_embedding_from_row_rotation_and_plane(
         exact embedding and the final exactly paired P/Q matrices. Keyword argument,
         optional, defaults to ``None``.
     :return: Exact coherent ``BoundaryEmbedding`` with primitive-cell metadata.
+    :raises CrystallographyValueError: If the plane, exact integer data, or an exact
+        construction limit is malformed.
+    :raises BoundarySpecError: If CSL or in-plane construction fails, an exact-cell
+        limit is exceeded, or proper P/Q orientation frames cannot be constructed.
     """
     plane_int = row_gcd_reduce(np.asarray(plane_normal, dtype=object))
     inplane = _inplane_from_row_rotation(row_rotation, plane_int)
@@ -674,8 +706,10 @@ def _exact_embedding_from_precomputed_csl(
         optional, defaults to ``None``.
     :return: Exact coherent ``BoundaryEmbedding`` constructed through the primitive path
         when possible, otherwise through the orthogonal path.
-    :raises BoundarySpecOrthogonalityError: If the orthogonal path cannot produce proper
-        orientation frames.
+    :raises CrystallographyValueError: If exact plane, area, or P/Q construction data is
+        invalid.
+    :raises BoundarySpecError: If in-plane construction fails, an exact-cell limit is
+        exceeded, or neither embedding path can construct proper orientation frames.
     """
     inplane = _inplane_from_csl(csl, plane_int)
 
@@ -741,6 +775,10 @@ def exact_embedding_from_row_rotation_and_plane(
         optional, defaults to ``None``.
     :return: Exact coherent ``BoundaryEmbedding`` constructed through the primitive path
         when possible, otherwise through the orthogonal path.
+    :raises CrystallographyValueError: If the plane, exact integer data, or an exact
+        construction limit is malformed.
+    :raises BoundarySpecError: If CSL or in-plane construction fails, an exact-cell
+        limit is exceeded, or proper P/Q orientation frames cannot be constructed.
     """
     plane_int = row_gcd_reduce(np.asarray(plane, dtype=object))
     csl = _csl_from_row_rotation(row_rotation)

@@ -189,6 +189,7 @@ def validate_scaled_rotation_matrix(
         identity, the Gram diagonal is not a perfect square, the determinant is
         inconsistent with the derived denominator, or the supplied denominator does not
         match the derived denominator.
+    :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
     """
     _require_cubic(lattice_metric)
     int_matrix = as_int_array(input_matrix, (3, 3), "input_matrix")
@@ -245,6 +246,8 @@ def transpose_rotation_convention(rotation: ScaledRotation) -> ScaledRotation:
     :param rotation: Row-convention scaled rotation to transpose.
     :return: Validated scaled rotation with numerator ``rotation.matrix.T``, the same
         denominator, and the same source.
+    :raises CrystallographyValueError: If ``rotation`` does not satisfy the exact
+        scaled-rotation orthogonality and determinant identities.
     """
     return validate_scaled_rotation_matrix(
         np.asarray(rotation.matrix, dtype=object).T,
@@ -278,6 +281,9 @@ def scaled_row_image(
         returned array is object dtype.
     :raises CrystallographyDivisibilityError: If the image is not exactly integer-valued
         and ``allow_inexact=False``.
+    :raises CrystallographyValueError: If ``row`` is not an exact integer vector of
+        length three or, when ``validate_rotation`` is true, ``rotation`` fails the
+        exact scaled-rotation identities.
     """
     if validate_rotation:
         assert_scaled_rotation(rotation)

@@ -24,7 +24,6 @@ from GBOpt.BoundarySpec import (
     PQSpec,
     PrimitiveCellMetadata,
 )
-from GBOpt.Utils.integer_linalg import cross_int3
 
 from ._limits import (
     DEFAULT_MAX_PQ_DETERMINANT,
@@ -38,7 +37,7 @@ from .embedding import (
     orthogonal_embedding_from_row_rotation_and_plane,
     primitive_embedding_from_row_rotation,
 )
-from .integer import row_gcd_reduce
+from .integer import cross_int3, row_gcd_reduce
 from .orientation import orientation_matrices_from_five_dof
 from .plane import inplane_area_index, plane_null_basis
 from .pq import (
@@ -79,8 +78,9 @@ def pq_spec_to_embedding(
     :return: Canonical embedding with ``exact=True``, ``coherent=True``, and
         ``source="pq"``.
     :raises BoundarySpecError: If primitive mode cannot recover an exact paired
-        rotation, an exact-cell limit is exceeded, or supplied-mode rows do not produce
-        proper left- and right-grain rotations.
+        rotation, if supplied-mode P/Q rows do not form proper rotations after row
+        normalization, if an exact-cell limit is invalid, or if an exact-cell limit is
+        exceeded.
     """
     P_int = np.asarray(spec.P, dtype=object)
     Q_int = np.asarray(spec.Q, dtype=object)
@@ -95,29 +95,38 @@ def pq_spec_to_embedding(
                 "used as supplied basis rows instead."
             ) from exc
 
-        input_area_index = inplane_area_index(P_int)
-        plane_int = row_gcd_reduce(P_int[0])
+        try:
+            input_area_index = inplane_area_index(P_int)
+            plane_int = row_gcd_reduce(P_int[0])
+        except CrystallographyError as exc:
+            raise BoundarySpecError(str(exc)) from exc
 
         try:
-            return primitive_embedding_from_row_rotation(
-                row_rotation,
-                plane_int,
-                source="pq",
-                input_area_index=input_area_index,
-                max_primitive_area_index=max_primitive_area_index,
-                max_pq_determinant=max_pq_determinant,
-            )
-        except BoundarySpecOrthogonalityError:
-            return orthogonal_embedding_from_row_rotation_and_plane(
-                row_rotation,
-                plane_int,
-                source="pq",
-                input_area_index=input_area_index,
-                max_primitive_area_index=max_primitive_area_index,
-                max_pq_determinant=max_pq_determinant,
-            )
+            try:
+                return primitive_embedding_from_row_rotation(
+                    row_rotation,
+                    plane_int,
+                    source="pq",
+                    input_area_index=input_area_index,
+                    max_primitive_area_index=max_primitive_area_index,
+                    max_pq_determinant=max_pq_determinant,
+                )
+            except BoundarySpecOrthogonalityError:
+                return orthogonal_embedding_from_row_rotation_and_plane(
+                    row_rotation,
+                    plane_int,
+                    source="pq",
+                    input_area_index=input_area_index,
+                    max_primitive_area_index=max_primitive_area_index,
+                    max_pq_determinant=max_pq_determinant,
+                )
+        except CrystallographyError as exc:
+            raise BoundarySpecError(str(exc)) from exc
 
     # basis_mode == "supplied"
+    # doccheck: ignore=DOC115[CrystallographyValueError]
+    #   PQSpec validation guarantees exact nonsingular 3-by-3 integer matrices with no
+    #   zero rows
     P_canon, Q_canon = canonicalize_pq_paired(P_int, Q_int)
 
     metadata = None
@@ -127,15 +136,19 @@ def pq_spec_to_embedding(
         row_rotation = None
 
     if row_rotation is not None:
-        input_area_index = inplane_area_index(P_int)
-        orientation_area_index = inplane_area_index(P_canon)
+        try:
+            input_area_index = inplane_area_index(P_int)
+            orientation_area_index = inplane_area_index(P_canon)
+            plane = tuple(int(value) for value in row_gcd_reduce(P_canon[0]))
+        except CrystallographyError as exc:
+            raise BoundarySpecError(str(exc)) from exc
 
         metadata = PrimitiveCellMetadata(
             basis_mode="supplied",
             input_area_index=input_area_index,
             primitive_area_index=orientation_area_index,
             orientation_area_index=orientation_area_index,
-            plane=tuple(int(value) for value in row_gcd_reduce(P_canon[0])),
+            plane=plane,
             rotation_denominator=row_rotation.denominator,
         )
 
@@ -156,6 +169,8 @@ def pq_spec_to_embedding(
             "R_left or R_right derived from P/Q is not a proper rotation matrix. Ensure "
             "P/Q rows are mutually orthogonal integer Miller directions."
         ) from exc
+    except CrystallographyValueError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
 
 def csl_exact_spec_to_embedding(
@@ -201,6 +216,8 @@ def csl_exact_spec_to_embedding(
             "was provided."
         )
 
+    # doccheck: ignore=DOC115[CrystallographyValueError]
+    #   spec.plane is a validated nonzero integer three-vector
     plane_int = row_gcd_reduce(
         np.asarray(spec.plane, dtype=object)
     )
@@ -233,6 +250,8 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     :param spec: Validated approximate CSL boundary specification.
     :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=False``, and
         ``source="csl"``.
+    :raises BoundarySpecError: If the validated plane cannot be converted into a proper
+        approximate orientation embedding.
     """
     plane = np.asarray(spec.plane, dtype=float)
     plane_unit = plane / np.linalg.norm(plane)
@@ -241,9 +260,14 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     axis_unit = axis / np.linalg.norm(axis)
     R_mis = Rotation.from_rotvec(axis_unit * np.deg2rad(spec.angle_deg)).as_matrix()
 
-    plane_int = row_gcd_reduce(np.asarray(spec.plane, dtype=object))
-    e1, _unused = plane_null_basis(plane_int)
-    e2 = row_gcd_reduce(np.asarray(cross_int3(plane_int, e1), dtype=object))
+    try:
+        plane_int = row_gcd_reduce(np.asarray(spec.plane, dtype=object))
+        e1, _unused = plane_null_basis(plane_int)
+        e2 = row_gcd_reduce(
+            np.asarray(cross_int3(plane_int, e1), dtype=object)
+        )
+    except CrystallographyError as exc:
+        raise BoundarySpecError(str(exc)) from exc
 
     e1_float = e1.astype(float)
     e2_float = e2.astype(float)

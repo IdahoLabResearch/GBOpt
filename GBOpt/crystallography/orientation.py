@@ -669,16 +669,21 @@ def _zxz_euler_angles(rotation: np.ndarray) -> np.ndarray:
     :return: A ``numpy.ndarray`` with shape ``(3,)`` containing ``[alpha, beta, gamma]``
         in radians. At a gimbal-lock singularity, the returned values are SciPy's
         canonical representative and are not a unique Euler decomposition.
-    :raises ValueError: If ``rotation`` does not have an acceptable matrix shape or
-        cannot be interpreted by SciPy as a valid rotation.
+    :raises CrystallographyValueError: If SciPy cannot interpret ``rotation`` as a valid
+        rotation or convert it to intrinsic ZXZ Euler angles.
     """
-    with warnings.catch_warnings():
-        warnings.filterwarnings(
-            "ignore",
-            message="Gimbal lock detected.*",
-            category=UserWarning,
-        )
-        return Rotation.from_matrix(rotation).as_euler("ZXZ")
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="Gimbal lock detected.*",
+                category=UserWarning,
+            )
+            return Rotation.from_matrix(rotation).as_euler("ZXZ")
+    except ValueError as exc:
+        raise CrystallographyValueError(
+            "rotation could not be converted to intrinsic ZXZ Euler angles."
+        ) from exc
 
 
 def five_dof_from_axis_angle(
@@ -708,8 +713,6 @@ def five_dof_from_axis_angle(
     :raises CrystallographyValueError: If ``tol`` is invalid, either direction is
         malformed, non-finite, or zero, or ``angle_deg`` is Boolean, non-real, or
         non-finite.
-    :raises ValueError: If SciPy cannot convert the constructed rotation matrix to an
-        intrinsic ZXZ Euler-angle representation.
     """
     tol = _validated_tolerance(tol, "tol")
     _, rotation, _ = _axis_angle_rotation(rotation_axis, angle_deg, tol=tol)

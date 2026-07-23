@@ -13,10 +13,10 @@ import math
 
 import numpy as np
 
-from GBOpt.Utils.integer_linalg import cross_int3, dot_int
-
 from .integer import (
     as_int_array,
+    cross_int3,
+    dot_int,
     integer_adj3,
     integer_det3,
     row_gcd_reduce,
@@ -50,6 +50,9 @@ def _canonical_inplane_key(row: np.ndarray) -> tuple[int, tuple[int, ...]]:
     row_int = np.asarray(row, dtype=object)
     if _first_nonzero_sign(row_int) < 0:
         row_int = -row_int
+
+    # doccheck: ignore=DOC115[CrystallographyValueError]
+    #   row_int comes from validated exact-integer P/Q rows and remains one-dimensional
     return dot_int(row_int, row_int), tuple(int(v) for v in row_int)
 
 
@@ -60,6 +63,9 @@ def _det_sign(rows: list[np.ndarray]) -> int:
         in-plane direction, and second in-plane direction.
     :return: ``1``, ``-1``, or ``0`` for positive, negative, or zero triple product.
     """
+    # doccheck: ignore=DOC115[CrystallographyValueError]
+    #   all project call sites pass three validated length-three exact-integer
+    #   orientation rows
     triple = dot_int(rows[0], cross_int3(rows[1], rows[2]))
     if triple > 0:
         return 1

@@ -257,6 +257,9 @@ def exactify_five_dof(
         derived Sigma value is too large, or exact embedding construction does not
         produce the required integer rows and metadata.
     :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
+    :raises CrystallographyBackendError: If exact CSL normal-form construction fails.
+    :raises BoundarySpecError: If exact embedding construction fails or an exact-cell
+        limit is exceeded.
     """
     _require_cubic(lattice_metric)
     max_primitive_area_index = as_positive_int(

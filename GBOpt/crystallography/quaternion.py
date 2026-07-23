@@ -63,7 +63,9 @@ def quaternion_to_scaled_rotation(
     :param lattice_metric: Reserved non-cubic metric hook; only ``None`` is currently
         supported. Keyword argument, optional, defaults to ``None``.
     :return: Exact scaled rotation in the project row-vector convention.
-    :raises CrystallographyValueError: If ``quat`` is the zero quaternion.
+    :raises CrystallographyValueError: If ``quat`` is malformed, contains non-integer
+        entries, or is the zero quaternion.
+    :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
     """
     _require_cubic(lattice_metric)
     if canonicalize:
