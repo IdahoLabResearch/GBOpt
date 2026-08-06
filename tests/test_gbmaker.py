@@ -98,6 +98,100 @@ def _vacuum_zero_gap_metrics(gb: GBMaker) -> tuple[float, float]:
 
 
 # --------------------------------------------------------------------------------------
+# Compact exact Sigma-5 serialization references
+# --------------------------------------------------------------------------------------
+
+_SIGMA5_EXACT_GOLD_CASES = [
+    pytest.param(
+        CSLExactSpec(
+            axis=(0, 0, 1),
+            plane=(3, 1, 0),
+            quat=(3, 0, 0, 1),
+            sigma=5,
+        ),
+        "tests/gold/sigma5_tilt.txt",
+        np.array(
+            [
+                [0.0, 4.0 * math.sqrt(10.0)],
+                [0.0, math.sqrt(10.0)],
+                [0.0, 1.0],
+            ]
+        ),
+        80,
+        id="symmetric-tilt",
+    ),
+    pytest.param(
+        CSLExactSpec(
+            axis=(1, 0, 0),
+            plane=(1, 0, 0),
+            quat=(3, 1, 0, 0),
+            sigma=5,
+        ),
+        "tests/gold/sigma5_twist.txt",
+        np.array(
+            [
+                [0.0, 10.0],
+                [0.0, math.sqrt(5.0)],
+                [0.0, math.sqrt(5.0)],
+            ]
+        ),
+        100,
+        id="twist",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("boundary", "gold_path", "expected_box", "expected_grain_size"),
+    _SIGMA5_EXACT_GOLD_CASES,
+)
+def test_exact_sigma5_construction_matches_gold(
+    boundary: CSLExactSpec,
+    gold_path: str,
+    expected_box: np.ndarray,
+    expected_grain_size: int,
+) -> None:
+    """Protect compact exact Sigma-5 construction and serialization output."""
+    with pytest.warns(
+        UserWarning,
+        match=r"Recommended repeat factor is at least 2\.",
+    ):
+        gb = GBMaker.from_boundary_spec(
+            1.0,
+            "fcc",
+            "Cu",
+            boundary,
+            mode="exact",
+            gb_thickness=1.0,
+            repeat_factor=(1, 1),
+            x_dim_min=5.0,
+            vacuum=0.0,
+            interaction_distance=0.1,
+        )
+
+    assert gb.uses_exact_construction
+    assert gb.left_grain.size == expected_grain_size
+    assert gb.right_grain.size == expected_grain_size
+    assert gb.whole_system.size == 2 * expected_grain_size
+    np.testing.assert_allclose(gb.box_dims, expected_box, atol=1e-12, rtol=0.0)
+
+    positions = np.column_stack(
+        (gb.whole_system["x"], gb.whole_system["y"], gb.whole_system["z"])
+    )
+    assert (
+        np.unique(np.round(positions, decimals=10), axis=0).shape[0]
+        == gb.whole_system.size
+    )
+    central_gap, periodic_gap = _vacuum_zero_gap_metrics(gb)
+    assert central_gap >= -1e-12
+    assert periodic_gap >= -1e-12
+
+    with tempfile.NamedTemporaryFile(delete=True) as temp_file:
+        gb.write_lammps(temp_file.name, type_as_int=True)
+        assert filecmp.cmp(gold_path, temp_file.name, shallow=False)
+
+
+# --------------------------------------------------------------------------------------
 # Strain accommodation
 # --------------------------------------------------------------------------------------
 

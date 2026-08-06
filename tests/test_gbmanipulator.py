@@ -668,22 +668,6 @@ class TestGBManipulator(unittest.TestCase):
             self.tilt.write_lammps(temp_file.name, p3, self.tilt.box_dims)
             # self.tilt.write_lammps(temp_file.name, p4, self.tilt.box_dims)
 
-    def test_created_gbs(self):
-        manipulator = GBManipulator(self.tilt, self.tilt)
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", category=UserWarning)
-            p1 = manipulator.translate_right_grain(1, 1)
-            p2 = manipulator.insert_atoms(fill_fraction=0.2, method='delaunay')
-        p3 = manipulator.slice_and_merge()
-        # p4 = manipulator.remove_atoms(0.2)
-        with tempfile.NamedTemporaryFile(delete=True) as temp_file:
-            self.tilt.write_lammps(temp_file.name, type_as_int=True)
-            self.assertTrue(filecmp.cmp("./tests/gold/sigma5_tilt.txt",
-                            temp_file.name, shallow=False))
-            self.twist.write_lammps(temp_file.name, type_as_int=True)
-            self.assertTrue(filecmp.cmp("./tests/gold/sigma5_twist.txt",
-                            temp_file.name, shallow=False))
-
 
 class TestParent(unittest.TestCase):
     def setUp(self):
