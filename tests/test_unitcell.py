@@ -792,3 +792,63 @@ class TestUnitCell(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestRationalBasis(unittest.TestCase):
+    """Focused regressions for exact built-in basis metadata."""
+
+    def test_fluorite_rational_basis_matches_structured_basis(self):
+        cell = UnitCell()
+        cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+
+        basis = cell.rational_basis
+        self.assertIsNotNone(basis)
+        self.assertEqual(basis.denominator, 4)
+        self.assertEqual(len(basis.names), 12)
+        self.assertEqual(basis.names.count("U"), 4)
+        self.assertEqual(basis.names.count("O"), 8)
+        self.assertEqual(
+            len({tuple(int(value) for value in row) for row in basis.numerators}),
+            12,
+        )
+        self.assertTrue(np.all(np.asarray(basis.numerators, dtype=int) >= 0))
+        self.assertTrue(np.all(np.asarray(basis.numerators, dtype=int) < 4))
+        self.assertTrue(np.array_equal(cell.names(), np.asarray(basis.names)))
+        self.assertTrue(
+            np.allclose(
+                np.column_stack((
+                    cell.asarray()["x"],
+                    cell.asarray()["y"],
+                    cell.asarray()["z"],
+                )) / cell.a0,
+                np.asarray(basis.numerators, dtype=float) / basis.denominator,
+            )
+        )
+
+    def test_rational_basis_numerators_are_defensive_and_read_only(self):
+        cell = UnitCell()
+        cell.init_by_structure("fcc", 3.615, "Cu")
+
+        first = cell.rational_basis.numerators
+        self.assertFalse(first.flags.writeable)
+        with self.assertRaises(ValueError):
+            first[0, 0] = 1
+
+        second = cell.rational_basis.numerators
+        self.assertTrue(np.array_equal(second, np.array(
+            [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]],
+            dtype=object,
+        )))
+
+    def test_custom_unit_cell_does_not_claim_exact_rational_metadata(self):
+        cell = UnitCell()
+        cell.init_by_custom(
+            unit_cell=np.array([[0.0, 0.0, 0.0]]),
+            unit_cell_types=("Cu",),
+            a0=3.615,
+            conventional=np.eye(3),
+            reciprocal=np.eye(3),
+            ideal_bond_lengths={(1, 1): 1.0},
+        )
+
+        self.assertIsNone(cell.rational_basis)

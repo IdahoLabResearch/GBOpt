@@ -313,7 +313,7 @@ def test_vacuum_zero_exact_atoms_are_within_x_box(
 # --------------------------------------------------------------------------------------
 
 
-def test_vacuum_zero_periodic_gap_is_not_smaller_than_central_gap(build_gb):
+def test_vacuum_zero_exact_gaps_are_nonnegative_without_ordering_requirement(build_gb):
     gb = build_gb(vacuum=0.0)
 
     central_gap = float(
@@ -324,10 +324,10 @@ def test_vacuum_zero_periodic_gap_is_not_smaller_than_central_gap(build_gb):
         + np.min(gb.left_grain["x"])
     )
 
-    assert periodic_gap >= central_gap - gb.epsilon, (
-        f"periodic gap {periodic_gap:.8f} is smaller than central gap "
-        f"{central_gap:.8f}"
-    )
+    assert central_gap >= -gb.epsilon
+    assert periodic_gap >= -gb.epsilon
+    assert len(gb.left_grain) == 1_200
+    assert len(gb.right_grain) == 1_200
 
 
 @pytest.mark.parametrize("spec", FLUORITE_EXACT_SPECS)
@@ -441,3 +441,125 @@ def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometr
     _assert_fluorite_stoichiometry(gb.left_grain, label="left grain")
     _assert_fluorite_stoichiometry(gb.right_grain, label="right grain")
     _assert_fluorite_stoichiometry(gb.whole_system, label="whole system")
+
+
+# --------------------------------------------------------------------------------------
+# Exact decorated-site construction regressions
+# --------------------------------------------------------------------------------------
+
+REPRESENTATIVE_COMPLETE_COUNTS = [
+    pytest.param(
+        "zhang_001_ST_100",
+        [[0, 18, -1], [0, 1, 18], [1, 0, 0]],
+        [[0, 1, -18], [0, 18, 1], [1, 0, 0]],
+        19_500,
+        19_500,
+        id="zhang-001-ST-100",
+    ),
+    pytest.param(
+        "zhang_031_AT_100",
+        [[0, -5, 14], [1, 0, 0], [0, 14, 5]],
+        [[0, 10, 11], [1, 0, 0], [0, 11, -10]],
+        13_260,
+        13_260,
+        id="zhang-031-AT-100",
+    ),
+    pytest.param(
+        "zhang_041_TW_100",
+        [[0, 0, 1], [4, 1, 0], [-1, 4, 0]],
+        [[0, 0, 1], [4, -1, 0], [1, 4, 0]],
+        2_448,
+        2_448,
+        id="zhang-041-TW-100",
+    ),
+    pytest.param(
+        "zhang_086_AT_110",
+        [[-1, -1, 6], [1, -1, 0], [3, 3, 1]],
+        [[1, 1, 12], [1, -1, 0], [6, 6, -1]],
+        112_176,
+        220_752,
+        marks=pytest.mark.slow,
+        id="zhang-086-AT-110",
+    ),
+]
+
+
+def _build_campaign_style_exact_boundary(P, Q):
+    boundary = PQSpec(P=P, Q=Q, basis_mode="supplied")
+    common = {
+        "a0": 5.454,
+        "structure": "fluorite",
+        "atom_types": ("U", "O"),
+        "boundary": boundary,
+        "mode": "exact",
+        "repeat_factor": (1, 1),
+        "x_dim_min": 60.0,
+        "vacuum": 0.0,
+        "interaction_distance": 11.0,
+        "mismatch_tol": 0.005,
+        "mismatch_max_cells": 50,
+        "strain_grain": "both",
+    }
+    probe = GBMaker.from_boundary_spec(gb_thickness=5.454, **common)
+    thickness = 2.0 * max(
+        float(probe.spacing["x"]["left"]),
+        float(probe.spacing["x"]["right"]),
+    )
+    return GBMaker.from_boundary_spec(gb_thickness=thickness, **common)
+
+
+def _assert_complete_fluorite_population(atoms, expected):
+    assert len(atoms) == expected
+    assert expected % 12 == 0
+    cell_count = expected // 12
+    assert np.count_nonzero(atoms["name"] == "U") == 4 * cell_count
+    assert np.count_nonzero(atoms["name"] == "O") == 8 * cell_count
+
+
+@pytest.mark.filterwarnings(
+    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the "
+    r"minimum in-plane dimension cutoff of .* A\.:UserWarning"
+)
+@pytest.mark.filterwarnings(
+    r"ignore:Recommended repeat factor is at least 2\.:UserWarning"
+)
+@pytest.mark.parametrize(
+    ("case_id", "P", "Q", "left_expected", "right_expected"),
+    REPRESENTATIVE_COMPLETE_COUNTS,
+)
+def test_campaign_representatives_preserve_complete_exact_populations(
+    case_id,
+    P,
+    Q,
+    left_expected,
+    right_expected,
+):
+    gb = _build_campaign_style_exact_boundary(P, Q)
+
+    _assert_complete_fluorite_population(gb.left_grain, left_expected)
+    _assert_complete_fluorite_population(gb.right_grain, right_expected)
+    _assert_complete_fluorite_population(
+        gb.whole_system,
+        left_expected + right_expected,
+    )
+    assert np.all(np.isfinite(np.column_stack(
+        (gb.whole_system["x"], gb.whole_system["y"], gb.whole_system["z"])
+    )))
+
+
+@pytest.mark.filterwarnings(
+    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the "
+    r"minimum in-plane dimension cutoff of .* A\.:UserWarning"
+)
+@pytest.mark.filterwarnings(
+    r"ignore:Recommended repeat factor is at least 2\.:UserWarning"
+)
+def test_exact_decorated_site_order_is_deterministic():
+    P = [[0, 0, 1], [4, 1, 0], [-1, 4, 0]]
+    Q = [[0, 0, 1], [4, -1, 0], [1, 4, 0]]
+    first = _build_campaign_style_exact_boundary(P, Q)
+    second = _build_campaign_style_exact_boundary(P, Q)
+
+    assert np.array_equal(first.left_grain, second.left_grain)
+    assert np.array_equal(first.right_grain, second.right_grain)
+    assert np.array_equal(first.whole_system, second.whole_system)

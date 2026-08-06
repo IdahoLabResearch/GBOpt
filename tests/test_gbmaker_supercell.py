@@ -12,8 +12,10 @@ from GBOpt.gbmaker_supercell import (
     _integer_membership,
     build_supercell_matrix,
     enumerate_supercell_origins,
+    enumerate_supercell_sites,
     supercell_axis_numerators,
 )
+from GBOpt.UnitCell import RationalBasis, UnitCell
 
 # ---------------------------------------------------------------------------
 # Shared inputs
@@ -222,7 +224,7 @@ def test_enumerate_supercell_origins_satisfies_count_uniqueness_and_membership(
     upper_bounds = np.asarray(repeats, dtype=object) * determinant
 
     assert origins.shape == (int(np.prod(repeats)) * determinant, 3)
-    assert len(np.unique(origins, axis=0)) == len(origins)
+    assert len({tuple(int(value) for value in row) for row in origins}) == len(origins)
     assert np.all(numerators >= 0)
     assert np.all(numerators < upper_bounds)
 
@@ -416,4 +418,100 @@ def test_supercell_axis_numerators_rejects_singular_supercell():
         supercell_axis_numerators(
             singular,  # type: ignore[ty:invalid-argument-type]
             [[0, 0, 0]],  # type: ignore[ty:invalid-argument-type]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Exact decorated-site enumeration
+# ---------------------------------------------------------------------------
+
+
+def test_enumerate_supercell_sites_fluorite_population_and_species():
+    cell = UnitCell()
+    cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+
+    sites = enumerate_supercell_sites(
+        np.eye(3, dtype=object),
+        2,
+        3,
+        1,
+        rational_basis=cell.rational_basis,
+    )
+
+    assert sites.site_count == 12 * 2 * 3
+    counts = np.bincount(sites.basis_indices, minlength=12)
+    assert np.array_equal(counts, np.full(12, 6))
+    names = np.asarray(cell.rational_basis.names)[sites.basis_indices]
+    assert np.count_nonzero(names == "U") == 24
+    assert np.count_nonzero(names == "O") == 48
+    coordinates = {
+        tuple(int(value) for value in row)
+        for row in sites.coordinate_numerators
+    }
+    assert len(coordinates) == sites.site_count
+
+
+def test_enumerate_supercell_sites_wraps_decorated_sites_without_loss():
+    basis = RationalBasis(
+        names=("Cu", "Cu"),
+        numerators=np.array([[0, 0, 0], [3, 3, 3]], dtype=object),
+        denominator=4,
+    )
+    supercell = np.array(
+        [[1, 1, 0], [0, 1, 0], [0, 0, 1]],
+        dtype=object,
+    )
+
+    sites = enumerate_supercell_sites(
+        supercell,
+        1,
+        1,
+        1,
+        rational_basis=basis,
+    )
+
+    assert sites.site_count == 2
+    assert np.array_equal(sites.basis_indices, np.array([0, 1]))
+    assert len({tuple(row) for row in sites.coordinate_numerators}) == 2
+    upper = np.asarray(sites.repeats, dtype=object) * sites.coordinate_denominator
+    coordinates = np.asarray(sites.coordinate_numerators, dtype=object)
+    assert np.all(coordinates >= 0)
+    assert np.all(coordinates < upper)
+
+
+def test_enumerate_supercell_sites_is_deterministic_and_immutable():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 3.615, "Cu")
+    supercell = _int_matrix(SIGMA5_RIGHT_GRAIN_ROWS)
+
+    first = enumerate_supercell_sites(
+        supercell, 2, 1, 1, rational_basis=cell.rational_basis
+    )
+    second = enumerate_supercell_sites(
+        supercell, 2, 1, 1, rational_basis=cell.rational_basis
+    )
+
+    assert np.array_equal(first.coordinate_numerators, second.coordinate_numerators)
+    assert np.array_equal(first.basis_indices, second.basis_indices)
+    assert not first.coordinate_numerators.flags.writeable
+    assert not first.basis_indices.flags.writeable
+    with pytest.raises(ValueError):
+        first.coordinate_numerators[0, 0] = 1
+
+
+@pytest.mark.parametrize(
+    "rational_basis",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param(object(), id="unvalidated-object"),
+    ],
+)
+def test_enumerate_supercell_sites_requires_validated_rational_basis(rational_basis):
+    with pytest.raises(ValueError, match="rational_basis|rational metadata"):
+        enumerate_supercell_sites(
+            np.eye(3, dtype=object),
+            1,
+            1,
+            1,
+            rational_basis=rational_basis,
         )
