@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBMinimizer import (
@@ -22,18 +23,22 @@ from GBOpt.GBMinimizer import (
 class TestGeneticAlgorithmMinimizer(unittest.TestCase):
 
     def setUp(self):
-        theta = math.radians(36.869898)
-        misorientation = np.array([theta, 0.0, 0.0, 0.0, -theta / 2.0])
-        self.gb = GBMaker(
+        self.gb = GBMaker.from_boundary_spec(
             3.52,
             "fcc",
-            10.0,
-            misorientation,
             "Ni",
-            repeat_factor=(2, 5),
-            x_dim_min=30.0,
+            CSLExactSpec(
+                axis=(0, 0, 1),
+                plane=(3, 1, 0),
+                quat=(3, 0, 0, 1),
+                sigma=5,
+            ),
+            mode="exact",
+            gb_thickness=10.0,
+            repeat_factor=2,
+            x_dim_min=10.0,
             vacuum=8.0,
-            interaction_distance=8.0,
+            interaction_distance=3.0,
         )
         self.tmpdir = tempfile.TemporaryDirectory()
 

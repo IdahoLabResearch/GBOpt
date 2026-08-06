@@ -14,6 +14,7 @@ import numpy as np
 import pytest
 
 from GBOpt.Atom import Atom
+from GBOpt.BoundarySpec import CSLExactSpec, FiveDOFSpec
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
     GBManipulator,
@@ -45,6 +46,68 @@ def structured_array_equal(array1, array2):
                 return False
 
     return True
+
+
+_SIGMA5_TILT_EXACT_SPEC = CSLExactSpec(
+    axis=(0, 0, 1),
+    plane=(3, 1, 0),
+    quat=(3, 0, 0, 1),
+    sigma=5,
+)
+_SIGMA5_TWIST_EXACT_SPEC = CSLExactSpec(
+    axis=(1, 0, 0),
+    plane=(1, 0, 0),
+    quat=(3, 1, 0, 0),
+    sigma=5,
+)
+
+
+def _make_exact_gb(
+    a0,
+    structure,
+    atom_types,
+    *,
+    boundary=_SIGMA5_TILT_EXACT_SPEC,
+    gb_thickness=10.0,
+    repeat_factor=2,
+    x_dim_min=10.0,
+    vacuum=10.0,
+    interaction_distance=1.0,
+):
+    """Return a compact exact boundary for manipulator integration tests."""
+    return GBMaker.from_boundary_spec(
+        a0,
+        structure,
+        atom_types,
+        boundary,
+        mode="exact",
+        gb_thickness=gb_thickness,
+        repeat_factor=repeat_factor,
+        x_dim_min=x_dim_min,
+        vacuum=vacuum,
+        interaction_distance=interaction_distance,
+    )
+
+
+def _make_approximate_gb(
+    a0,
+    structure,
+    atom_types,
+    misorientation,
+    *,
+    gb_thickness,
+    **kwargs,
+):
+    """Return an approximate boundary through the supported spec API."""
+    return GBMaker.from_boundary_spec(
+        a0,
+        structure,
+        atom_types,
+        FiveDOFSpec(misorientation),
+        mode="approximate",
+        gb_thickness=gb_thickness,
+        **kwargs,
+    )
 
 
 def _local_orders_for_structure(structure, atoms):
@@ -231,13 +294,11 @@ def test_insert_atoms_with_stoichiometry_uses_selected_neighbor_site_ids(monkeyp
 )
 def test_displace_along_soft_modes_preserves_multitype_numeric_roundtrip(tmp_path):
     seed = 100
-    theta = math.radians(36.869898)
-    gb = GBMaker(
-        a0=3.0,
-        structure="rocksalt",
+    gb = _make_exact_gb(
+        3.0,
+        "rocksalt",
+        ("Na", "Cl"),
         gb_thickness=5.0,
-        misorientation=[theta, 0, 0, 0, -theta / 2.0],
-        atom_types=("Na", "Cl"),
         repeat_factor=(2, 3),
         x_dim_min=10.0,
         vacuum=2.0,
@@ -272,25 +333,23 @@ def test_displace_along_soft_modes_preserves_multitype_numeric_roundtrip(tmp_pat
 class TestGBManipulator(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        theta = math.radians(36.869898)
         cls.seed = 100
-        cls.tilt = GBMaker(
-            a0=1.0,
-            structure='fcc',
+        cls.tilt = _make_exact_gb(
+            1.0,
+            "fcc",
+            "Cu",
             gb_thickness=10.0,
-            misorientation=[theta, 0, 0, 0, -theta/2],
-            atom_types='Cu',
-            interaction_distance=1,
-            repeat_factor=(2, 5)
+            interaction_distance=1.0,
+            repeat_factor=2,
         )
-        cls.twist = GBMaker(
-            a0=1.0,
-            structure='fcc',
+        cls.twist = _make_exact_gb(
+            1.0,
+            "fcc",
+            "Cu",
+            boundary=_SIGMA5_TWIST_EXACT_SPEC,
             gb_thickness=10.0,
-            misorientation=[0, theta, 0, 0, 0],
-            atom_types='Cu',
-            interaction_distance=1,
-            repeat_factor=2
+            interaction_distance=1.0,
+            repeat_factor=2,
         )
         cls.manipulator_tilt = GBManipulator(cls.tilt, seed=cls.seed)
         cls.manipulator_twist = GBManipulator(cls.twist, seed=cls.seed)
@@ -495,17 +554,15 @@ class TestGBManipulator(unittest.TestCase):
         self.assertEqual(dict(zip(names, counts)), {"O": 2, "U": 1})
 
     def test_type_preservation_with_numeric_roundtrip(self):
-        theta = math.radians(36.869898)
-        gb = GBMaker(
-            a0=3.0,
-            structure="rocksalt",
+        gb = _make_exact_gb(
+            3.0,
+            "rocksalt",
+            ("Na", "Cl"),
             gb_thickness=5.0,
-            misorientation=[theta, 0, 0, 0, -theta / 2.0],
-            atom_types=("Na", "Cl"),
             repeat_factor=(2, 3),
             x_dim_min=10.0,
             vacuum=2.0,
-            interaction_distance=4.0
+            interaction_distance=4.0,
         )
         expected_types = {"Na", "Cl"}
         base_names = gb.whole_system["name"]
@@ -598,9 +655,16 @@ class TestGBManipulator(unittest.TestCase):
     def test_displace_along_soft_modes_simple_case(self):
         # While we end up using the indicated file for the actual atomic configuration,
         # that configuration was developed using this set of parameters
-        GB = GBMaker(
-            3.54, 'fcc', 5.0, np.array([0, 0, 0, 0, 0]), atom_types='Cu',
-            repeat_factor=6, x_dim_min=10, vacuum=10, interaction_distance=5
+        GB = _make_approximate_gb(
+            3.54,
+            "fcc",
+            "Cu",
+            np.zeros(5),
+            gb_thickness=5.0,
+            repeat_factor=6,
+            x_dim_min=10,
+            vacuum=10,
+            interaction_distance=5,
         )
         manipulator = GBManipulator(
             './tests/inputs/Cu_single_crystal_with_displaced_atom.txt', unit_cell=GB.unit_cell, gb_thickness=5)
@@ -673,14 +737,13 @@ class TestParent(unittest.TestCase):
     def setUp(self):
         self.unit_cell = UnitCell()
         self.unit_cell.init_by_structure('fcc', 1.0, 'Cu')
-        self.GB = GBMaker(
-            a0=1.0,
-            structure='fcc',
+        self.GB = _make_exact_gb(
+            1.0,
+            "fcc",
+            "Cu",
             gb_thickness=10.0,
-            misorientation=[math.radians(36.869898), 0, 0, 0, 0],
-            atom_types='Cu',
             repeat_factor=2,
-            interaction_distance=1
+            interaction_distance=1.0,
         )
         self.parent = Parent(self.GB)
         self.file = 'tests/inputs/basic_dump_test1.txt'
@@ -807,13 +870,25 @@ class TestParent(unittest.TestCase):
 class TestParentGBRegion(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        theta = 2 * np.arctan(1 / 3)
-        mis = np.array([theta, 0, 0, np.pi / 4, -np.arctan(1 / np.sqrt(2))])
-        kwargs = dict(atom_types="Si", interaction_distance=6.0,
-                      vacuum=0, repeat_factor=(2, 3))
-        probe = GBMaker(5.431, "diamond", 5.431, mis, **kwargs)
+        probe = _make_exact_gb(
+            5.431,
+            "diamond",
+            "Si",
+            gb_thickness=5.431,
+            interaction_distance=6.0,
+            vacuum=0,
+            repeat_factor=(2, 3),
+        )
         gb_thickness = 2 * max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
-        cls.gbm = GBMaker(5.431, "diamond", gb_thickness, mis, **kwargs)
+        cls.gbm = _make_exact_gb(
+            5.431,
+            "diamond",
+            "Si",
+            gb_thickness=gb_thickness,
+            interaction_distance=6.0,
+            vacuum=0,
+            repeat_factor=(2, 3),
+        )
         cls.parent = Parent(cls.gbm)
         cls.d_hkl = max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
 
@@ -869,8 +944,16 @@ class TestParentProxy(unittest.TestCase):
         self.assertIsInstance(parent, Parent)
 
     def test_setitem(self):
-        new_parent = Parent(GBMaker(a0=3.61, structure='fcc', gb_thickness=10.0, misorientation=[
-            math.radians(36.869898), 0, 0, 0, 0], atom_types='Cu', repeat_factor=2, interaction_distance=1))
+        new_parent = Parent(
+            _make_exact_gb(
+                3.61,
+                "fcc",
+                "Cu",
+                gb_thickness=10.0,
+                repeat_factor=2,
+                interaction_distance=1.0,
+            )
+        )
         self.parents_proxy[0] = new_parent
         self.assertIs(self.parents_proxy[0], new_parent)
 
@@ -879,8 +962,16 @@ class TestParentProxy(unittest.TestCase):
 
     def test_setitem_errors(self):
         self.parents_proxy[0] = None
-        new_parent = Parent(GBMaker(a0=1.0, structure='fcc', gb_thickness=10.0, misorientation=[
-            math.radians(36.869898), 0, 0, 0, 0], atom_types='Cu', repeat_factor=2, interaction_distance=1))
+        new_parent = Parent(
+            _make_exact_gb(
+                1.0,
+                "fcc",
+                "Cu",
+                gb_thickness=10.0,
+                repeat_factor=2,
+                interaction_distance=1.0,
+            )
+        )
         with self.assertRaises(ParentsProxyValueError):
             self.parents_proxy[1] = new_parent
         self.parents_proxy[0] = new_parent
