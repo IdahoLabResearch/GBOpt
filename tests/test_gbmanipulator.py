@@ -1,5 +1,6 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+import copy
 import filecmp
 import importlib
 import math
@@ -14,9 +15,11 @@ import pytest
 
 from GBOpt.Atom import Atom
 from GBOpt.BoundarySpec import CSLExactSpec, FiveDOFSpec, PQSpec
+from GBOpt.BoundaryTopology import BoundaryNormalTopology
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
     GBManipulator,
+    GBManipulatorTypeError,
     GBManipulatorValueError,
     Parent,
     ParentCorruptedFileError,
@@ -29,6 +32,7 @@ from GBOpt.GBManipulator import (
     _calculate_local_order,
     _ParentsProxy,
 )
+from GBOpt.GrainOwnership import LEFT_GRAIN_LABEL, RIGHT_GRAIN_LABEL, GrainOwnership
 from GBOpt.UnitCell import UnitCell
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -999,6 +1003,510 @@ class TestParentProxy(unittest.TestCase):
             self.parents_proxy[2] = new_parent
         with self.assertRaises(ParentsProxyTypeError):
             self.parents_proxy[0] = 1
+
+
+def _write_owned_test_data(path, atoms, box_dims):
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write("Owned candidate\n\n")
+        stream.write(f"{len(atoms)} atoms\n")
+        stream.write("1 atom types\n")
+        stream.writelines(
+            f"{lower:.12f} {upper:.12f} {axis}lo {axis}hi\n"
+            for axis, (lower, upper) in zip("xyz", box_dims, strict=True)
+        )
+        stream.write("\nAtoms\n\n")
+        stream.writelines(
+            f"{atom_id} {atom['name']} {atom['x']:.12f} "
+            f"{atom['y']:.12f} {atom['z']:.12f}\n"
+            for atom_id, atom in enumerate(atoms, start=1)
+        )
+
+
+def _owned_test_manipulator(
+    tmp_path,
+    *,
+    suffix="a",
+    coordinates=None,
+    box_dims=None,
+    gb_plane_x=5.0,
+    inplane_periodic=(True, True),
+    left_grain_x_bounds=None,
+    right_grain_x_bounds=None,
+    normal_topology=BoundaryNormalTopology.PERIODIC_BICRYSTAL,
+):
+    unit_cell = UnitCell()
+    unit_cell.init_by_structure("fcc", 3.52, "Ni")
+
+    if coordinates is None:
+        coordinates = [
+            ("Ni", 6.5, 1.0, 1.0),
+            ("Ni", 3.0, 2.0, 2.0),
+            ("Ni", 4.0, 3.0, 3.0),
+            ("Ni", 4.5, 4.0, 4.0),
+            ("Ni", 5.5, 5.0, 5.0),
+            ("Ni", 6.0, 6.0, 6.0),
+            ("Ni", 7.0, 7.0, 7.0),
+            ("Ni", 8.0, 8.0, 8.0),
+        ]
+
+    atoms = np.asarray(coordinates, dtype=Atom.atom_dtype)
+    box = (
+        np.asarray(
+            [
+                [0.0, 10.0],
+                [0.0, 10.0],
+                [0.0, 10.0],
+            ],
+            dtype=float,
+        )
+        if box_dims is None
+        else np.asarray(box_dims, dtype=float)
+    )
+    path = tmp_path / f"owned_{suffix}.data"
+    _write_owned_test_data(path, atoms, box)
+
+    labels = np.asarray(
+        [
+            LEFT_GRAIN_LABEL,
+            LEFT_GRAIN_LABEL,
+            LEFT_GRAIN_LABEL,
+            LEFT_GRAIN_LABEL,
+            RIGHT_GRAIN_LABEL,
+            RIGHT_GRAIN_LABEL,
+            RIGHT_GRAIN_LABEL,
+            RIGHT_GRAIN_LABEL,
+        ],
+        dtype=np.int8,
+    )
+
+    if left_grain_x_bounds is None:
+        left_grain_x_bounds = (float(box[0, 0]), gb_plane_x)
+    if right_grain_x_bounds is None:
+        right_grain_x_bounds = (gb_plane_x, float(box[0, 1]))
+
+    ownership = GrainOwnership(
+        atom_ids=np.arange(1, len(atoms) + 1),
+        labels=labels,
+        gb_plane_x=gb_plane_x,
+        inplane_periodic=inplane_periodic,
+        left_grain_x_bounds=left_grain_x_bounds,
+        right_grain_x_bounds=right_grain_x_bounds,
+        coordinate_tolerance=1.0e-8,
+        normal_topology=normal_topology,
+    )
+
+    manipulator = GBManipulator(
+        str(path),
+        unit_cell=unit_cell,
+        gb_thickness=10.0,
+        grain_ownership=ownership,
+        seed=2,
+    )
+    return manipulator, atoms, labels, box
+
+
+def test_explicit_ownership_file_parent_does_not_reclassify_crossing_atom(tmp_path):
+    manipulator, _atoms, labels, _box = _owned_test_manipulator(tmp_path)
+    parent = manipulator.parents[0]
+
+    assert np.array_equal(parent.grain_labels, labels)
+    assert parent.left_grain[0]["x"] == pytest.approx(6.5)
+    assert parent.gb_plane_x == pytest.approx(5.0)
+    assert len(parent.left_grain) == 4
+    assert len(parent.right_grain) == 4
+
+
+def test_explicit_ownership_copy_and_translation_preserve_labels(tmp_path):
+    manipulator, _atoms, labels, _box = _owned_test_manipulator(tmp_path)
+
+    translated = manipulator.translate_right_grain(0.25, 0.5)
+    expected = np.hstack(
+        (
+            labels[labels == LEFT_GRAIN_LABEL],
+            labels[labels == RIGHT_GRAIN_LABEL],
+        )
+    )
+
+    assert np.array_equal(manipulator.candidate_grain_labels, expected)
+    assert np.any(translated["x"][expected == LEFT_GRAIN_LABEL] > 5.0)
+
+    original_x = float(manipulator.parents[0].whole_system[0]["x"])
+
+    for copied in (copy.copy(manipulator), copy.deepcopy(manipulator)):
+        copied_labels = copied.candidate_grain_labels
+
+        with pytest.raises(ValueError):
+            copied_labels[0] = RIGHT_GRAIN_LABEL
+
+        assert np.array_equal(copied.candidate_grain_labels, expected)
+
+        copied.parents[0].whole_system[0]["x"] = original_x + 1.0
+
+        assert manipulator.parents[0].whole_system[0]["x"] == pytest.approx(original_x)
+
+
+def test_owned_slice_and_merge_normalizes_affine_equivalent_variable_cells(tmp_path):
+    parent1_manipulator, atoms, labels, box1 = _owned_test_manipulator(
+        tmp_path,
+        suffix="variable_a",
+        gb_plane_x=4.0,
+    )
+    box2 = np.asarray(
+        [[-2.0, 18.0], [-1.0, 11.0], [5.0, 20.0]],
+        dtype=float,
+    )
+    atoms2 = np.array(atoms, copy=True)
+    for axis_name, axis_index in zip("xyz", range(3), strict=True):
+        source_lo, source_hi = box1[axis_index]
+        target_lo, target_hi = box2[axis_index]
+        reduced = (atoms2[axis_name] - source_lo) / (source_hi - source_lo)
+        atoms2[axis_name] = target_lo + reduced * (target_hi - target_lo)
+
+    parent2_manipulator, _atoms2, labels2, _ = _owned_test_manipulator(
+        tmp_path,
+        suffix="variable_b",
+        coordinates=atoms2,
+        box_dims=box2,
+        gb_plane_x=6.0,
+        left_grain_x_bounds=(-2.0, 6.0),
+        right_grain_x_bounds=(6.0, 18.0),
+    )
+
+    class FixedRandom:
+        @staticmethod
+        def random():
+            return 0.5
+
+    crossover = GBManipulator._from_parents(
+        parent1_manipulator.parents[0],
+        parent2_manipulator.parents[0],
+        rng=FixedRandom(),
+    )
+    child = crossover.slice_and_merge()
+
+    # The second parent is mapped into the first parent's current relaxed box before
+    # slicing. With random() == 0.5, the slice is exactly the actual GB plane x=4.0,
+    # not the box midpoint x=5.0.
+    mask1 = atoms["x"] < 4.0
+    mask2 = atoms["x"] >= 4.0
+    expected = np.hstack((atoms[mask1], atoms[mask2]))
+    expected_labels = np.hstack((labels[mask1], labels2[mask2]))
+
+    np.testing.assert_array_equal(child["name"], expected["name"])
+    for axis_name in "xyz":
+        np.testing.assert_allclose(child[axis_name], expected[axis_name])
+    np.testing.assert_array_equal(
+        crossover.candidate_grain_labels,
+        expected_labels,
+    )
+
+
+def test_explicit_ownership_removal_deletes_same_label_row(tmp_path):
+    manipulator, atoms, labels, _box = _owned_test_manipulator(tmp_path)
+
+    class FixedChoice:
+        def __init__(self):
+            self.selected = None
+
+        def choice(self, choices, size=None, replace=False, p=None):
+            values = np.asarray(choices)
+            self.selected = int(values[-1])
+
+            if size is None:
+                return self.selected
+
+            return np.asarray([self.selected])
+
+    fixed_choice = FixedChoice()
+    manipulator.rng = fixed_choice
+
+    reduced, removed = manipulator.remove_atoms(
+        num_to_remove=1,
+        keep_ratio=False,
+        return_positions=True,
+    )
+
+    assert fixed_choice.selected is not None
+    assert len(reduced) == len(atoms) - 1
+    assert len(removed) == 1
+    assert np.array_equal(
+        manipulator.candidate_grain_labels,
+        np.delete(labels, fixed_choice.selected),
+    )
+
+
+def test_explicit_ownership_insertion_assigns_new_label_once(monkeypatch, tmp_path):
+    manipulator, atoms, labels, _box = _owned_test_manipulator(tmp_path)
+    recorded = {}
+
+    class FakeKDTree:
+        def __init__(self, data):
+            self.data = np.asarray(data, dtype=float)
+
+        def query_ball_tree(self, other, radius):
+            recorded["sites"] = other.data
+            return [[] for _ in range(len(self.data))]
+
+        def query(self, points, k=1):
+            points = np.asarray(points)
+            return (np.ones(len(points)), np.zeros(len(points), dtype=int))
+
+    class SiteChoice:
+        def choice(self, choices, size=None, replace=False, p=None):
+            choices = np.asarray(choices, dtype=int)
+            sites = recorded["sites"]
+
+            matches = [index for index in choices if np.isclose(sites[index, 0], 3.0)]
+            result = matches[0]
+
+            if size is None:
+                return result
+
+            return np.asarray([result])
+
+    module = importlib.import_module("GBOpt.GBManipulator")
+    monkeypatch.setattr(module, "KDTree", FakeKDTree)
+
+    manipulator.rng = SiteChoice()
+
+    inserted, new_atoms = manipulator.insert_atoms(
+        num_to_insert=1,
+        method="grid",
+        keep_ratio=False,
+        return_positions=True,
+    )
+
+    assert len(inserted) == len(atoms) + 1
+    assert new_atoms[0]["x"] == pytest.approx(3.0)
+
+    assert np.array_equal(manipulator.candidate_grain_labels[:-1], labels)
+    assert manipulator.candidate_grain_labels[-1] == LEFT_GRAIN_LABEL
+
+    # Ownership is assigned when the atom is inserted. Moving the returned candidate
+    # afterward must not cause geometric reclassification.
+    inserted[-1]["x"] = 9.0
+
+    assert manipulator.candidate_grain_labels[-1] == LEFT_GRAIN_LABEL
+
+
+def test_explicit_ownership_slice_and_merge_uses_atom_masks_for_labels(
+    tmp_path,
+):
+    manip1, atoms1, labels1, _box = _owned_test_manipulator(
+        tmp_path,
+        suffix="one",
+    )
+
+    coordinates2 = [
+        (
+            str(row["name"]),
+            float(row["x"]) + 0.25,
+            float(row["y"]),
+            float(row["z"]),
+        )
+        for row in atoms1
+    ]
+
+    manip2, atoms2, labels2, _ = _owned_test_manipulator(
+        tmp_path,
+        suffix="two",
+        coordinates=coordinates2,
+    )
+
+    class MidpointRng:
+        def random(self):
+            return 0.5
+
+    child_manipulator = GBManipulator._from_parents(
+        manip1.parents[0],
+        manip2.parents[0],
+        rng=MidpointRng(),
+    )
+
+    child = child_manipulator.slice_and_merge()
+
+    mask1 = atoms1["x"] < 5.0
+    mask2 = atoms2["x"] >= 5.0
+    expected_labels = np.hstack((labels1[mask1], labels2[mask2]))
+
+    assert np.array_equal(
+        child_manipulator.candidate_grain_labels,
+        expected_labels,
+    )
+    assert len(child) == len(expected_labels)
+
+
+@pytest.mark.parametrize(
+    ("second_parent_kwargs", "match"),
+    [
+        pytest.param(
+            {
+                "gb_plane_x": 5.25,
+            },
+            "affine-equivalent physical grain geometry",
+            id="gb-plane",
+        ),
+        pytest.param(
+            {
+                "inplane_periodic": (True, False),
+            },
+            "matching boundary topology",
+            id="inplane-periodicity",
+        ),
+    ],
+)
+def test_explicit_ownership_slice_and_merge_rejects_incompatible_parents(
+    tmp_path,
+    second_parent_kwargs,
+    match,
+):
+    manip1, _atoms1, _labels1, _box = _owned_test_manipulator(
+        tmp_path,
+        suffix="compatible",
+    )
+
+    manip2, _atoms2, _labels2, _ = _owned_test_manipulator(
+        tmp_path,
+        suffix="incompatible",
+        **second_parent_kwargs,
+    )
+
+    child_manipulator = GBManipulator._from_parents(
+        manip1.parents[0],
+        manip2.parents[0],
+    )
+
+    with pytest.raises(GBManipulatorValueError, match=match):
+        child_manipulator.slice_and_merge()
+
+
+def test_grain_ownership_rejected_for_two_parent_constructor(tmp_path):
+    manipulator, _atoms, _labels, _box = _owned_test_manipulator(tmp_path)
+
+    ownership = manipulator.parents[0].grain_ownership
+
+    with pytest.raises(GBManipulatorValueError, match="single file-backed parent"):
+        GBManipulator(
+            str(tmp_path / "owned_a.data"),
+            str(tmp_path / "owned_a.data"),
+            unit_cell=manipulator.parents[0].unit_cell,
+            grain_ownership=ownership,
+        )
+
+
+def test_explicit_ownership_inplane_translation_allows_crossed_right_atom(
+    tmp_path,
+):
+    coordinates = [
+        ("Ni", 3.0, 1.0, 1.0),
+        ("Ni", 3.5, 2.0, 2.0),
+        ("Ni", 4.0, 3.0, 3.0),
+        ("Ni", 4.5, 4.0, 4.0),
+        ("Ni", 4.75, 5.0, 5.0),
+        ("Ni", 6.0, 6.0, 6.0),
+        ("Ni", 7.0, 7.0, 7.0),
+        ("Ni", 8.0, 8.0, 8.0),
+    ]
+
+    manipulator, _atoms, labels, _box = _owned_test_manipulator(
+        tmp_path,
+        suffix="right_crossing",
+        coordinates=coordinates,
+    )
+
+    translated = manipulator.translate_right_grain(0.25, 0.5)
+    candidate_labels = manipulator.candidate_grain_labels
+
+    assert np.array_equal(
+        candidate_labels,
+        np.hstack(
+            (
+                labels[labels == LEFT_GRAIN_LABEL],
+                labels[labels == RIGHT_GRAIN_LABEL],
+            )
+        ),
+    )
+
+    assert translated["x"][candidate_labels == RIGHT_GRAIN_LABEL][0] == pytest.approx(
+        4.75
+    )
+
+
+def test_explicit_ownership_x_translation_rejects_crossed_right_atom(
+    tmp_path,
+):
+    coordinates = [
+        ("Ni", 3.0, 1.0, 1.0),
+        ("Ni", 3.5, 2.0, 2.0),
+        ("Ni", 4.0, 3.0, 3.0),
+        ("Ni", 4.5, 4.0, 4.0),
+        ("Ni", 4.75, 5.0, 5.0),
+        ("Ni", 6.0, 6.0, 6.0),
+        ("Ni", 7.0, 7.0, 7.0),
+        ("Ni", 8.0, 8.0, 8.0),
+    ]
+
+    manipulator, _atoms, _labels, _box = _owned_test_manipulator(
+        tmp_path,
+        suffix="right_crossing_dx",
+        coordinates=coordinates,
+    )
+
+    with pytest.raises(
+        GBManipulatorValueError,
+        match="outside the supported half-open x interval",
+    ):
+        manipulator.translate_right_grain(0.25, 0.5, dx=0.1)
+
+
+def test_grain_ownership_requires_ownership_value_object(tmp_path):
+    manipulator, _atoms, _labels, _box = _owned_test_manipulator(tmp_path)
+
+    path = str(tmp_path / "owned_a.data")
+
+    with pytest.raises(GBManipulatorTypeError, match="GrainOwnership"):
+        GBManipulator(
+            path,
+            unit_cell=manipulator.parents[0].unit_cell,
+            grain_ownership=object(),
+        )
+
+
+def test_explicit_ownership_parent_proxy_replacement_resets_candidate_labels(tmp_path):
+    manipulator, _atoms, labels, _box = _owned_test_manipulator(
+        tmp_path,
+        suffix="proxy_source",
+    )
+
+    replacement, _atoms2, replacement_labels, _ = _owned_test_manipulator(
+        tmp_path,
+        suffix="proxy_replacement",
+    )
+
+    class FixedChoice:
+        def choice(self, choices, size=None, replace=False, p=None):
+            values = np.asarray(choices)
+            selected = values[-1]
+
+            if size is None:
+                return selected
+
+            return np.asarray([selected])
+
+    manipulator.rng = FixedChoice()
+    manipulator.remove_atoms(
+        num_to_remove=1,
+        keep_ratio=False,
+    )
+
+    assert len(manipulator.candidate_grain_labels) == len(labels) - 1
+
+    manipulator.parents[0] = replacement.parents[0]
+
+    assert np.array_equal(
+        manipulator.candidate_grain_labels,
+        replacement_labels,
+    )
 
 
 if __name__ == '__main__':

@@ -38,6 +38,10 @@ All notable changes to GBOpt are documented in this file.
   file-backed initial structure with explicit ownership and preserve that state
   through scalar or batch evaluation, mutation, crossover, carryover, cloning,
   and artifact reload.
+- **Ownership-aware orthogonal cell relaxation** — explicit-ownership GA execution
+  can opt into evaluator-returned orthogonal variable-cell relaxation. Grain labels
+  remain aligned by transient atom ID while the current box, GB plane, and physical
+  grain bounds evolve affinely between generations.
 - **`inplane_periodic` coherence metadata** — `GBMaker` exposes machine-readable
   y/z periodicity information.
 - **`gb_params` CLI** — adds `convert`, `describe`, `exactify`, and
@@ -64,8 +68,9 @@ All notable changes to GBOpt are documented in this file.
   left/right ownership rather than being repartitioned at the simulation-box
   midpoint.
 - LAMMPS data and dump reloads validate row identity, species, population, box
-  geometry, periodicity, and topology before reconstructing an optimizer
-  candidate.
+  geometry, periodicity, and topology before reconstructing an optimizer candidate.
+  Changed orthogonal box bounds remain rejected by default and are accepted only when
+  variable-cell execution is explicitly enabled.
 - Failed or incomplete explicit-ownership evaluations retain aligned failure
   records and receive the optimizer penalty without corrupting GA population
   ordering.
@@ -100,3 +105,5 @@ All notable changes to GBOpt are documented in this file.
   slab termination control is deferred.
 - Explicit ownership-aware file handoff and reload are integrated with the
   genetic-algorithm path. Other optimizer paths require separate integration.
+- Explicit ownership variable-cell reload supports orthogonal cell-length changes;
+  triclinic/sheared evaluator output remains unsupported.

@@ -6,6 +6,7 @@ This module owns in-memory structural transformations. External file ownership,
 calculator evaluation, and optimizer policy do not belong here.
 """
 
+import copy as copy_module
 import multiprocessing as mp
 import warnings
 from dataclasses import dataclass
@@ -25,7 +26,19 @@ from GBOpt.BoundaryTopology import (
     BoundaryNormalTopology,
     normalize_boundary_normal_topology,
 )
+from GBOpt.FileGrainOwnership import (
+    LammpsAtomData,
+    LammpsDataError,
+    read_lammps_data_file,
+    read_lammps_dump_file,
+)
 from GBOpt.GBMaker import GBMaker
+from GBOpt.GrainOwnership import (
+    LEFT_GRAIN_LABEL,
+    RIGHT_GRAIN_LABEL,
+    GrainOwnership,
+    GrainOwnershipError,
+)
 from GBOpt.UnitCell import UnitCell
 
 # TODO: Generalize to interfaces, not just GBs
@@ -45,10 +58,6 @@ class GBManipulatorValueError(GBManipulatorError, ValueError):
 class GBManipulatorTypeError(GBManipulatorError, TypeError):
     """Exception raised in the GBManipulator class an invalid type is assigned to a
     GBManipulator attribute."""
-
-
-LEFT_GRAIN_LABEL = 0
-RIGHT_GRAIN_LABEL = 1
 
 
 def _validate_finite_real(name: str, value: object) -> float:
@@ -163,6 +172,49 @@ def _readonly_copy(values: np.ndarray, *, dtype=None) -> np.ndarray:
     result = np.array(values, dtype=dtype, copy=True)
     result.setflags(write=False)
     return result
+
+
+def _affine_remap_axis_values(
+    values: float | np.ndarray,
+    source_bounds: np.ndarray,
+    target_bounds: np.ndarray,
+) -> float | np.ndarray:
+    """Map Cartesian coordinates between one pair of affine-equivalent bounds.
+
+    :param values: Scalar coordinate or coordinate array to transform.
+    :param source_bounds: Two-element source interval.
+    :param target_bounds: Two-element target interval.
+    :return: Coordinate values with the same reduced positions in the target interval.
+    """
+    source_lo, source_hi = np.asarray(source_bounds, dtype=float)
+    target_lo, target_hi = np.asarray(target_bounds, dtype=float)
+    reduced = (np.asarray(values, dtype=float) - source_lo) / (source_hi - source_lo)
+    mapped = target_lo + reduced * (target_hi - target_lo)
+    if np.ndim(values) == 0:
+        return float(mapped)
+    return np.asarray(mapped, dtype=float)
+
+
+def _affine_rescale_atoms(
+    atoms: np.ndarray,
+    source_box: np.ndarray,
+    target_box: np.ndarray,
+) -> np.ndarray:
+    """Rescale atom coordinates between affine-equivalent orthogonal boxes.
+
+    :param atoms: Structured atom rows to rescale.
+    :param source_box: Source orthogonal box bounds.
+    :param target_box: Target orthogonal box bounds.
+    :return: Independent atom rows expressed in the target box.
+    """
+    rescaled = np.array(atoms, copy=True)
+    for axis_name, axis_index in zip("xyz", range(3), strict=True):
+        rescaled[axis_name] = _affine_remap_axis_values(
+            rescaled[axis_name],
+            source_box[axis_index],
+            target_box[axis_index],
+        )
+    return rescaled
 
 
 def _translate_inplane(
@@ -614,6 +666,8 @@ class Parent:
     :param gb_thickness: Thickness of the GB region, optional, defaults to 10.
     :param type_dict: The map from integer to element string. The default mapping is
         1 -> 'H', 2 -> 'He', etc.
+    :param grain_ownership: Keyword argument, optional, defaults to ``None``. Explicit
+        persistent grain ownership for a single file-backed parent.
     """
     __num_to_name = {val: key for key, val in Atom._numbers.items()}
 
@@ -624,13 +678,28 @@ class Parent:
         unit_cell: UnitCell = None,
         gb_thickness: float = 10,
         type_dict: dict | None = None,
+        grain_ownership: GrainOwnership | None = None,
     ) -> None:
+        if grain_ownership is not None and not isinstance(
+            grain_ownership, GrainOwnership
+        ):
+            raise ParentValueError("grain_ownership must be a GrainOwnership instance")
         if isinstance(system, GBMaker):
+            if grain_ownership is not None:
+                raise ParentValueError(
+                    "grain_ownership is only valid for file-backed parents"
+                )
             self.__init_by_gbmaker(system)
         else:
             if gb_thickness is None:  # defaults to 10 if passed in as None.
                 gb_thickness = 10
-            self.__init_by_file(system, unit_cell, gb_thickness, type_dict)
+            self.__init_by_file(
+                system,
+                unit_cell,
+                gb_thickness,
+                type_dict,
+                grain_ownership,
+            )
 
         x_gb = self.__gb_plane_x
         left_cut = x_gb - self.__gb_thickness / 2.0
@@ -643,7 +712,12 @@ class Parent:
             (self.__whole_system["x"] > left_cut) & (
                 self.__whole_system["x"] < right_cut)
         )[0]
-        self.__gb_atoms = np.hstack((left_gb, right_gb))
+        if self.__grain_ownership is None:
+            self.__gb_atoms = np.hstack((left_gb, right_gb))
+        else:
+            # Persistent grain identity and geometric GB-region membership are
+            # intentionally independent concepts.
+            self.__gb_atoms = self.__whole_system[self.__gb_indices]
         self.__GBpos = self.__whole_system[
             np.where(
                 np.logical_and(
@@ -659,6 +733,8 @@ class Parent:
 
         :param system: The GBMaker instance.
         """
+        self.__grain_ownership = None
+        self.__initial_atom_ids = None
         self.__right_grain = system.right_grain
         self.__left_grain = system.left_grain
         self.__whole_system = system.whole_system
@@ -713,6 +789,7 @@ class Parent:
         unit_cell: UnitCell,
         gb_thickness: float,
         type_dict: dict | None,
+        grain_ownership: GrainOwnership | None,
     ) -> None:
         """
         Method for initializing the Parent using a file.
@@ -736,6 +813,8 @@ class Parent:
         self.__gb_thickness = gb_thickness
         self.__inplane_periodic = (True, True)
         self.__coordinate_tolerance = 1.0e-10
+        self.__grain_ownership = None
+        self.__initial_atom_ids = None
         self.__normal_topology = BoundaryNormalTopology.UNKNOWN
         if not isfile(system_file):
             raise ParentFileNotFoundError(f"{system_file} does not exist.")
@@ -781,16 +860,104 @@ class Parent:
 
         for method, file_keywords in keywords.items():
             if any(keyword in line for keyword in file_keywords for line in head):
-                method(system_file, unit_cell, gb_thickness, type_dict)
+                method(
+                    system_file,
+                    unit_cell,
+                    gb_thickness,
+                    type_dict,
+                    grain_ownership,
+                )
                 break
         else:
             raise ParentValueError(f"Unknown file format for {system_file}")
 
-        self.__left_grain_x_bounds = np.array(
-            [self.__box_dims[0, 0], self.__gb_plane_x], dtype=float
-        )
+        if self.__grain_ownership is None:
+            self.__left_grain_x_bounds = np.array(
+                [self.__box_dims[0, 0], self.__gb_plane_x], dtype=float
+            )
+            self.__right_grain_x_bounds = np.array(
+                [self.__gb_plane_x, self.__box_dims[0, 1]], dtype=float
+            )
+
+    def __init_from_owned_snapshot(
+        self,
+        snapshot: LammpsAtomData,
+        grain_ownership: GrainOwnership,
+    ) -> None:
+        """Restore a file-backed parent from explicit ownership and parsed rows.
+
+        :param snapshot: Parsed LAMMPS snapshot in file-row order.
+        :param grain_ownership: Explicit ownership keyed by serialization-local IDs.
+        :raises GrainOwnershipError: If IDs, geometry, or topology are inconsistent.
+        """
+        aligned = grain_ownership.aligned_to(snapshot.atom_ids)
+        file_ids = snapshot.atom_ids
+        order = np.argsort(file_ids, kind="stable")
+        sorted_ids = file_ids[order]
+        ownership = aligned.aligned_to(sorted_ids)
+        atoms = snapshot.atoms[order]
+        box_dims = snapshot.box_dims
+        tolerance = ownership.coordinate_tolerance
+        left_bounds = ownership.left_grain_x_bounds
+        right_bounds = ownership.right_grain_x_bounds
+        if left_bounds is None:
+            raise GrainOwnershipError(
+                "explicit file loading requires left-grain x bounds"
+            )
+        if not box_dims[0, 0] < ownership.gb_plane_x < box_dims[0, 1]:
+            raise GrainOwnershipError(
+                "gb_plane_x must lie strictly inside the file x bounds"
+            )
+        if (
+            left_bounds[0] < box_dims[0, 0] - tolerance
+            or right_bounds[1] > box_dims[0, 1] + tolerance
+        ):
+            raise GrainOwnershipError(
+                "physical grain x bounds must lie inside the file box"
+            )
+        if snapshot.boundary_periodic is not None:
+            expected = (
+                ownership.periodic_outer_x_interface,
+                *ownership.inplane_periodic,
+            )
+            if snapshot.boundary_periodic != expected:
+                raise GrainOwnershipError(
+                    "file boundary topology does not match explicit ownership"
+                )
+
+        labels = ownership.labels
+        self.__whole_system = np.array(atoms, copy=True)
+        self.__left_grain = self.__whole_system[labels == LEFT_GRAIN_LABEL]
+        self.__right_grain = self.__whole_system[labels == RIGHT_GRAIN_LABEL]
+        if not len(self.__left_grain) or not len(self.__right_grain):
+            raise GrainOwnershipError(
+                "explicit ownership must contain both left and right grains"
+            )
+        self.__box_dims = np.array(box_dims, dtype=float, copy=True)
+        self.__x_dim = float(self.__box_dims[0, 1] - self.__box_dims[0, 0])
+        self.__y_dim = float(self.__box_dims[1, 1] - self.__box_dims[1, 0])
+        self.__z_dim = float(self.__box_dims[2, 1] - self.__box_dims[2, 0])
+        self.__gb_plane_x = ownership.gb_plane_x
+        self.__inplane_periodic = ownership.inplane_periodic
+        self.__coordinate_tolerance = tolerance
+        self.__left_grain_x_bounds = np.array(left_bounds, dtype=float, copy=True)
         self.__right_grain_x_bounds = np.array(
-            [self.__gb_plane_x, self.__box_dims[0, 1]], dtype=float
+            right_bounds,
+            dtype=float,
+            copy=True,
+        )
+        self.__normal_topology = ownership.normal_topology
+        self.__initial_atom_ids = np.array(sorted_ids, dtype=np.int64, copy=True)
+        self.__initial_atom_ids.setflags(write=False)
+        self.__grain_ownership = GrainOwnership(
+            atom_ids=self.__initial_atom_ids,
+            labels=labels,
+            gb_plane_x=self.__gb_plane_x,
+            inplane_periodic=self.__inplane_periodic,
+            left_grain_x_bounds=self.__left_grain_x_bounds,
+            right_grain_x_bounds=self.__right_grain_x_bounds,
+            coordinate_tolerance=self.__coordinate_tolerance,
+            normal_topology=self.__normal_topology,
         )
 
     def __init_from_lammps_dump(
@@ -799,6 +966,7 @@ class Parent:
         unit_cell: UnitCell,
         gb_thickness: float,
         type_dict: dict | None,
+        grain_ownership: GrainOwnership | None = None,
     ) -> None:
         """
         Method for initializing the Parent using a LAMMPS dump file.
@@ -816,6 +984,19 @@ class Parent:
         :raises ParentFileMissingDataError: Exception raised if the file is otherwise
             formatted correctly, but is missing required data.
         """
+        if grain_ownership is not None:
+            try:
+                snapshot = read_lammps_dump_file(
+                    system_file,
+                    type_dict=type_dict,
+                )
+                self.__init_from_owned_snapshot(snapshot, grain_ownership)
+            except (LammpsDataError, GrainOwnershipError) as exc:
+                raise ParentValueError(
+                    f"invalid explicit ownership for {system_file}"
+                ) from exc
+            return
+
         skip_rows = 0
         with open(system_file) as f:
             line = f.readline()
@@ -886,7 +1067,7 @@ class Parent:
             atom_attributes = line.split()[2:]
             required_attributes = ["type", "x", "y", "z"]
 
-            if not all([i in atom_attributes for i in required_attributes]):
+            if not all(i in atom_attributes for i in required_attributes):
                 raise ParentFileMissingDataError(
                     f"One or more required attributes are missing.\n"
                     f"Required: {required_attributes}, "
@@ -945,6 +1126,7 @@ class Parent:
         unit_cell: UnitCell,
         gb_thickness: float,
         type_dict: dict | None,
+        grain_ownership: GrainOwnership | None = None,
     ) -> None:
         """
         Method for initializing the Parent using a LAMMPS input file.
@@ -978,6 +1160,19 @@ class Parent:
                     "type_dict must be a dict[str, int] or dict[int, str]."
                 )
         skiprows = 0
+
+        if grain_ownership is not None:
+            try:
+                snapshot = read_lammps_data_file(
+                    system_file,
+                    type_dict=type_dict,
+                )
+                self.__init_from_owned_snapshot(snapshot, grain_ownership)
+            except (LammpsDataError, GrainOwnershipError) as exc:
+                raise ParentValueError(
+                    f"invalid explicit ownership for {system_file}"
+                ) from exc
+            return
 
         with open(system_file) as f:
             lines = iter(f)
@@ -1153,6 +1348,52 @@ class Parent:
         """Copy of the right physical grain interval."""
         return np.array(self.__right_grain_x_bounds, dtype=float, copy=True)
 
+    @property
+    def grain_ownership(self) -> GrainOwnership | None:
+        """Defensive copy of explicit persistent ownership, when present."""
+        if self.__grain_ownership is None:
+            return None
+        return copy_module.copy(self.__grain_ownership)
+
+    @property
+    def grain_labels(self) -> np.ndarray | None:
+        """Persistent labels aligned with ``whole_system`` rows, when present."""
+        if self.__grain_ownership is None:
+            return None
+        return self.__grain_ownership.labels
+
+    @property
+    def initial_atom_ids(self) -> np.ndarray | None:
+        """Initial serialization IDs while they remain applicable."""
+        if self.__initial_atom_ids is None:
+            return None
+        result = np.array(self.__initial_atom_ids, dtype=np.int64, copy=True)
+        result.setflags(write=False)
+        return result
+
+    def __copy__(self):
+        """Independent shallow copy preserving explicit ownership."""
+        result = type(self).__new__(type(self))
+        for name, value in self.__dict__.items():
+            if isinstance(value, np.ndarray):
+                value = value.copy()
+            elif isinstance(value, GrainOwnership):
+                value = copy_module.copy(value)
+            setattr(result, name, value)
+        return result
+
+    def __deepcopy__(self, memo):
+        """Independent deep copy preserving explicit ownership."""
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        for name, value in self.__dict__.items():
+            if isinstance(value, np.ndarray):
+                copied = value.copy()
+            else:
+                copied = copy_module.deepcopy(value, memo)
+            setattr(result, name, copied)
+        return result
+
 
 class _ParentsProxy:
     """
@@ -1198,6 +1439,10 @@ class _ParentsProxy:
         parents = self.__manipulator._GBManipulator__parents[:]
         parents[index] = value
         self.__manipulator._GBManipulator__parents = parents
+        if parents[0] is not None:
+            self.__manipulator._GBManipulator__candidate_grain_labels = (
+                self.__manipulator._GBManipulator__initial_candidate_labels()
+            )
 
     def __len__(self) -> int:
         """
@@ -1429,6 +1674,8 @@ class GBManipulator:
         (automatically seeded).
     :param type_dict: The mapping of integer to string types. If not specified, the
         default mapping is 1 -> 'H', 2 -> 'He', etc.
+    :param grain_ownership: Keyword argument, optional, defaults to ``None``. Explicit
+        persistent ownership for a single file-backed first parent.
     """
 
     def __init__(
@@ -1440,7 +1687,14 @@ class GBManipulator:
         unit_cell: UnitCell = None,
         seed: int = None,
         type_dict: dict | None = None,
+        grain_ownership: GrainOwnership | None = None,
     ) -> None:
+        if grain_ownership is not None and not isinstance(
+            grain_ownership, GrainOwnership
+        ):
+            raise GBManipulatorTypeError(
+                "grain_ownership must be a GrainOwnership instance"
+            )
         # initialize the random number generator
         if not seed:
             self.__rng = np.random.default_rng()
@@ -1453,13 +1707,77 @@ class GBManipulator:
             # Some mutators require two parents, so we set __one_parent to True so we do
             # not attempt to perform those in the case that only one GB is passed in.
             self.__one_parent = True
-            self.__set_parents(system1, unit_cell=unit_cell,
-                               gb_thickness=gb_thickness, type_dict=type_dict)
+            self.__set_parents(
+                system1,
+                unit_cell=unit_cell,
+                gb_thickness=gb_thickness,
+                type_dict=type_dict,
+                grain_ownership=grain_ownership,
+            )
         else:
+            if grain_ownership is not None:
+                raise GBManipulatorValueError(
+                    "grain_ownership is only supported for a single file-backed parent"
+                )
             self.__one_parent = False
             self.__set_parents(system1, system2, unit_cell=unit_cell,
                                gb_thickness=gb_thickness, type_dict=type_dict)
         self.__num_processes = mp.cpu_count() // 2 or 1
+        self.__candidate_grain_labels = self.__initial_candidate_labels()
+
+    @classmethod
+    def _from_parents(
+        cls,
+        parent1: Parent,
+        parent2: Parent | None = None,
+        *,
+        rng: np.random.Generator | None = None,
+    ) -> "GBManipulator":
+        """Construct a manipulator from already validated parent state.
+
+        :param parent1: First parent.
+        :param parent2: Second parent, optional, defaults to ``None``.
+        :param rng: Keyword argument, optional, defaults to ``None``. Random-number
+            generator to attach to the manipulator.
+        :return: Manipulator containing defensive parent copies.
+        :raises GBManipulatorValueError: If either supplied parent is invalid.
+        """
+        if not isinstance(parent1, Parent) or (
+            parent2 is not None and not isinstance(parent2, Parent)
+        ):
+            raise GBManipulatorValueError("_from_parents requires Parent instances")
+        result = cls.__new__(cls)
+        result.__rng = np.random.default_rng() if rng is None else rng
+        result.__parents = [copy_module.copy(parent1), None]
+        if parent2 is not None:
+            result.__parents[1] = copy_module.copy(parent2)
+        result.__one_parent = parent2 is None
+        result.__num_processes = mp.cpu_count() // 2 or 1
+        result.__candidate_grain_labels = result.__initial_candidate_labels()
+        return result
+
+    def __initial_candidate_labels(self) -> np.ndarray | None:
+        """Return labels aligned with the first parent's current row order."""
+        labels = self.__parents[0].grain_labels
+        if labels is None:
+            return None
+        return _normalize_grain_labels(
+            labels,
+            expected_count=len(self.__parents[0].whole_system),
+        )
+
+    def __set_candidate_labels(self,
+                               labels: np.ndarray | None,
+                               expected_count: int,
+                               ) -> None:
+        """Store labels aligned with the most recently produced candidate."""
+        if labels is None:
+            self.__candidate_grain_labels = None
+            return
+        self.__candidate_grain_labels = _normalize_grain_labels(
+            labels,
+            expected_count=expected_count,
+        )
 
     def __set_parents(
             self,
@@ -1469,6 +1787,7 @@ class GBManipulator:
             unit_cell: UnitCell = None,
             gb_thickness: float = None,
             type_dict: dict | None = None,
+            grain_ownership: GrainOwnership | None = None,
     ) -> None:
         """
         Method to assign the parent(s) that will create the child(ren).
@@ -1483,11 +1802,18 @@ class GBManipulator:
         :param type_dict: Keyword argument. Optional, defaults to an empty dict. The
             mapping from integer to elemental string. Default mapping is 1 -> 'H',
             2 -> 'He', etc.
+        :param grain_ownership: Keyword argument, optional, defaults to ``None``.
+            Explicit persistent ownership for a single file-backed first parent.
         """
         if type_dict is None:
             type_dict = unit_cell.type_map if unit_cell is not None else None
         self.__parents[0] = Parent(
-            system1, unit_cell=unit_cell, gb_thickness=gb_thickness, type_dict=type_dict)
+            system1,
+            unit_cell=unit_cell,
+            gb_thickness=gb_thickness,
+            type_dict=type_dict,
+            grain_ownership=grain_ownership,
+        )
         if system2 is not None:
             # If there are 2 parents, with the first one being of type GBMaker, and
             # unit_cell has not been passed in, we assume that the unit cell from the
@@ -1499,6 +1825,15 @@ class GBManipulator:
                     gb_thickness = system1.gb_thickness
             self.__parents[1] = Parent(
                 system2, unit_cell=unit_cell, gb_thickness=gb_thickness, type_dict=type_dict)
+
+    @property
+    def candidate_grain_labels(self) -> np.ndarray | None:
+        """Return labels aligned with the most recently produced candidate."""
+        if self.__candidate_grain_labels is None:
+            return None
+        result = np.array(self.__candidate_grain_labels, dtype=np.int8, copy=True)
+        result.setflags(write=False)
+        return result
 
     @property
     def rng(self):
@@ -1575,7 +1910,10 @@ class GBManipulator:
             raise GBManipulatorValueError(
                 "a parent candidate requires known boundary-normal topology"
             )
-        labels = self.__concatenated_labels(parent, len(parent.whole_system))
+        labels = parent.grain_labels
+        if labels is None:
+            labels = self.__concatenated_labels(parent, len(parent.whole_system))
+        self.__set_candidate_labels(labels, len(parent.whole_system))
         return self.__geometry_candidate(parent.whole_system, labels)
 
     def translate_right_grain(
@@ -1612,8 +1950,14 @@ class GBManipulator:
         x_lower, x_upper = parent.right_grain_x_bounds
 
         translated_x = updated_right["x"] + dx
-        if np.any(translated_x < x_lower - tolerance) or np.any(
-            translated_x >= x_upper
+        # Explicit ownership is persistent state. A relaxed atom may legitimately cross
+        # the nominal interface plane without changing grains, so a pure in-plane
+        # registry translation must not reject that state just because a right-owned
+        # atom currently lies outside the original physical x interval. Preserve the
+        # existing x-translation safety check whenever x is actually displaced.
+        if abs(dx) > tolerance and (
+            np.any(translated_x < x_lower - tolerance)
+            or np.any(translated_x >= x_upper)
         ):
             raise GBManipulatorValueError(
                 "dx moves one or more right-grain atoms outside the supported "
@@ -1630,7 +1974,10 @@ class GBManipulator:
             tolerance=tolerance,
         )
 
-        return np.hstack((parent.left_grain, updated_right))
+        candidate = np.hstack((parent.left_grain, updated_right))
+        labels = self.__concatenated_labels(parent, len(candidate))
+        self.__set_candidate_labels(labels, len(candidate))
+        return candidate
 
     def make_translation_candidate(
         self,
@@ -1991,16 +2338,84 @@ class GBManipulator:
                 "Unable to slice and merge with only one parent.")
         parent1 = self.__parents[0]
         parent2 = self.__parents[1]
+        labels1 = parent1.grain_labels
+        labels2 = parent2.grain_labels
+        if (labels1 is None) != (labels2 is None):
+            raise GBManipulatorValueError(
+                "slice_and_merge requires both parents to use the same ownership mode"
+            )
+        if labels1 is not None:
+            tolerance = max(parent1.coordinate_tolerance, parent2.coordinate_tolerance)
+            if (
+                parent1.inplane_periodic != parent2.inplane_periodic
+                or parent1.normal_topology is not parent2.normal_topology
+            ):
+                raise GBManipulatorValueError(
+                    "owned crossover requires matching boundary topology"
+                )
+            mapped_plane = _affine_remap_axis_values(
+                parent2.gb_plane_x,
+                parent2.box_dims[0],
+                parent1.box_dims[0],
+            )
+            mapped_left_bounds = _affine_remap_axis_values(
+                parent2.left_grain_x_bounds,
+                parent2.box_dims[0],
+                parent1.box_dims[0],
+            )
+            mapped_right_bounds = _affine_remap_axis_values(
+                parent2.right_grain_x_bounds,
+                parent2.box_dims[0],
+                parent1.box_dims[0],
+            )
+            if (
+                not np.isclose(
+                    parent1.gb_plane_x,
+                    mapped_plane,
+                    atol=tolerance,
+                    rtol=0.0,
+                )
+                or not np.allclose(
+                    parent1.left_grain_x_bounds,
+                    mapped_left_bounds,
+                    atol=tolerance,
+                    rtol=0.0,
+                )
+                or not np.allclose(
+                    parent1.right_grain_x_bounds,
+                    mapped_right_bounds,
+                    atol=tolerance,
+                    rtol=0.0,
+                )
+            ):
+                raise GBManipulatorValueError(
+                    "owned crossover requires affine-equivalent physical grain "
+                    "geometry"
+                )
         pos1 = parent1.whole_system
         pos2 = parent2.whole_system
+        if labels1 is not None and not np.allclose(
+            parent1.box_dims,
+            parent2.box_dims,
+            atol=tolerance,
+            rtol=0.0,
+        ):
+            pos2 = _affine_rescale_atoms(
+                pos2,
+                parent2.box_dims,
+                parent1.box_dims,
+            )
         # Limit the slice site to be a quarter of the gb width from the GB itself.
-        # TODO: use a more robust calculation for GB position.
-        # Note that this is the third time this has been calculated.
-        slice_pos = (parent1.box_dims[0, 1] - parent1.box_dims[0, 0]) / 2.0 + \
+        slice_pos = parent1.gb_plane_x + \
             parent1.gb_thickness * (-0.25 + 0.5*self.__rng.random())
-        pos1 = pos1[pos1["x"] < slice_pos]
-        pos2 = pos2[pos2["x"] >= slice_pos]
-        new_positions = np.hstack((pos1, pos2))
+        mask1 = pos1["x"] < slice_pos
+        mask2 = pos2["x"] >= slice_pos
+        new_positions = np.hstack((pos1[mask1], pos2[mask2]))
+        if labels1 is None:
+            child_labels = None
+        else:
+            child_labels = np.hstack((labels1[mask1], labels2[mask2]))
+        self.__set_candidate_labels(child_labels, len(new_positions))
 
         return new_positions
 
@@ -2061,6 +2476,9 @@ class GBManipulator:
             warnings.warn(
                 "Calculated fraction of atoms to remove is 0 "
                 f"(int({gb_fraction}*{len(gb_atoms)}) = 0)"
+            )
+            self.__set_candidate_labels(
+                getattr(parent, "grain_labels", None), len(parent.whole_system)
             )
             return atoms
 
@@ -2197,6 +2615,13 @@ class GBManipulator:
         if not len(indices_to_remove) == num_to_remove:
             raise GBManipulatorValueError("")
         pos = np.delete(parent.whole_system, indices_to_remove, axis=0)
+        labels = getattr(parent, "grain_labels", None)
+        retained_labels = (
+            None
+            if labels is None
+            else np.delete(labels, indices_to_remove, axis=0)
+        )
+        self.__set_candidate_labels(retained_labels, len(pos))
 
         if return_positions:
             return (pos, parent.whole_system[indices_to_remove])
@@ -2410,11 +2835,11 @@ class GBManipulator:
              )
 
         if (num_to_insert is not None and
-                    (
+            (
                         num_to_insert < 1 or
                         num_to_insert > int(0.25 * len(gb_atoms))
                     )
-                ):
+            ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region.")
@@ -2426,6 +2851,9 @@ class GBManipulator:
             warnings.warn(
                 "Calculated fraction of atoms to insert is 0 "
                 f"(int({fill_fraction}*{len(gb_atoms)}) = 0)"
+            )
+            self.__set_candidate_labels(
+                getattr(parent, "grain_labels", None), len(parent.whole_system)
             )
             return atoms
 
@@ -2517,10 +2945,45 @@ class GBManipulator:
             ], dtype=Atom.atom_dtype
         )
 
-        if return_positions:
-            return (np.hstack((parent.whole_system, new_atoms)), new_atoms)
+        candidate = np.hstack((parent.whole_system, new_atoms))
+        labels = getattr(parent, "grain_labels", None)
+        if labels is None:
+            candidate_labels = None
         else:
-            return np.hstack((parent.whole_system, new_atoms))
+            left_bounds = parent.left_grain_x_bounds
+            right_bounds = parent.right_grain_x_bounds
+            tolerance = parent.coordinate_tolerance
+            inserted_labels = np.empty(len(new_atoms), dtype=np.int8)
+            for index, x_value in enumerate(new_atoms["x"]):
+                x_coord = float(x_value)
+                in_left = (
+                    x_coord >= left_bounds[0] - tolerance
+                    and x_coord < left_bounds[1]
+                )
+                in_right = (
+                    x_coord >= right_bounds[0] - tolerance
+                    and x_coord < right_bounds[1]
+                )
+                if in_left and not in_right:
+                    inserted_labels[index] = LEFT_GRAIN_LABEL
+                elif in_right and not in_left:
+                    inserted_labels[index] = RIGHT_GRAIN_LABEL
+                elif in_left and in_right:
+                    inserted_labels[index] = (
+                        LEFT_GRAIN_LABEL
+                        if x_coord < parent.gb_plane_x
+                        else RIGHT_GRAIN_LABEL
+                    )
+                else:
+                    raise GBManipulatorValueError(
+                        "inserted atom lies outside both explicit physical grain x "
+                        "intervals"
+                    )
+            candidate_labels = np.hstack((labels, inserted_labels))
+        self.__set_candidate_labels(candidate_labels, len(candidate))
+        if return_positions:
+            return (candidate, new_atoms)
+        return candidate
 
     def displace_along_soft_modes(
         self,
@@ -2715,6 +3178,41 @@ class GBManipulator:
         raise NotImplementedError("This mutator has not been implemented yet.")
         return pos
 
+    def __copy__(self):
+        """Return an independent manipulator copy preserving ownership state."""
+        result = type(self).__new__(type(self))
+        result.__rng = copy_module.deepcopy(self.__rng)
+        result.__parents = [
+            copy_module.copy(parent) if parent is not None else None
+            for parent in self.__parents
+        ]
+        result.__one_parent = self.__one_parent
+        result.__num_processes = self.__num_processes
+        result.__candidate_grain_labels = (
+            None
+            if self.__candidate_grain_labels is None
+            else _readonly_copy(self.__candidate_grain_labels, dtype=np.int8)
+        )
+        return result
+
+    def __deepcopy__(self, memo):
+        """Return an independent deep copy preserving ownership state."""
+        result = type(self).__new__(type(self))
+        memo[id(self)] = result
+        result.__rng = copy_module.deepcopy(self.__rng, memo)
+        result.__parents = [
+            copy_module.deepcopy(parent, memo) if parent is not None else None
+            for parent in self.__parents
+        ]
+        result.__one_parent = self.__one_parent
+        result.__num_processes = self.__num_processes
+        result.__candidate_grain_labels = (
+            None
+            if self.__candidate_grain_labels is None
+            else _readonly_copy(self.__candidate_grain_labels, dtype=np.int8)
+        )
+        return result
+
     # Getter and setter methods for the parents
     @property
     def parents(self) -> list:
@@ -2731,3 +3229,4 @@ class GBManipulator:
                 "Both items in the parents list must be None or instances of Parent")
 
         self.__parents = value
+        self.__candidate_grain_labels = self.__initial_candidate_labels()

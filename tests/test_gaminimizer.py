@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 
 from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.Checkpoint import CheckpointStore
@@ -17,6 +18,7 @@ from GBOpt.GBMinimizer import (
     GBMinimizerError,
     GBMinimizerValueError,
     GeneticAlgorithmMinimizer,
+    Mutator,
 )
 
 
@@ -749,3 +751,657 @@ class TestGAIntraGenerationCheckpointing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _owned_ga_fixture(tmp_path):
+    labels_module = __import__(
+        "GBOpt.FileGrainOwnership",
+        fromlist=["GrainOwnership", "LEFT_GRAIN_LABEL", "RIGHT_GRAIN_LABEL"],
+    )
+    gb = GBMaker.from_boundary_spec(
+        3.52,
+        "fcc",
+        "Ni",
+        CSLExactSpec(
+            axis=(0, 0, 1),
+            plane=(3, 1, 0),
+            quat=(3, 0, 0, 1),
+            sigma=5,
+        ),
+        mode="exact",
+        gb_thickness=10.0,
+        repeat_factor=2,
+        x_dim_min=10.0,
+        vacuum=0.0,
+        interaction_distance=3.0,
+    )
+    seed_path = tmp_path / "owned_initial.data"
+    gb.write_lammps(str(seed_path), type_as_int=False, precision=12)
+    labels = np.hstack(
+        (
+            np.full(
+                len(gb.left_grain),
+                LEFT_GRAIN_LABEL,
+                dtype=np.int8,
+            ),
+            np.full(
+                len(gb.right_grain),
+                RIGHT_GRAIN_LABEL,
+                dtype=np.int8,
+            ),
+        )
+    )
+    ownership = GrainOwnership(
+        atom_ids=np.arange(1, len(gb.whole_system) + 1),
+        labels=labels,
+        gb_plane_x=gb.gb_plane_x,
+        inplane_periodic=gb.inplane_periodic,
+        left_grain_x_bounds=(gb.box_dims[0, 0], gb.gb_plane_x),
+        right_grain_x_bounds=(gb.gb_plane_x, gb.box_dims[0, 1]),
+        coordinate_tolerance=gb.epsilon,
+        normal_topology=gb.normal_topology,
+    )
+    return gb, seed_path, ownership, labels
+
+
+def _write_owned_evaluator_output(
+    path,
+    atoms,
+    box_dims,
+    *,
+    move_row=None,
+    plane=None,
+    change_species_row=None,
+):
+    output = np.array(atoms, copy=True)
+    if move_row is not None:
+        output[move_row]["x"] = float(plane) + 0.25
+    if change_species_row is not None:
+        output[change_species_row]["name"] = "Cu"
+    order = np.arange(len(output))[::-1]
+    with open(path, "w", encoding="utf-8", newline="\n") as stream:
+        stream.write("Owned evaluator output\n\n")
+        stream.write(f"{len(output)} atoms\n")
+        stream.write(f"{len(set(output['name'].tolist()))} atom types\n")
+        stream.writelines(f"{lower:.12f} {upper:.12f} {axis}lo {axis}hi\n" for axis,
+                          (lower, upper) in zip("xyz", box_dims, strict=True))
+        stream.write("\nAtoms\n\n")
+        for row in order:
+            atom = output[row]
+            stream.write(
+                f"{row + 1} {atom['name']} {atom['x']:.12f} "
+                f"{atom['y']:.12f} {atom['z']:.12f}\n"
+            )
+
+
+def test_run_ga_returns_best_energy_and_dump(ga_gb, tmp_path):
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        energy = float(np.mean(atom_positions["x"]))
+        return energy, str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["insert_atoms", "remove_atoms", "translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=75,
+    )
+
+    best_energy, best_dump = minimizer.run_GA(unique_id=1)
+
+    assert isinstance(best_energy, float)
+    assert Path(best_dump).is_file()
+    assert len(minimizer.GBE_vals) == minimizer.generations + 1
+
+
+def test_history_populated_after_run(ga_gb, tmp_path):
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return float(np.mean(atom_positions["x"])), str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["insert_atoms", "remove_atoms", "translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=75,
+    )
+    minimizer.run_GA(unique_id=2)
+
+    assert len(minimizer.history) == minimizer.generations
+
+    for gen_idx, gen_history in enumerate(minimizer.history):
+        assert len(gen_history) == minimizer.population_size
+
+        for lineage, _energy in gen_history:
+            assert isinstance(lineage, list)
+            assert lineage
+            assert isinstance(lineage[0], str)
+            op = lineage[0]
+            assert op in {"slice_and_merge", "carryover", "START"} or op.startswith(
+                ("shift", "add", "remove")
+            ), f"Unexpected operation label: {op!r}"
+
+        assert [e for _, e in gen_history] == minimizer.GBE_vals[gen_idx + 1]
+
+
+def test_failed_generation_appends_to_history(ga_gb, tmp_path):
+    population_size = 4
+    evaluation_index = 0
+
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        nonlocal evaluation_index
+        current_index = evaluation_index
+        evaluation_index += 1
+
+        # The initial evaluation is index 0. Fail exactly the first generation.
+        if 1 <= current_index <= population_size:
+            raise RuntimeError("Simulated failure")
+
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return float(np.mean(atom_positions["x"])), str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["insert_atoms", "remove_atoms", "translate_right_grain"],
+        seed=0,
+        population_size=population_size,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=75,
+    )
+    minimizer.run_GA(unique_id=3)
+
+    assert len(minimizer.history) == minimizer.generations
+
+    penalty = 1.0e30
+    failed_gen = minimizer.history[0]
+    assert len(failed_gen) == minimizer.population_size
+    assert all(energy == penalty for _, energy in failed_gen)
+
+    recovered_gen = minimizer.history[1]
+    assert len(recovered_gen) == minimizer.population_size
+    assert all(energy < penalty for _, energy in recovered_gen)
+
+
+def test_ga_history_never_exceeds_generations(ga_gb, tmp_path):
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return float(np.mean(atom_positions["x"])), str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["insert_atoms", "remove_atoms", "translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=75,
+    )
+    minimizer.run_GA(unique_id=2)
+    assert len(minimizer.history) == minimizer.generations
+
+    minimizer.run_GA(unique_id=2)
+    assert len(minimizer.history) == minimizer.generations
+
+
+def test_initial_ownership_requires_file_backed_structure(owned_ga):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(ValueError, match="requires an initial_structure"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_ownership=ownership,
+        )
+    with pytest.raises(TypeError, match="str or Path"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=gb,
+            initial_ownership=ownership,
+        )
+    with pytest.raises(TypeError, match="GrainOwnership"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=str(seed_path),
+            initial_ownership=object(),
+        )
+
+
+def test_variable_cell_requires_explicit_ownership_and_boolean(owned_ga):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(ValueError, match="requires initial_ownership"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=str(seed_path),
+            allow_variable_cell=True,
+        )
+    with pytest.raises(TypeError, match="allow_variable_cell must be a Boolean"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=str(seed_path),
+            initial_ownership=ownership,
+            allow_variable_cell=1,
+        )
+
+
+def test_translation_mutation_uses_current_parent_dimensions():
+    class FixedRandom:
+        def choice(self, _choices):
+            return "translate_right_grain"
+
+        def uniform(self, _lower, _upper):
+            return 0.5
+
+    class ParentStub:
+        box_dims = np.asarray(
+            [[0.0, 10.0], [-2.0, 18.0], [5.0, 35.0]],
+            dtype=float,
+        )
+
+    class ManipulatorStub:
+        def __init__(self):
+            self.parents = [ParentStub()]
+            self.translation = None
+
+        def translate_right_grain(self, *, dy, dz):
+            self.translation = (dy, dz)
+            return np.empty(0)
+
+    class GBStub:
+        repeat_factor = (2, 5)
+        # Deliberately unrelated to the current parent so the regression fails if the
+        # mutation falls back to reference GBMaker dimensions.
+        y_dim = 1_000.0
+        z_dim = 2_000.0
+
+    manipulator = ManipulatorStub()
+    mutator = Mutator(["translate_right_grain"], manipulator)
+    mutation, _candidate = mutator.mutate(
+        FixedRandom(),
+        GBStub(),
+        manipulator,
+    )
+
+    # Current y/z lengths are 20 and 30 A. At a fixed random fraction of 0.5, repeat
+    # factors (2, 5) therefore give dy=5 A and dz=3 A.
+    assert manipulator.translation == pytest.approx((5.0, 3.0))
+    assert mutation == "shift5.00000000dy3.00000000dz"
+
+
+def test_initial_owned_manipulator_preserves_labels_and_plane(owned_ga):
+    gb, seed_path, ownership, labels = owned_ga
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        lambda *_args: (0.0, str(seed_path)),
+        ["translate_right_grain"],
+        seed=7,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+    )
+    parent = minimizer.manipulator.parents[0]
+    assert np.array_equal(parent.grain_labels, labels)
+    assert parent.gb_plane_x == pytest.approx(gb.gb_plane_x)
+    assert len(parent.left_grain) == len(gb.left_grain)
+    assert len(parent.right_grain) == len(gb.right_grain)
+
+
+def test_owned_ga_variable_cell_reload_becomes_next_parent_geometry(owned_ga, tmp_path):
+    gb, seed_path, ownership, labels = owned_ga
+    initial_box = np.asarray(gb.box_dims, dtype=float)
+    relaxed_box = initial_box.copy()
+    relaxed_box[0] += np.asarray([-0.5, 1.0])
+    relaxed_box[1] += np.asarray([-0.25, 0.75])
+    relaxed_box[2] += np.asarray([-0.125, 0.625])
+    submitted_boxes = []
+    evaluation_index = 0
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        nonlocal evaluation_index
+        source_box = np.asarray(manipulator.parents[0].box_dims, dtype=float)
+        submitted_boxes.append(source_box.copy())
+        target_box = relaxed_box if evaluation_index == 0 else source_box
+        returned_atoms = np.array(atom_positions, copy=True)
+        if evaluation_index == 0:
+            for axis_name, axis_index in zip("xyz", range(3), strict=True):
+                source_lo, source_hi = source_box[axis_index]
+                target_lo, target_hi = target_box[axis_index]
+                reduced = (
+                    returned_atoms[axis_name] - source_lo
+                ) / (source_hi - source_lo)
+                returned_atoms[axis_name] = (
+                    target_lo + reduced * (target_hi - target_lo)
+                )
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(output, returned_atoms, target_box)
+        evaluation_index += 1
+        return 1.0, str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        ["translate_right_grain"],
+        seed=37,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        allow_variable_cell=True,
+        population_size=2,
+        generations=1,
+        keep_top_pct=100,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=73)
+
+    np.testing.assert_allclose(submitted_boxes[0], initial_box)
+    assert len(submitted_boxes) == 3
+    for box in submitted_boxes[1:]:
+        np.testing.assert_allclose(box, relaxed_box)
+
+    best = minimizer.best_evaluation
+    assert best.success
+    assert best.manipulator is not None
+    parent = best.manipulator.parents[0]
+    np.testing.assert_allclose(parent.box_dims, relaxed_box)
+    np.testing.assert_array_equal(parent.grain_labels, labels)
+
+    old_lo, old_hi = initial_box[0]
+    new_lo, new_hi = relaxed_box[0]
+    reduced_plane = (ownership.gb_plane_x - old_lo) / (old_hi - old_lo)
+    expected_plane = new_lo + reduced_plane * (new_hi - new_lo)
+    assert parent.gb_plane_x == pytest.approx(expected_plane)
+
+
+def test_owned_ga_reordered_reload_preserves_crossing_atom_label(
+    owned_ga,
+    tmp_path,
+):
+    gb, seed_path, ownership, labels = owned_ga
+    crossing_row = int(np.flatnonzero(labels == LEFT_GRAIN_LABEL)[0])
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+            move_row=crossing_row,
+            plane=GB.gb_plane_x,
+        )
+        return 1.0, str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        ["translate_right_grain"],
+        seed=17,
+        initial_structure=str(seed_path),
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+        keep_top_pct=100,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=41)
+
+    record = minimizer.last_generation_evaluations[0]
+    assert record.success
+    assert record.manipulator is not None
+
+    parent = record.manipulator.parents[0]
+    assert parent.grain_labels[crossing_row] == LEFT_GRAIN_LABEL
+    assert parent.whole_system[crossing_row]["x"] > gb.gb_plane_x
+    assert np.array_equal(parent.grain_labels, labels)
+    assert parent.gb_plane_x == pytest.approx(gb.gb_plane_x)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "count_delta"),
+    [
+        pytest.param("remove_atoms", -1, id="removal"),
+        pytest.param("insert_atoms", 1, id="insertion"),
+    ],
+)
+def test_owned_count_changing_mutation_uses_fresh_mapping(
+    owned_ga,
+    tmp_path,
+    mutation,
+    count_delta,
+):
+    gb, seed_path, ownership, _labels = owned_ga
+    initial_count = len(gb.whole_system)
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return float(len(atom_positions)), str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        [mutation],
+        seed=23,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+        keep_top_pct=100,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=52)
+
+    mutated = minimizer.last_generation_evaluations[1]
+    expected_count = initial_count + count_delta
+
+    assert mutated.success
+    assert mutated.mapping is not None
+    assert mutated.manipulator is not None
+    np.testing.assert_array_equal(
+        mutated.mapping.atom_ids,
+        np.arange(1, expected_count + 1),
+    )
+    assert len(mutated.mapping.labels) == expected_count
+
+    parent = mutated.manipulator.parents[0]
+    assert len(parent.whole_system) == expected_count
+    assert len(parent.grain_labels) == expected_count
+
+
+def test_failed_owned_candidate_is_not_selected_as_parent(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+    batch_index = 0
+    generation_zero_paths = []
+
+    def scalar_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 5.0, str(output)
+
+    def batch_energy(GB, manipulators, structures, lineages, unique_ids):
+        nonlocal batch_index
+        results = []
+        paths = []
+        for index, (manipulator, atoms, candidate_id) in enumerate(
+            zip(manipulators, structures, unique_ids, strict=True)
+        ):
+            output = tmp_path / f"{candidate_id}.data"
+            paths.append(str(output))
+            _write_owned_evaluator_output(
+                output,
+                atoms,
+                manipulator.parents[0].box_dims,
+                change_species_row=(0 if batch_index == 0 and index == 0 else None),
+            )
+            results.append(
+                {"energy": float(index + 1), "final_dump": str(output)}
+            )
+        if batch_index == 0:
+            generation_zero_paths.extend(paths)
+        batch_index += 1
+        return results
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        scalar_energy,
+        ["translate_right_grain"],
+        gb_batch_energy_func=batch_energy,
+        seed=3,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        population_size=2,
+        generations=2,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=7)
+
+    failed_path, valid_path = generation_zero_paths
+    second_generation_lineages = [lineage for lineage, _ in minimizer.history[1]]
+    assert all(failed_path not in lineage for lineage in second_generation_lineages)
+    assert all(valid_path in lineage for lineage in second_generation_lineages)
+
+
+def test_owned_batch_evaluator_keeps_failure_alignment(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    def scalar_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 5.0, str(output)
+
+    def batch_energy(GB, manipulators, structures, lineages, unique_ids):
+        results = []
+        for index, (manipulator, atoms, candidate_id) in enumerate(
+            zip(manipulators, structures, unique_ids, strict=True)
+        ):
+            output = tmp_path / f"{candidate_id}.data"
+            _write_owned_evaluator_output(
+                output,
+                atoms,
+                manipulator.parents[0].box_dims,
+                change_species_row=0 if index == 0 else None,
+            )
+            results.append(
+                {"energy": float(index + 1), "final_dump": str(output)}
+            )
+        return results
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        scalar_energy,
+        ["translate_right_grain"],
+        gb_batch_energy_func=batch_energy,
+        seed=13,
+        initial_structure=str(seed_path),
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+        keep_top_pct=100,
+        intermediate_pct=100,
+    )
+    best_energy, _best_path = minimizer.run_GA(unique_id=19)
+    records = minimizer.last_generation_evaluations
+
+    assert [record.input_index for record in records] == [0, 1]
+    assert not records[0].success
+    assert records[0].energy == pytest.approx(1.0e30)
+    assert records[0].manipulator is None
+    assert records[1].success
+    assert records[1].energy == pytest.approx(2.0)
+    assert best_energy == pytest.approx(2.0)
+
+
+def test_owned_ga_carryover_and_crossover_preserve_ownership(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return float(np.mean(atom_positions["x"])), str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        ["translate_right_grain"],
+        seed=31,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=61)
+
+    second_generation_ops = [
+        lineage[0] for lineage, _energy in minimizer.history[1]
+    ]
+    assert "carryover" in second_generation_ops
+    assert "slice_and_merge" in second_generation_ops
+
+    for record in minimizer.last_generation_evaluations:
+        assert record.success
+        assert record.mapping is not None
+        assert record.manipulator is not None
+
+        parent = record.manipulator.parents[0]
+        assert parent.grain_labels is not None
+        assert len(parent.grain_labels) == len(parent.whole_system)
+        assert parent.gb_plane_x == pytest.approx(gb.gb_plane_x)
+        assert parent.inplane_periodic == ownership.inplane_periodic
+        assert parent.normal_topology is ownership.normal_topology
