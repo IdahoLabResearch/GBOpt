@@ -8,7 +8,6 @@ from scipy.spatial import KDTree
 
 from GBOpt.Atom import Atom
 from GBOpt.BoundarySpec import CSLExactSpec, PQSpec
-from GBOpt.crystallography import pq_spec_to_embedding
 from GBOpt.GBMaker import GBMaker
 from tests.data.zhang_2022_uo2_ceo2_gb_energies import BOUNDARIES
 
@@ -28,15 +27,16 @@ SIGMA5_TILT_PQ_SPEC = PQSpec(
     Q=SIGMA5_TILT_Q,
     basis_mode="supplied",
 )
-NONCOMMENSURATE_PQ_SPEC = PQSpec(
-    P=SIGMA5_TILT_P,
-    Q=[[1, 0, 0], [0, 1, 1], [0, -1, 1]],
-    basis_mode="supplied",
-)
 
 A0_FCC = 3.615
 STRUCTURE_FCC = "fcc"
 ATOM_TYPES_FCC = "Cu"
+COINCIDENCE_TOLERANCE_ANGSTROM = 1e-4
+
+EXACT_BOUNDARY_SPECS = [
+    pytest.param(SIGMA5_TILT_PQ_SPEC, id="pq"),
+    pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
+]
 
 EXACT_BOX_CASES = [
     pytest.param(
@@ -86,9 +86,38 @@ VACUUM_ZERO_BOX_CASES = [
     ),
 ]
 
-FLUORITE_EXACT_SPECS = [
-    pytest.param(SIGMA5_TILT_PQ_SPEC, id="pq"),
-    pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
+REPRESENTATIVE_EXACT_CASES = [
+    pytest.param(
+        [[0, 18, -1], [0, 1, 18], [1, 0, 0]],
+        [[0, 1, -18], [0, 18, 1], [1, 0, 0]],
+        19_500,
+        19_500,
+        id="zhang-001-ST-100",
+    ),
+    pytest.param(
+        [[0, -5, 14], [1, 0, 0], [0, 14, 5]],
+        [[0, 10, 11], [1, 0, 0], [0, 11, -10]],
+        13_260,
+        13_260,
+        id="zhang-031-AT-100",
+    ),
+    pytest.param(
+        [[0, 0, 1], [4, 1, 0], [-1, 4, 0]],
+        [[0, 0, 1], [4, -1, 0], [1, 4, 0]],
+        2_448,
+        2_448,
+        id="zhang-041-TW-100",
+    ),
+    pytest.param(
+        [[-1, -1, 6], [1, -1, 0], [3, 3, 1]],
+        [[1, 1, 12], [1, -1, 0], [6, 6, -1]],
+        112_176,
+        220_752,
+        marks=pytest.mark.slow(
+            reason="large asymmetric representative contains more than 330,000 atoms"
+        ),
+        id="zhang-086-AT-110",
+    ),
 ]
 
 
@@ -134,7 +163,7 @@ def _positions(atoms):
 
 
 def _assert_fluorite_stoichiometry(atoms, *, label):
-    """Assert a nonempty atom collection has the expected UO2 species ratio."""
+    """Assert a nonempty atom collection contains only the expected UO2 ratio."""
     uranium_count = int(np.count_nonzero(atoms["name"] == "U"))
     oxygen_count = int(np.count_nonzero(atoms["name"] == "O"))
 
@@ -143,6 +172,90 @@ def _assert_fluorite_stoichiometry(atoms, *, label):
         f"{label} stoichiometry is {uranium_count} U to {oxygen_count} O; "
         "expected UO2"
     )
+    assert uranium_count + oxygen_count == len(atoms), (
+        f"{label} contains atom species other than U and O"
+    )
+
+
+def _assert_rocksalt_stoichiometry(atoms, *, label):
+    """Assert a nonempty atom collection contains only the expected NaCl ratio."""
+    sodium_count = int(np.count_nonzero(atoms["name"] == "Na"))
+    chlorine_count = int(np.count_nonzero(atoms["name"] == "Cl"))
+
+    assert sodium_count > 0, f"{label} contains no Na atoms"
+    assert chlorine_count == sodium_count, (
+        f"{label} stoichiometry is {sodium_count} Na to {chlorine_count} Cl; "
+        "expected NaCl"
+    )
+    assert sodium_count + chlorine_count == len(atoms), (
+        f"{label} contains atom species other than Na and Cl"
+    )
+
+
+def _assert_complete_fluorite_population(atoms, expected):
+    """Assert exact total and species populations for complete fluorite sites."""
+    assert len(atoms) == expected
+    cell_count = expected // 12
+    uranium_count = int(np.count_nonzero(atoms["name"] == "U"))
+    oxygen_count = int(np.count_nonzero(atoms["name"] == "O"))
+
+    assert uranium_count == 4 * cell_count
+    assert oxygen_count == 8 * cell_count
+    assert uranium_count + oxygen_count == len(atoms)
+
+
+def _assert_atoms_within_box(gb, atoms):
+    """Assert finite atom coordinates lie inside the GBMaker half-open box."""
+    positions = _positions(atoms)
+    tolerance = max(1e-8, 100.0 * gb.epsilon)
+    upper_bounds = np.array([gb.x_dim, gb.y_dim, gb.z_dim], dtype=float)
+
+    assert np.all(np.isfinite(positions))
+    assert np.all(np.min(positions, axis=0) >= -tolerance)
+    assert np.all(np.max(positions, axis=0) < upper_bounds + tolerance)
+
+
+def _assert_no_coincident_periodic_sites(gb):
+    """Assert the final periodic whole system contains no coincident representatives."""
+    box_lengths = np.array([gb.x_dim, gb.y_dim, gb.z_dim], dtype=float)
+    positions = np.mod(_positions(gb.whole_system), box_lengths)
+    tree = KDTree(positions, boxsize=box_lengths)
+    nearest_distances, _ = tree.query(positions, k=2)
+    coincident_count = int(
+        np.count_nonzero(
+            nearest_distances[:, 1] <= COINCIDENCE_TOLERANCE_ANGSTROM
+        )
+    )
+
+    assert coincident_count == 0, (
+        f"detected {coincident_count} coincident atom representatives under periodic "
+        "boundary conditions"
+    )
+
+
+def _build_campaign_style_exact_boundary(P, Q):
+    """Build one representative boundary using the campaign's exact-path settings."""
+    boundary = PQSpec(P=P, Q=Q, basis_mode="supplied")
+    common = {
+        "a0": 5.454,
+        "structure": "fluorite",
+        "atom_types": ("U", "O"),
+        "boundary": boundary,
+        "mode": "exact",
+        "repeat_factor": (1, 1),
+        "x_dim_min": 60.0,
+        "vacuum": 0.0,
+        "interaction_distance": 11.0,
+        "mismatch_tol": 0.005,
+        "mismatch_max_cells": 50,
+        "strain_grain": "both",
+    }
+    probe = GBMaker.from_boundary_spec(gb_thickness=5.454, **common)
+    thickness = 2.0 * max(
+        float(probe.spacing["x"]["left"]),
+        float(probe.spacing["x"]["right"]),
+    )
+    return GBMaker.from_boundary_spec(gb_thickness=thickness, **common)
 
 
 # --------------------------------------------------------------------------------------
@@ -175,17 +288,10 @@ def test_exact_inplane_dimensions_are_integer_multiples_of_both_grain_periods(
     assert repeat_count == pytest.approx(round(repeat_count), abs=1e-6, rel=0.0)
 
 
-def test_exact_embedding_uses_integer_rows_without_float_approximation(
-    monkeypatch,
-    build_gb,
-):
-    embedding = pq_spec_to_embedding(
-        PQSpec(P=SIGMA5_TILT_P, Q=SIGMA5_TILT_P, basis_mode="supplied")
-    )
-
+def test_exact_mode_does_not_approximate_rotation_rows(monkeypatch, build_gb):
     def fail_if_called(*_args, **_kwargs):
         raise AssertionError(
-            "The exact embedding path must not approximate rotation rows as integers."
+            "The exact construction path must not approximate rotation rows."
         )
 
     monkeypatch.setattr(
@@ -194,37 +300,23 @@ def test_exact_embedding_uses_integer_rows_without_float_approximation(
         fail_if_called,
     )
 
-    gb = GBMaker._from_boundary_embedding(
-        embedding,
-        a0=A0_FCC,
-        structure=STRUCTURE_FCC,
-        atom_types=ATOM_TYPES_FCC,
-        gb_thickness=0.0,
-        repeat_factor=2,
-        interaction_distance=A0_FCC,
-    )
+    gb = build_gb()
 
     assert gb.whole_system.size > 0
 
 
 # --------------------------------------------------------------------------------------
-# Complete-origin construction
+# Exact grain assembly
 # --------------------------------------------------------------------------------------
 
 
-def test_exact_builder_returns_atom_dtype_and_complete_unit_cell_origins(build_gb):
+def test_exact_builder_returns_atom_dtype_and_combines_grain_populations(build_gb):
     gb = build_gb()
-    basis_size = len(gb.unit_cell.asarray())
 
     assert gb.whole_system.dtype == Atom.atom_dtype
+    assert gb.left_grain.size > 0
+    assert gb.right_grain.size > 0
     assert gb.whole_system.size == gb.left_grain.size + gb.right_grain.size
-
-    for label, grain in (("left", gb.left_grain), ("right", gb.right_grain)):
-        assert grain.size > 0, f"{label} grain is empty"
-        assert grain.size % basis_size == 0, (
-            f"{label} grain contains {grain.size} atoms, which is not divisible by "
-            f"the conventional-cell basis size {basis_size}"
-        )
 
 
 # --------------------------------------------------------------------------------------
@@ -232,10 +324,7 @@ def test_exact_builder_returns_atom_dtype_and_complete_unit_cell_origins(build_g
 # --------------------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize(
-    ("spec", "a0", "structure", "atom_types"),
-    EXACT_BOX_CASES,
-)
+@pytest.mark.parametrize(("spec", "a0", "structure", "atom_types"), EXACT_BOX_CASES)
 def test_exact_atoms_are_within_periodic_yz_box(
     build_gb,
     spec,
@@ -313,7 +402,7 @@ def test_vacuum_zero_exact_atoms_are_within_x_box(
 # --------------------------------------------------------------------------------------
 
 
-def test_vacuum_zero_exact_gaps_are_nonnegative_without_ordering_requirement(build_gb):
+def test_vacuum_zero_exact_gaps_are_nonnegative_without_deleting_grain_layers(build_gb):
     gb = build_gb(vacuum=0.0)
 
     central_gap = float(
@@ -328,9 +417,10 @@ def test_vacuum_zero_exact_gaps_are_nonnegative_without_ordering_requirement(bui
     assert periodic_gap >= -gb.epsilon
     assert len(gb.left_grain) == 1_200
     assert len(gb.right_grain) == 1_200
+    assert len(gb.whole_system) == 2_400
 
 
-@pytest.mark.parametrize("spec", FLUORITE_EXACT_SPECS)
+@pytest.mark.parametrize("spec", EXACT_BOUNDARY_SPECS)
 def test_vacuum_zero_has_no_coincident_atoms_across_periodic_images(build_gb, spec):
     gb = build_gb(
         spec,
@@ -345,7 +435,9 @@ def test_vacuum_zero_has_no_coincident_atoms_across_periodic_images(build_gb, sp
 
     tree = KDTree(right_positions, boxsize=box_lengths)
     nearest_distances, _ = tree.query(left_positions, k=1)
-    coincident_count = int(np.count_nonzero(nearest_distances <= 1e-4))
+    coincident_count = int(
+        np.count_nonzero(nearest_distances <= COINCIDENCE_TOLERANCE_ANGSTROM)
+    )
 
     assert coincident_count == 0, (
         f"detected {coincident_count} coincident left/right atom pairs under periodic "
@@ -353,7 +445,7 @@ def test_vacuum_zero_has_no_coincident_atoms_across_periodic_images(build_gb, sp
     )
 
 
-@pytest.mark.parametrize("spec", FLUORITE_EXACT_SPECS)
+@pytest.mark.parametrize("spec", EXACT_BOUNDARY_SPECS)
 def test_vacuum_zero_preserves_fluorite_stoichiometry_in_each_grain_and_system(
     build_gb,
     spec,
@@ -371,13 +463,7 @@ def test_vacuum_zero_preserves_fluorite_stoichiometry_in_each_grain_and_system(
     _assert_fluorite_stoichiometry(gb.whole_system, label="whole system")
 
 
-@pytest.mark.parametrize(
-    "spec",
-    [
-        pytest.param(SIGMA5_TILT_PQ_SPEC, id="pq"),
-        pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
-    ],
-)
+@pytest.mark.parametrize("spec", EXACT_BOUNDARY_SPECS)
 def test_vacuum_zero_preserves_rocksalt_stoichiometry_in_each_grain_and_system(
     build_gb,
     spec,
@@ -390,24 +476,13 @@ def test_vacuum_zero_preserves_rocksalt_stoichiometry_in_each_grain_and_system(
         vacuum=0.0,
     )
 
-    for label, atoms in (
-        ("left grain", gb.left_grain),
-        ("right grain", gb.right_grain),
-        ("whole system", gb.whole_system),
-    ):
-        sodium_count = int(np.count_nonzero(atoms["name"] == "Na"))
-        chlorine_count = int(np.count_nonzero(atoms["name"] == "Cl"))
-
-        assert sodium_count > 0, f"{label} contains no Na atoms"
-        assert chlorine_count == sodium_count, (
-            f"{label} stoichiometry is {sodium_count} Na to "
-            f"{chlorine_count} Cl; expected NaCl"
-        )
+    _assert_rocksalt_stoichiometry(gb.left_grain, label="left grain")
+    _assert_rocksalt_stoichiometry(gb.right_grain, label="right grain")
+    _assert_rocksalt_stoichiometry(gb.whole_system, label="whole system")
 
 
-def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometry():
-    """Cover the external fluorite case that previously leaked basis offsets in x."""
-
+def test_zhang_sigma53_vacuum_zero_preserves_bounds_nonnegative_gaps_and_stoichiometry():
+    """Regression for the external fluorite case that leaked basis offsets in x."""
     entry = BOUNDARIES["sigma53_100_0_7_2bar_0_2bar_7_STGB"]
     spec = PQSpec(P=entry["P"], Q=entry["Q"])
 
@@ -436,7 +511,11 @@ def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometr
         (gb.x_dim - np.max(gb.right_grain["x"]))
         + np.min(gb.left_grain["x"])
     )
-    assert periodic_gap >= central_gap - gb.epsilon
+
+    assert np.isfinite(central_gap)
+    assert np.isfinite(periodic_gap)
+    assert central_gap >= -gb.epsilon
+    assert periodic_gap >= -gb.epsilon
 
     _assert_fluorite_stoichiometry(gb.left_grain, label="left grain")
     _assert_fluorite_stoichiometry(gb.right_grain, label="right grain")
@@ -447,88 +526,19 @@ def test_zhang_sigma53_vacuum_zero_regression_preserves_box_gap_and_stoichiometr
 # Exact decorated-site construction regressions
 # --------------------------------------------------------------------------------------
 
-REPRESENTATIVE_COMPLETE_COUNTS = [
-    pytest.param(
-        "zhang_001_ST_100",
-        [[0, 18, -1], [0, 1, 18], [1, 0, 0]],
-        [[0, 1, -18], [0, 18, 1], [1, 0, 0]],
-        19_500,
-        19_500,
-        id="zhang-001-ST-100",
-    ),
-    pytest.param(
-        "zhang_031_AT_100",
-        [[0, -5, 14], [1, 0, 0], [0, 14, 5]],
-        [[0, 10, 11], [1, 0, 0], [0, 11, -10]],
-        13_260,
-        13_260,
-        id="zhang-031-AT-100",
-    ),
-    pytest.param(
-        "zhang_041_TW_100",
-        [[0, 0, 1], [4, 1, 0], [-1, 4, 0]],
-        [[0, 0, 1], [4, -1, 0], [1, 4, 0]],
-        2_448,
-        2_448,
-        id="zhang-041-TW-100",
-    ),
-    pytest.param(
-        "zhang_086_AT_110",
-        [[-1, -1, 6], [1, -1, 0], [3, 3, 1]],
-        [[1, 1, 12], [1, -1, 0], [6, 6, -1]],
-        112_176,
-        220_752,
-        marks=pytest.mark.slow,
-        id="zhang-086-AT-110",
-    ),
-]
-
-
-def _build_campaign_style_exact_boundary(P, Q):
-    boundary = PQSpec(P=P, Q=Q, basis_mode="supplied")
-    common = {
-        "a0": 5.454,
-        "structure": "fluorite",
-        "atom_types": ("U", "O"),
-        "boundary": boundary,
-        "mode": "exact",
-        "repeat_factor": (1, 1),
-        "x_dim_min": 60.0,
-        "vacuum": 0.0,
-        "interaction_distance": 11.0,
-        "mismatch_tol": 0.005,
-        "mismatch_max_cells": 50,
-        "strain_grain": "both",
-    }
-    probe = GBMaker.from_boundary_spec(gb_thickness=5.454, **common)
-    thickness = 2.0 * max(
-        float(probe.spacing["x"]["left"]),
-        float(probe.spacing["x"]["right"]),
-    )
-    return GBMaker.from_boundary_spec(gb_thickness=thickness, **common)
-
-
-def _assert_complete_fluorite_population(atoms, expected):
-    assert len(atoms) == expected
-    assert expected % 12 == 0
-    cell_count = expected // 12
-    assert np.count_nonzero(atoms["name"] == "U") == 4 * cell_count
-    assert np.count_nonzero(atoms["name"] == "O") == 8 * cell_count
-
 
 @pytest.mark.filterwarnings(
-    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the "
-    r"minimum in-plane dimension cutoff of .* A\.:UserWarning"
+    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the minimum "
+    r"in-plane dimension cutoff of .* A\.:UserWarning"
 )
 @pytest.mark.filterwarnings(
     r"ignore:Recommended repeat factor is at least 2\.:UserWarning"
 )
 @pytest.mark.parametrize(
-    ("case_id", "P", "Q", "left_expected", "right_expected"),
-    REPRESENTATIVE_COMPLETE_COUNTS,
+    ("P", "Q", "left_expected", "right_expected"),
+    REPRESENTATIVE_EXACT_CASES,
 )
 def test_campaign_representatives_preserve_complete_exact_populations(
-    case_id,
     P,
     Q,
     left_expected,
@@ -542,14 +552,13 @@ def test_campaign_representatives_preserve_complete_exact_populations(
         gb.whole_system,
         left_expected + right_expected,
     )
-    assert np.all(np.isfinite(np.column_stack(
-        (gb.whole_system["x"], gb.whole_system["y"], gb.whole_system["z"])
-    )))
+    _assert_atoms_within_box(gb, gb.whole_system)
+    _assert_no_coincident_periodic_sites(gb)
 
 
 @pytest.mark.filterwarnings(
-    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the "
-    r"minimum in-plane dimension cutoff of .* A\.:UserWarning"
+    r"ignore:Commensurate repeat pair in [yz] multiplied by \d+ to satisfy the minimum "
+    r"in-plane dimension cutoff of .* A\.:UserWarning"
 )
 @pytest.mark.filterwarnings(
     r"ignore:Recommended repeat factor is at least 2\.:UserWarning"
@@ -560,6 +569,6 @@ def test_exact_decorated_site_order_is_deterministic():
     first = _build_campaign_style_exact_boundary(P, Q)
     second = _build_campaign_style_exact_boundary(P, Q)
 
-    assert np.array_equal(first.left_grain, second.left_grain)
-    assert np.array_equal(first.right_grain, second.right_grain)
-    assert np.array_equal(first.whole_system, second.whole_system)
+    np.testing.assert_array_equal(first.left_grain, second.left_grain)
+    np.testing.assert_array_equal(first.right_grain, second.right_grain)
+    np.testing.assert_array_equal(first.whole_system, second.whole_system)

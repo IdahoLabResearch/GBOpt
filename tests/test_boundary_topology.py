@@ -1,7 +1,5 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-"""Tests for low-level boundary-normal topology metadata."""
-
 import pytest
 
 from GBOpt.BoundaryTopology import (
@@ -10,11 +8,19 @@ from GBOpt.BoundaryTopology import (
     normalize_boundary_normal_topology,
 )
 
+# ---------------------------------------------------------------------------
+# normalize_boundary_normal_topology
+# ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        pytest.param(None, BoundaryNormalTopology.UNKNOWN, id="missing"),
+        pytest.param(
+            None,
+            BoundaryNormalTopology.UNKNOWN,
+            id="missing",
+        ),
         pytest.param(
             BoundaryNormalTopology.PERIODIC_BICRYSTAL,
             BoundaryNormalTopology.PERIODIC_BICRYSTAL,
@@ -26,6 +32,11 @@ from GBOpt.BoundaryTopology import (
             id="slab-enum",
         ),
         pytest.param(
+            BoundaryNormalTopology.UNKNOWN,
+            BoundaryNormalTopology.UNKNOWN,
+            id="unknown-enum",
+        ),
+        pytest.param(
             "periodic_bicrystal",
             BoundaryNormalTopology.PERIODIC_BICRYSTAL,
             id="periodic-string",
@@ -35,30 +46,71 @@ from GBOpt.BoundaryTopology import (
             BoundaryNormalTopology.SINGLE_INTERFACE_SLAB,
             id="slab-string",
         ),
+        pytest.param(
+            "unknown",
+            BoundaryNormalTopology.UNKNOWN,
+            id="unknown-string",
+        ),
     ],
 )
-def test_normalize_boundary_normal_topology(value, expected):
+def test_normalize_boundary_normal_topology_accepts_supported_values(value, expected):
     assert normalize_boundary_normal_topology(value) is expected
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "match"),
     [
-        pytest.param("periodic", id="unsupported-string"),
-        pytest.param(True, id="boolean"),
-        pytest.param(1, id="integer"),
-        pytest.param([], id="list"),
+        pytest.param(
+            "periodic",
+            r"Unsupported boundary-normal topology: 'periodic'",
+            id="unsupported-string",
+        ),
+        pytest.param(
+            True,
+            r"Unsupported boundary-normal topology: True",
+            id="boolean",
+        ),
+        pytest.param(
+            1,
+            r"Unsupported boundary-normal topology: 1",
+            id="integer",
+        ),
+        pytest.param(
+            [],
+            r"Unsupported boundary-normal topology: \[\]",
+            id="list",
+        ),
     ],
 )
-def test_normalize_boundary_normal_topology_rejects_invalid_values(value):
-    with pytest.raises(
-        BoundaryTopologyError,
-        match="Unsupported boundary-normal topology",
-    ):
+def test_normalize_boundary_normal_topology_rejects_invalid_values(value, match):
+    with pytest.raises(BoundaryTopologyError, match=match):
         normalize_boundary_normal_topology(value)
 
 
-def test_periodic_outer_interface_is_derived_from_topology():
-    assert BoundaryNormalTopology.PERIODIC_BICRYSTAL.periodic_outer_x_interface
-    assert not BoundaryNormalTopology.SINGLE_INTERFACE_SLAB.periodic_outer_x_interface
-    assert not BoundaryNormalTopology.UNKNOWN.periodic_outer_x_interface
+# ---------------------------------------------------------------------------
+# BoundaryNormalTopology
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("topology", "expected"),
+    [
+        pytest.param(
+            BoundaryNormalTopology.PERIODIC_BICRYSTAL,
+            True,
+            id="periodic-bicrystal",
+        ),
+        pytest.param(
+            BoundaryNormalTopology.SINGLE_INTERFACE_SLAB,
+            False,
+            id="single-interface-slab",
+        ),
+        pytest.param(
+            BoundaryNormalTopology.UNKNOWN,
+            False,
+            id="unknown",
+        ),
+    ],
+)
+def test_periodic_outer_x_interface_reflects_boundary_topology(topology, expected):
+    assert topology.periodic_outer_x_interface is expected

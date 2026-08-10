@@ -3,10 +3,9 @@
 import filecmp
 import importlib
 import math
-import os
 import tempfile
 import unittest
-import warnings
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -14,7 +13,7 @@ import numpy as np
 import pytest
 
 from GBOpt.Atom import Atom
-from GBOpt.BoundarySpec import CSLExactSpec, FiveDOFSpec
+from GBOpt.BoundarySpec import CSLExactSpec, FiveDOFSpec, PQSpec
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
     GBManipulator,
@@ -31,6 +30,14 @@ from GBOpt.GBManipulator import (
     _ParentsProxy,
 )
 from GBOpt.UnitCell import UnitCell
+
+_TEST_DIR = Path(__file__).resolve().parent
+_INPUT_DIR = _TEST_DIR / "inputs"
+_ASYMMETRIC_PQ_SPEC = PQSpec(
+    P=[[-1, -1, 6], [1, -1, 0], [3, 3, 1]],
+    Q=[[1, 1, 12], [1, -1, 0], [6, 6, -1]],
+    basis_mode="supplied",
+)
 
 
 def structured_array_equal(array1, array2):
@@ -110,6 +117,25 @@ def _make_approximate_gb(
     )
 
 
+def _make_asymmetric_exact_gb():
+    """Return a compact exact boundary whose physical interface is off-center."""
+    return GBMaker.from_boundary_spec(
+        1.0,
+        "sc",
+        "Cu",
+        _ASYMMETRIC_PQ_SPEC,
+        mode="exact",
+        gb_thickness=1.0,
+        repeat_factor=(2, 2),
+        x_dim_min=1.0,
+        vacuum=0.0,
+        interaction_distance=0.1,
+        mismatch_tol=0.005,
+        mismatch_max_cells=50,
+        strain_grain="both",
+    )
+
+
 def _local_orders_for_structure(structure, atoms):
     unit_cell = UnitCell()
     unit_cell.init_by_structure(structure, 1.0, atoms)
@@ -145,13 +171,13 @@ def _local_orders_for_structure(structure, atoms):
         ideal_neighbors[:, 1:] - central_position
     ) * np.array([1.0, 1.15, 0.85])
 
-    kwargs = dict(
-        unit_cell_types=basis_types,
-        unit_cell_a0=unit_cell.a0,
-        N=len(basis),
-        Delta=0.05,
-        Rmax=rmax,
-    )
+    kwargs = {
+        "unit_cell_types": basis_types,
+        "unit_cell_a0": unit_cell.a0,
+        "N": len(basis),
+        "Delta": 0.05,
+        "Rmax": rmax,
+    }
     ideal_order = _calculate_local_order(atom, ideal_neighbors, **kwargs)
     distorted_order = _calculate_local_order(atom, distorted_neighbors, **kwargs)
     return ideal_order, distorted_order, len(ideal_neighbors)
@@ -351,8 +377,6 @@ class TestGBManipulator(unittest.TestCase):
             interaction_distance=1.0,
             repeat_factor=2,
         )
-        cls.manipulator_tilt = GBManipulator(cls.tilt, seed=cls.seed)
-        cls.manipulator_twist = GBManipulator(cls.twist, seed=cls.seed)
 
     def setUp(self):
         self.a0 = 1.0
@@ -360,9 +384,11 @@ class TestGBManipulator(unittest.TestCase):
         self.gb_thickness = 10.0
         self.atom_types = 'Cu'
         self.misorientation = [math.radians(36.869898), 0, 0, 0, 0]
-        self.file1 = "tests/inputs/basic_dump_test1.txt"
-        self.file2 = "tests/inputs/basic_dump_test2.txt"
+        self.file1 = str(_INPUT_DIR / "basic_dump_test1.txt")
+        self.file2 = str(_INPUT_DIR / "basic_dump_test2.txt")
         self.seed = 100
+        self.manipulator_tilt = GBManipulator(self.tilt, seed=self.seed)
+        self.manipulator_twist = GBManipulator(self.twist, seed=self.seed)
 
     def test_init_with_one_gbmaker_parent(self):
         self.assertIsNotNone(self.manipulator_tilt.parents[0])
@@ -870,27 +896,19 @@ class TestParent(unittest.TestCase):
 class TestParentGBRegion(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        probe = _make_exact_gb(
-            5.431,
-            "diamond",
-            "Si",
-            gb_thickness=5.431,
-            interaction_distance=6.0,
-            vacuum=0,
-            repeat_factor=(2, 3),
-        )
-        gb_thickness = 2 * max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
-        cls.gbm = _make_exact_gb(
-            5.431,
-            "diamond",
-            "Si",
-            gb_thickness=gb_thickness,
-            interaction_distance=6.0,
-            vacuum=0,
-            repeat_factor=(2, 3),
-        )
+        cls.gbm = _make_asymmetric_exact_gb()
         cls.parent = Parent(cls.gbm)
-        cls.d_hkl = max(probe.spacing["x"]["left"], probe.spacing["x"]["right"])
+        cls.d_hkl = max(
+            cls.gbm.spacing["x"]["left"],
+            cls.gbm.spacing["x"]["right"],
+        )
+
+    def test_fixture_interface_plane_is_not_box_midpoint(self):
+        midpoint = float(np.mean(self.gbm.box_dims[0]))
+        self.assertGreater(
+            abs(self.gbm.gb_plane_x - midpoint),
+            100.0 * self.gbm.epsilon,
+        )
 
     def test_gb_indices_lie_within_symmetric_window(self):
         parent = self.parent
@@ -906,21 +924,23 @@ class TestParentGBRegion(unittest.TestCase):
                                self.gbm.gb_plane_x, places=10)
 
     def test_file_path_gb_plane_x_near_gbmaker_value(self):
-        with tempfile.NamedTemporaryFile(suffix=".dat", delete=False) as f:
-            path = f.name
-        try:
-            self.gbm.write_lammps(path, type_as_int=True)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "asymmetric_boundary.dat"
+            self.gbm.write_lammps(str(path), type_as_int=True)
             unit_cell = UnitCell()
-            unit_cell.init_by_structure("diamond", 5.431, "Si")
-            parent_file = Parent(path, unit_cell=unit_cell,
-                                 gb_thickness=self.gbm.gb_thickness)
-            self.assertAlmostEqual(
-                parent_file._Parent__gb_plane_x, self.gbm.gb_plane_x,
-                delta=self.d_hkl,
-                msg="File-path gb_plane_x should be within one d_hkl of GBMaker value"
+            unit_cell.init_by_structure("sc", 1.0, "Cu")
+            parent_file = Parent(
+                str(path),
+                unit_cell=unit_cell,
+                gb_thickness=self.gbm.gb_thickness,
             )
-        finally:
-            os.remove(path)
+
+        self.assertAlmostEqual(
+            parent_file._Parent__gb_plane_x,
+            self.gbm.gb_plane_x,
+            delta=self.d_hkl,
+            msg="File-path gb_plane_x should be within one d_hkl of GBMaker value",
+        )
 
     def test_gbpos_atoms_lie_within_gb_indices_window(self):
         parent = self.parent

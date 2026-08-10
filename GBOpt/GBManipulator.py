@@ -12,14 +12,13 @@ from dataclasses import dataclass
 from itertools import combinations_with_replacement
 from numbers import Real
 from os.path import isfile
-from typing import Union
 
 import numpy as np
 import scipy.sparse as sps
 import spglib as spg
 from numba import float64, jit, prange
 from numba.typed import List
-from scipy.spatial import ConvexHull, Delaunay, KDTree, cKDTree
+from scipy.spatial import ConvexHull, Delaunay, KDTree
 
 from GBOpt.Atom import Atom
 from GBOpt.BoundaryTopology import (
@@ -34,15 +33,18 @@ from GBOpt.UnitCell import UnitCell
 
 class GBManipulatorError(Exception):
     """Base class for exceptions in the GBManipulator class."""
-    pass
 
 
-class GBManipulatorValueError(GBManipulatorError):
+class GBManipulatorValueError(GBManipulatorError, ValueError):
     """
     Exception raised in the GBManipulator class when an invalid value is assigned to a
     GBManipulator attribute.
     """
-    pass
+
+
+class GBManipulatorTypeError(GBManipulatorError, TypeError):
+    """Exception raised in the GBManipulator class an invalid type is assigned to a
+    GBManipulator attribute."""
 
 
 LEFT_GRAIN_LABEL = 0
@@ -58,7 +60,7 @@ def _validate_finite_real(name: str, value: object) -> float:
     :raises GBManipulatorValueError: If ``value`` is Boolean, non-real, or non-finite.
     """
     if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
-        raise GBManipulatorValueError(f"{name} must be a finite real value.")
+        raise GBManipulatorTypeError(f"{name} must be a finite real value.")
     normalized = float(value)
     if not np.isfinite(normalized):
         raise GBManipulatorValueError(f"{name} must be a finite real value.")
@@ -77,11 +79,13 @@ def _strict_float_array(
     :param values: Candidate array-like object.
     :param shape: Keyword argument, required. Required array shape.
     :return: Copied float array with the requested shape.
-    :raises GBManipulatorValueError: If shape, scalar type, or finiteness is invalid.
+    :raises GBManipulatorValueError: If shape or finiteness is invalid.
+    :raises GBManipuylatorTypeError: If type is invalid.
     """
     raw = np.asarray(values, dtype=object)
     if raw.shape != shape:
-        raise GBManipulatorValueError(f"{name} must have shape {shape}; got {raw.shape}.")
+        raise GBManipulatorValueError(
+            f"{name} must have shape {shape}; got {raw.shape}.")
     normalized = np.empty(shape, dtype=float)
     for index in np.ndindex(shape):
         normalized[index] = _validate_finite_real(f"{name}{index}", raw[index])
@@ -93,17 +97,22 @@ def _normalize_inplane_periodic(value: object) -> tuple[bool, bool]:
 
     :param value: Two Boolean periodicity flags.
     :return: Normalized ``(periodic_y, periodic_z)`` tuple.
-    :raises GBManipulatorValueError: If the input is malformed or coercive.
+    :raises GBManipulatorValueError: If the input is malformed.
+    :raises GBManipulatorTypeError: If the input is coercive.
     """
-    if not isinstance(value, (tuple, list)) or len(value) != 2:
+    if not isinstance(value, (tuple, list)):
+        raise GBManipulatorTypeError(
+            "inplane_periodic must contain exactly two Boolean values"
+        )
+    if len(value) != 2:
         raise GBManipulatorValueError(
-            "inplane_periodic must contain exactly two Boolean values."
+            "inplane_periodic must contain exactly two Boolean values"
         )
     normalized = []
     for axis_name, flag in zip(("y", "z"), value, strict=True):
         if not isinstance(flag, (bool, np.bool_)):
-            raise GBManipulatorValueError(
-                f"{axis_name}-axis periodicity must be Boolean."
+            raise GBManipulatorTypeError(
+                f"{axis_name}-axis periodicity must be Boolean"
             )
         normalized.append(bool(flag))
     return normalized[0], normalized[1]
@@ -116,19 +125,20 @@ def _normalize_grain_labels(labels: object, *, expected_count: int) -> np.ndarra
     :param expected_count: Keyword argument, required. Required number of labels.
     :return: Read-only ``int8`` labels.
     :raises GBManipulatorValueError: If labels are malformed or omit a grain.
+    :raises GBManipulatorTypeError: If labels are not integers.
     """
     raw = np.asarray(labels)
     if raw.ndim != 1 or raw.size != expected_count:
         raise GBManipulatorValueError(
-            "grain_labels length must equal the candidate atom count."
+            "grain_labels length must equal the candidate atom count"
         )
     if raw.dtype.kind not in ("i", "u"):
-        raise GBManipulatorValueError(
-            "grain_labels must use an integer left/right label dtype."
+        raise GBManipulatorTypeError(
+            "grain_labels must use an integer left/right label dtype"
         )
     if not np.all(np.isin(raw, (LEFT_GRAIN_LABEL, RIGHT_GRAIN_LABEL))):
         raise GBManipulatorValueError(
-            "grain_labels must contain only left and right labels."
+            "grain_labels must contain only left and right labels"
         )
     result = np.array(raw, dtype=np.int8, copy=True)
     if result.size and (
@@ -136,7 +146,7 @@ def _normalize_grain_labels(labels: object, *, expected_count: int) -> np.ndarra
         or not np.any(result == RIGHT_GRAIN_LABEL)
     ):
         raise GBManipulatorValueError(
-            "A nonempty interface candidate must contain both grains."
+            "A nonempty interface candidate must contain both grains"
         )
     result.setflags(write=False)
     return result
@@ -189,7 +199,7 @@ def _translate_inplane(
         width = upper - lower
         if not np.isfinite(lower) or not np.isfinite(upper) or width <= 0.0:
             raise GBManipulatorValueError(
-                f"The {axis_name} box interval must be finite and have positive width."
+                f"The {axis_name} box interval must be finite and have positive width"
             )
         translated = updated[axis_name] + displacement
         if is_periodic:
@@ -198,7 +208,7 @@ def _translate_inplane(
         if np.any(translated < lower - tolerance) or np.any(translated >= upper):
             raise GBManipulatorValueError(
                 f"d{axis_name} moves atoms outside the nonperiodic half-open "
-                f"{axis_name} interval [{lower}, {upper})."
+                f"{axis_name} interval [{lower}, {upper})"
             )
         updated[axis_name] = translated
     return updated
@@ -225,7 +235,7 @@ def _cycle_half_open(
     width = upper - lower
     if not np.isfinite(lower) or not np.isfinite(upper) or width <= 0.0:
         raise GBManipulatorValueError(
-            "A termination-cycling interval must be finite and have positive width."
+            "A termination-cycling interval must be finite and have positive width"
         )
     canonical_shift = float(np.mod(shift, width))
     if np.isclose(canonical_shift, 0.0, atol=tolerance, rtol=0.0):
@@ -283,8 +293,8 @@ class InterfaceCandidate:
         :param normal_topology: Keyword argument, required. Boundary-normal topology.
         :param coordinate_tolerance: Keyword argument, required. Coordinate tolerance in
             angstroms.
-        :param interface_separation: Keyword argument, optional, defaults to ``0.0``. Inserted central
-            separation in angstroms, optional, defaults to ``0.0``.
+        :param interface_separation: Keyword argument, optional, defaults to ``0.0``.
+            Inserted central separation in angstroms, optional, defaults to ``0.0``.
         :raises GBManipulatorValueError: If candidate state is malformed or internally
             inconsistent.
         """
@@ -297,45 +307,38 @@ class InterfaceCandidate:
         ):
             raise GBManipulatorValueError(
                 "InterfaceCandidate atoms must be a one-dimensional structured array "
-                "containing name, x, y, and z fields."
+                "containing name, x, y, and z fields"
             )
-        labels = _normalize_grain_labels(
-            grain_labels,
-            expected_count=structured.size,
-        )
+        labels = _normalize_grain_labels(grain_labels, expected_count=structured.size)
         box = _strict_float_array("box_dims", box_dims, shape=(3, 2))
         left_bounds = _strict_float_array(
-            "left_grain_x_bounds", left_grain_x_bounds, shape=(2,)
+            "left_grain_x_bounds",
+            left_grain_x_bounds,
+            shape=(2,)
         )
         right_bounds = _strict_float_array(
-            "right_grain_x_bounds", right_grain_x_bounds, shape=(2,)
+            "right_grain_x_bounds",
+            right_grain_x_bounds,
+            shape=(2,)
         )
         plane = _validate_finite_real("gb_plane_x", gb_plane_x)
-        tolerance = _validate_finite_real(
-            "coordinate_tolerance", coordinate_tolerance
-        )
-        separation = _validate_finite_real(
-            "interface_separation", interface_separation
-        )
+        tolerance = _validate_finite_real("coordinate_tolerance", coordinate_tolerance)
+        separation = _validate_finite_real("interface_separation", interface_separation)
         if tolerance <= 0.0:
-            raise GBManipulatorValueError(
-                "coordinate_tolerance must be positive."
-            )
+            raise GBManipulatorValueError("coordinate_tolerance must be positive")
         if separation < 0.0:
-            raise GBManipulatorValueError(
-                "interface_separation must be nonnegative."
-            )
+            raise GBManipulatorValueError("interface_separation must be nonnegative")
         if np.any(box[:, 0] >= box[:, 1]):
             raise GBManipulatorValueError(
-                "InterfaceCandidate box bounds must be strictly ordered."
+                "InterfaceCandidate box bounds must be strictly ordered"
             )
         if not box[0, 0] < plane < box[0, 1]:
             raise GBManipulatorValueError(
-                "InterfaceCandidate gb_plane_x must lie strictly inside the x box."
+                "InterfaceCandidate gb_plane_x must lie strictly inside the x box"
             )
         if left_bounds[0] >= left_bounds[1] or right_bounds[0] >= right_bounds[1]:
             raise GBManipulatorValueError(
-                "Physical grain bounds must be strictly ordered."
+                "Physical grain bounds must be strictly ordered"
             )
         if (
             left_bounds[0] < box[0, 0] - tolerance
@@ -346,7 +349,7 @@ class InterfaceCandidate:
         ):
             raise GBManipulatorValueError(
                 "Physical grain bounds must lie inside the box on their respective "
-                "sides of gb_plane_x without overlapping."
+                "sides of gb_plane_x without overlapping"
             )
         periodic = _normalize_inplane_periodic(inplane_periodic)
         try:
@@ -358,14 +361,14 @@ class InterfaceCandidate:
             coordinates = np.asarray(structured[axis_name], dtype=float)
             if not np.all(np.isfinite(coordinates)):
                 raise GBManipulatorValueError(
-                    "InterfaceCandidate atom coordinates must be finite."
+                    "InterfaceCandidate atom coordinates must be finite"
                 )
             lower = float(box[axis_index, 0])
             upper = float(box[axis_index, 1])
             if np.any(coordinates < lower - tolerance) or np.any(coordinates >= upper):
                 raise GBManipulatorValueError(
                     f"InterfaceCandidate atoms must lie inside the half-open "
-                    f"{axis_name} box."
+                    f"{axis_name} box"
                 )
 
         left_x = np.asarray(structured["x"][labels == LEFT_GRAIN_LABEL], dtype=float)
@@ -377,7 +380,7 @@ class InterfaceCandidate:
             or np.any(right_x >= right_bounds[1])
         ):
             raise GBManipulatorValueError(
-                "Candidate atoms must lie inside their labeled physical grain bounds."
+                "Candidate atoms must lie inside their labeled physical grain bounds"
             )
 
         object.__setattr__(self, "_atoms", _readonly_copy(structured))
@@ -399,37 +402,43 @@ class InterfaceCandidate:
 
     @property
     def atoms(self) -> np.ndarray:
-        """Return a defensive read-only atom-array copy."""
+        """Defensive read-only atom-array copy."""
         return _readonly_copy(self._atoms)
 
     @property
     def box_dims(self) -> np.ndarray:
-        """Return a defensive read-only box copy."""
+        """Defensive read-only box copy."""
         return _readonly_copy(self._box_dims, dtype=float)
 
     @property
     def left_grain_x_bounds(self) -> np.ndarray:
-        """Return a defensive read-only left-grain interval copy."""
+        """Defensive read-only left-grain interval copy."""
         return _readonly_copy(self._left_grain_x_bounds, dtype=float)
 
     @property
     def right_grain_x_bounds(self) -> np.ndarray:
-        """Return a defensive read-only right-grain interval copy."""
+        """Defensive read-only right-grain interval copy."""
         return _readonly_copy(self._right_grain_x_bounds, dtype=float)
 
     @property
     def grain_labels(self) -> np.ndarray:
-        """Return a defensive read-only grain-label copy."""
+        """Defensive read-only grain-label copy."""
         return _readonly_copy(self._grain_labels, dtype=np.int8)
 
     @property
     def periodic_outer_x_interface(self) -> bool:
-        """Return whether the outer x faces form a second interface."""
+        """Whether the outer x faces form a second interface."""
         return self.normal_topology.periodic_outer_x_interface
 
 
 @dataclass(frozen=True, slots=True)
 class _SeparatedInterfaceGeometry:
+    """Geometry produced by applying interface separation.
+
+    Stores the updated simulation box, grain-boundary plane, and physical x bounds of
+    both grains after a topology-aware separation operation. The box dimensions are
+    defensively copied and exposed as a read-only NumPy array.
+    """
     box_dims: np.ndarray
     gb_plane_x: float
     left_grain_x_bounds: tuple[float, float]
@@ -449,7 +458,43 @@ def _separated_interface_geometry(
     normal_topology: BoundaryNormalTopology,
     coordinate_tolerance: float,
 ) -> _SeparatedInterfaceGeometry:
-    """Return topology-specific geometry after central interface separation."""
+    """Calculate topology-aware geometry after opening the central interface.
+
+    The input grain bounds must be contiguous at ``gb_plane_x`` before separation. The
+    left grain remains fixed, while the right grain and its physical x bounds are
+    shifted in the positive x direction by ``interface_separation``. The returned
+    grain-boundary plane lies at the midpoint of the resulting central gap.
+
+    For a periodic bicrystal, both grains must initially span the complete x box without
+    vacuum. The x box length is increased by twice the requested separation so that
+    equal gaps are introduced at the central interface and across the periodic outer x
+    boundary.
+
+    For a single-interface slab, at least one free-surface or vacuum interval must
+    already exist along x. The upper x box bound is increased by the requested
+    separation, preserving the existing outer vacuum intervals while opening only the
+    central grain boundary.
+
+    :param box_dims: Keyword argument, required. Simulation-box bounds, in Angstroms,
+        with one ``(lower, upper)`` row per Cartesian axis.
+    :param gb_plane_x: Keyword argument, required. Initial x coordinate, in Angstroms,
+        of the contiguous grain-boundary plane.
+    :param left_grain_x_bounds: Keyword argument, required. Physical lower and upper x
+        bounds of the left grain, in Angstroms.
+    :param right_grain_x_bounds: Keyword argument, required. Physical lower and upper x
+        bounds of the right grain, in Angstroms.
+    :param interface_separation: Keyword argument, required. Distance, in Angstroms, by
+        which the right grain is displaced in the positive x direction.
+    :param normal_topology: Keyword argument, required. Physical topology along the
+        grain-boundary normal.
+    :param coordinate_tolerance: Keyword argument, required. Absolute coordinate
+        tolerance, in Angstroms, used when comparing grain and box boundaries.
+    :return: Updated box bounds, central-interface plane, and physical x bounds of both
+        grains.
+    :raises GBManipulatorValueError: If the initial grain bounds are not contiguous, the
+        physical grain bounds are inconsistent with the specified topology, a slab has
+        no free-surface or vacuum interval, or the boundary-normal topology is unknown.
+    """
     box = np.asarray(box_dims, dtype=float)
     left = np.asarray(left_grain_x_bounds, dtype=float)
     right = np.asarray(right_grain_x_bounds, dtype=float)
@@ -463,7 +508,7 @@ def _separated_interface_geometry(
         right[0], plane, atol=tolerance, rtol=0.0
     ):
         raise GBManipulatorValueError(
-            "Interface separation requires initially contiguous grain bounds."
+            "Interface separation requires initially contiguous grain bounds"
         )
 
     new_box = np.array(box, copy=True)
@@ -472,7 +517,7 @@ def _separated_interface_geometry(
             right[1], xhi, atol=tolerance, rtol=0.0
         ):
             raise GBManipulatorValueError(
-                "Periodic separation requires zero-vacuum physical grain bounds."
+                "Periodic separation requires zero-vacuum physical grain bounds"
             )
         new_box[0, 1] = xhi + 2.0 * separation
     elif normal_topology is BoundaryNormalTopology.SINGLE_INTERFACE_SLAB:
@@ -480,16 +525,16 @@ def _separated_interface_geometry(
         right_vacuum = float(xhi - right[1])
         if left_vacuum < -tolerance or right_vacuum < -tolerance:
             raise GBManipulatorValueError(
-                "Slab physical grain bounds must lie inside the x box."
+                "Slab physical grain bounds must lie inside the x box"
             )
         if left_vacuum <= tolerance and right_vacuum <= tolerance:
             raise GBManipulatorValueError(
-                "Slab separation requires a free-surface or vacuum interval."
+                "Slab separation requires a free-surface or vacuum interval"
             )
         new_box[0, 1] = xhi + separation
     else:
         raise GBManipulatorValueError(
-            "Interface separation requires known boundary-normal topology."
+            "Interface separation requires known boundary-normal topology"
         )
 
     return _SeparatedInterfaceGeometry(
@@ -505,29 +550,25 @@ def _separated_interface_geometry(
 
 class ParentError(Exception):
     """Base class for exceptions in the Parent class."""
-    pass
 
 
-class ParentValueError(ParentError):
+class ParentValueError(ParentError, ValueError):
     """
     Exception raised in the Parent class when an invalid value is assigned to a Parent
     attribute.
     """
-    pass
 
 
-class ParentFileNotFoundError(ParentError):
+class ParentFileNotFoundError(ParentError, FileNotFoundError):
     """
     Exception raised in the Parent class when the snapshot file is not found.
     """
-    pass
 
 
 class ParentCorruptedFileError(ParentError):
     """
     Exception raised in the Parent class when an error occurs while reading a snapshot.
     """
-    pass
 
 
 class ParentFileMissingDataError(ParentError):
@@ -535,36 +576,31 @@ class ParentFileMissingDataError(ParentError):
     Exception raised when data is missing from a snapshot that is otherwise formatted
     correctly.
     """
-    pass
 
 
 class ParentsProxyError(Exception):
     """Base class for exceptions in the ParentsProxy class."""
-    pass
 
 
-class ParentsProxyValueError(ParentsProxyError):
+class ParentsProxyValueError(ParentsProxyError, ValueError):
     """
     Exception raised in the ParentsProxy class when an invalid value is assigned to a
     ParentsProxy attribute.
     """
-    pass
 
 
-class ParentsProxyIndexError(ParentsProxyError):
+class ParentsProxyIndexError(ParentsProxyError, IndexError):
     """
     Exception raised in the ParentsProxy class when an invalid index is used. Valid
     indices are 0 and 1.
     """
-    pass
 
 
-class ParentsProxyTypeError(ParentsProxyError):
+class ParentsProxyTypeError(ParentsProxyError, TypeError):
     """
     Exception raised in the ParentsProxy class when an invalid type is assigned to a
     ParentsProxy attribute.
     """
-    pass
 
 
 class Parent:
@@ -583,7 +619,7 @@ class Parent:
 
     def __init__(
         self,
-        system: Union[GBMaker, str],
+        system: GBMaker | str,
         *,
         unit_cell: UnitCell = None,
         gb_thickness: float = 10,
@@ -640,7 +676,7 @@ class Parent:
             )
         except (AttributeError, ValueError) as exc:
             raise ParentValueError(
-                "GBMaker must provide valid boundary-normal topology metadata."
+                "GBMaker must provide valid boundary-normal topology metadata"
             ) from exc
         vacuum = float(system.vacuum_thickness)
         if self.__normal_topology is BoundaryNormalTopology.PERIODIC_BICRYSTAL:
@@ -648,17 +684,17 @@ class Parent:
                 vacuum, 0.0, atol=self.__coordinate_tolerance, rtol=0.0
             ):
                 raise ParentValueError(
-                    "Periodic GBMaker topology requires zero vacuum thickness."
+                    "Periodic GBMaker topology requires zero vacuum thickness"
                 )
             vacuum = 0.0
         elif self.__normal_topology is BoundaryNormalTopology.SINGLE_INTERFACE_SLAB:
             if vacuum <= self.__coordinate_tolerance:
                 raise ParentValueError(
-                    "Single-interface slab topology requires positive vacuum thickness."
+                    "Single-interface slab topology requires positive vacuum thickness"
                 )
         else:
             raise ParentValueError(
-                "GBMaker boundary-normal topology must be known explicitly."
+                "GBMaker boundary-normal topology must be known explicitly"
             )
         self.__gb_plane_x = float(system.gb_plane_x)
         self.__left_grain_x_bounds = np.array(
@@ -1082,40 +1118,39 @@ class Parent:
     def z_dim(self) -> float:
         return self.__z_dim
 
-
     @property
     def gb_plane_x(self) -> float:
-        """Return the physical central boundary plane or gap midpoint."""
+        """The physical central boundary plane or gap midpoint."""
         return self.__gb_plane_x
 
     @property
     def inplane_periodic(self) -> tuple[bool, bool]:
-        """Return y/z periodicity flags."""
+        """y/z periodicity flags."""
         return tuple(self.__inplane_periodic)
 
     @property
     def normal_topology(self) -> BoundaryNormalTopology:
-        """Return explicit boundary-normal topology."""
+        """Explicit boundary-normal topology."""
         return self.__normal_topology
 
     @property
     def periodic_outer_x_interface(self) -> bool:
-        """Return whether the outer x faces form a second interface."""
+        """Whether the outer x faces form a second interface."""
         return self.__normal_topology.periodic_outer_x_interface
 
     @property
     def coordinate_tolerance(self) -> float:
-        """Return the coordinate tolerance in angstroms."""
+        """Coordinate tolerance in angstroms."""
         return self.__coordinate_tolerance
 
     @property
     def left_grain_x_bounds(self) -> np.ndarray:
-        """Return a copy of the left physical grain interval."""
+        """Copy of the left physical grain interval."""
         return np.array(self.__left_grain_x_bounds, dtype=float, copy=True)
 
     @property
     def right_grain_x_bounds(self) -> np.ndarray:
-        """Return a copy of the right physical grain interval."""
+        """Copy of the right physical grain interval."""
         return np.array(self.__right_grain_x_bounds, dtype=float, copy=True)
 
 
@@ -1259,7 +1294,7 @@ def _create_neighbor_list(rcut: float, pos: np.ndarray) -> list:
     :param pos: The array of atom positions.
     :return: The neighbor list for the atoms in **pos**
     """
-    kdtree = cKDTree(pos)
+    kdtree = KDTree(pos)
     neighbor_list = kdtree.query_ball_tree(kdtree, r=rcut)
     # Remove an atom from using itself as a neighbor.
     for i, neighbor in enumerate(neighbor_list):
@@ -1276,7 +1311,7 @@ def _calculate_bond_hardness(parent, neighbor_list, ideal_bonds):
     atom_info = {}
     for idx, atom in enumerate(atoms):
         a = Atom(*atom)  # convert this to an Atom
-        if a.name not in atom_info.keys():
+        if a.name not in atom_info:
             atom_info[a.name] = {
                 "num": types[idx],
                 "r_cov": a["r_cov"],
@@ -1398,8 +1433,8 @@ class GBManipulator:
 
     def __init__(
         self,
-        system1: Union[GBMaker, str],
-        system2: Union[GBMaker, str] = None,
+        system1: GBMaker | str,
+        system2: GBMaker | str = None,
         *,
         gb_thickness: float = None,
         unit_cell: UnitCell = None,
@@ -1428,8 +1463,8 @@ class GBManipulator:
 
     def __set_parents(
             self,
-            system1: Union[GBMaker, str],
-            system2: Union[GBMaker, str] = None,
+            system1: GBMaker | str,
+            system2: GBMaker | str = None,
             *,
             unit_cell: UnitCell = None,
             gb_thickness: float = None,
@@ -1489,7 +1524,7 @@ class GBManipulator:
         right_count = len(parent.right_grain)
         if left_count + right_count != count:
             raise GBManipulatorValueError(
-                "Candidate row count does not match the parent grain populations."
+                "candidate row count does not match the parent grain populations"
             )
         return np.hstack(
             (
@@ -1533,64 +1568,15 @@ class GBManipulator:
         """
         if not self.__one_parent:
             raise GBManipulatorValueError(
-                "A parent candidate requires exactly one parent."
+                "a parent candidate requires exactly one parent"
             )
         parent = self.__parents[0]
         if parent.normal_topology is BoundaryNormalTopology.UNKNOWN:
             raise GBManipulatorValueError(
-                "A parent candidate requires known boundary-normal topology."
+                "a parent candidate requires known boundary-normal topology"
             )
         labels = self.__concatenated_labels(parent, len(parent.whole_system))
         return self.__geometry_candidate(parent.whole_system, labels)
-
-    def _translate_right_grain_atoms(
-        self,
-        dy: float,
-        dz: float,
-        *,
-        dx: float = 0.0,
-    ) -> np.ndarray:
-        """Return atom rows after rigidly translating only the right grain.
-
-        :param dy: y displacement in angstroms.
-        :param dz: z displacement in angstroms.
-        :param dx: Keyword argument, optional, defaults to ``0.0``. x displacement in
-            angstroms.
-        :return: Left-grain rows followed by translated right-grain rows.
-        :raises GBManipulatorValueError: If a displacement is invalid or leaves the
-            supported physical grain interval.
-        """
-        dx = _validate_finite_real("dx", dx)
-        dy = _validate_finite_real("dy", dy)
-        dz = _validate_finite_real("dz", dz)
-        if not self.__one_parent:
-            warnings.warn(
-                "Grain translation only occurring based on parent 1.",
-                UserWarning,
-                stacklevel=2,
-            )
-        parent = self.__parents[0]
-        updated_right = np.array(parent.right_grain, copy=True)
-        tolerance = float(parent.coordinate_tolerance)
-        x_lower, x_upper = parent.right_grain_x_bounds
-        translated_x = updated_right["x"] + dx
-        if np.any(translated_x < x_lower - tolerance) or np.any(
-            translated_x >= x_upper
-        ):
-            raise GBManipulatorValueError(
-                "dx moves one or more right-grain atoms outside the supported "
-                f"half-open x interval [{x_lower}, {x_upper})."
-            )
-        updated_right["x"] = translated_x
-        updated_right = _translate_inplane(
-            updated_right,
-            dy=dy,
-            dz=dz,
-            box_dims=parent.box_dims,
-            inplane_periodic=parent.inplane_periodic,
-            tolerance=tolerance,
-        )
-        return np.hstack((parent.left_grain, updated_right))
 
     def translate_right_grain(
         self,
@@ -1603,13 +1589,48 @@ class GBManipulator:
 
         :param dy: Displacement in y in angstroms.
         :param dz: Displacement in z in angstroms.
-        :param dx: Keyword argument, optional, defaults to ``0.0``. Displacement in x
-            in angstroms.
+        :param dx: Keyword argument, optional, defaults to ``0.0``. Displacement in x in
+            angstroms.
         :return: Left-grain rows followed by translated right-grain rows.
         :raises GBManipulatorValueError: If a displacement is invalid or moves atoms
             outside a supported interval.
         """
-        return self._translate_right_grain_atoms(dy, dz, dx=dx)
+        dx = _validate_finite_real("dx", dx)
+        dy = _validate_finite_real("dy", dy)
+        dz = _validate_finite_real("dz", dz)
+
+        if not self.__one_parent:
+            warnings.warn(
+                "grain translation only occurring based on parent 1",
+                UserWarning,
+                stacklevel=2,
+            )
+
+        parent = self.__parents[0]
+        updated_right = np.array(parent.right_grain, copy=True)
+        tolerance = float(parent.coordinate_tolerance)
+        x_lower, x_upper = parent.right_grain_x_bounds
+
+        translated_x = updated_right["x"] + dx
+        if np.any(translated_x < x_lower - tolerance) or np.any(
+            translated_x >= x_upper
+        ):
+            raise GBManipulatorValueError(
+                "dx moves one or more right-grain atoms outside the supported "
+                f"half-open x interval [{x_lower}, {x_upper})"
+            )
+
+        updated_right["x"] = translated_x
+        updated_right = _translate_inplane(
+            updated_right,
+            dy=dy,
+            dz=dz,
+            box_dims=parent.box_dims,
+            inplane_periodic=parent.inplane_periodic,
+            tolerance=tolerance,
+        )
+
+        return np.hstack((parent.left_grain, updated_right))
 
     def make_translation_candidate(
         self,
@@ -1630,18 +1651,20 @@ class GBManipulator:
         """
         if not self.__one_parent:
             raise GBManipulatorValueError(
-                "A translation candidate requires exactly one parent."
+                "a translation candidate requires exactly one parent"
             )
+
         parent = self.__parents[0]
         if parent.normal_topology is BoundaryNormalTopology.UNKNOWN:
             raise GBManipulatorValueError(
-                "A translation candidate requires known boundary-normal topology."
+                "a translation candidate requires known boundary-normal topology"
             )
-        atoms = self._translate_right_grain_atoms(dy, dz, dx=dx)
+
+        atoms = self.translate_right_grain(dy, dz, dx=dx)
         labels = self.__concatenated_labels(parent, len(atoms))
         return self.__geometry_candidate(atoms, labels)
 
-    def _cycle_grain_terminations_atoms(
+    def cycle_grain_terminations(
         self,
         *,
         left_phase_shift: float = 0.0,
@@ -1649,37 +1672,73 @@ class GBManipulator:
         right_dy: float = 0.0,
         right_dz: float = 0.0,
     ) -> np.ndarray:
-        """Cycle both finite grains through their physical x intervals."""
+        """Cycle grain-local terminations for a periodic bicrystal or slab.
+
+        Each grain is cycled independently through its finite physical x interval. The
+        left grain remains fixed in-plane, while the right grain may also be translated
+        along the periodic in-plane directions.
+
+        For a periodic bicrystal, the physical grain bounds must span the complete x box
+        so that the central and outer periodic interfaces remain consistent.
+
+        For a single-interface slab, the physical grain bounds must lie inside the x box
+        with at least one free-surface or vacuum interval. Cycling a complete finite
+        grain changes both its GB-facing and free-surface terminations; those
+        terminations therefore remain coupled.
+
+        :param left_phase_shift: Keyword argument, optional, defaults to ``0.0``.
+            Left-grain x phase shift in angstroms.
+        :param right_phase_shift: Keyword argument, optional, defaults to ``0.0``.
+            Right-grain x phase shift in angstroms.
+        :param right_dy: Keyword argument, optional, defaults to ``0.0``. Right-grain y
+            translation in angstroms.
+        :param right_dz: Keyword argument, optional, defaults to ``0.0``. Right-grain z
+            translation in angstroms.
+        :return: Left-grain rows followed by right-grain rows after termination cycling
+            and optional right-grain in-plane translation.
+        :raises GBManipulatorValueError: If the manipulator does not have exactly one
+            parent, the boundary-normal topology is unknown, the physical grain or box
+            geometry is invalid for that topology, parent atoms lie outside their
+            physical grain bounds, or a displacement is invalid.
+        """
         left_phase_shift = _validate_finite_real(
-            "left_phase_shift", left_phase_shift
+            "left_phase_shift",
+            left_phase_shift,
         )
         right_phase_shift = _validate_finite_real(
-            "right_phase_shift", right_phase_shift
+            "right_phase_shift",
+            right_phase_shift,
         )
         right_dy = _validate_finite_real("right_dy", right_dy)
         right_dz = _validate_finite_real("right_dz", right_dz)
+
         if not self.__one_parent:
             raise GBManipulatorValueError(
-                "Termination cycling requires exactly one parent."
+                "termination cycling requires exactly one parent"
             )
 
         parent = self.__parents[0]
         topology = parent.normal_topology
         if topology is BoundaryNormalTopology.UNKNOWN:
             raise GBManipulatorValueError(
-                "Termination cycling requires known boundary-normal topology."
+                "termination cycling requires known boundary-normal topology"
             )
+
         tolerance = float(parent.coordinate_tolerance)
         box = np.asarray(parent.box_dims, dtype=float)
-        if box.shape != (3, 2) or not np.all(np.isfinite(box)) or np.any(
-            box[:, 0] >= box[:, 1]
+        if (
+            box.shape != (3, 2)
+            or not np.all(np.isfinite(box))
+            or np.any(box[:, 0] >= box[:, 1])
         ):
             raise GBManipulatorValueError(
-                "Termination cycling requires finite strictly ordered box bounds."
+                "termination cycling requires finite strictly ordered box bounds"
             )
+
         left_bounds = np.asarray(parent.left_grain_x_bounds, dtype=float)
         right_bounds = np.asarray(parent.right_grain_x_bounds, dtype=float)
         plane = float(parent.gb_plane_x)
+
         if (
             left_bounds.shape != (2,)
             or right_bounds.shape != (2,)
@@ -1687,38 +1746,61 @@ class GBManipulator:
             or not np.all(np.isfinite(right_bounds))
             or left_bounds[0] >= left_bounds[1]
             or right_bounds[0] >= right_bounds[1]
-            or not np.isclose(left_bounds[1], plane, atol=tolerance, rtol=0.0)
-            or not np.isclose(right_bounds[0], plane, atol=tolerance, rtol=0.0)
+            or not np.isclose(
+                left_bounds[1],
+                plane,
+                atol=tolerance,
+                rtol=0.0,
+            )
+            or not np.isclose(
+                right_bounds[0],
+                plane,
+                atol=tolerance,
+                rtol=0.0,
+            )
         ):
             raise GBManipulatorValueError(
-                "Termination cycling requires contiguous valid physical grain bounds."
+                "termination cycling requires contiguous valid physical grain bounds"
             )
 
         xlo = float(box[0, 0])
         xhi = float(box[0, 1])
+
         if topology is BoundaryNormalTopology.PERIODIC_BICRYSTAL:
-            if not np.isclose(
-                left_bounds[0], xlo, atol=tolerance, rtol=0.0
-            ) or not np.isclose(
-                right_bounds[1], xhi, atol=tolerance, rtol=0.0
+            if (
+                not np.isclose(
+                    left_bounds[0],
+                    xlo,
+                    atol=tolerance,
+                    rtol=0.0,
+                )
+                or not np.isclose(
+                    right_bounds[1],
+                    xhi,
+                    atol=tolerance,
+                    rtol=0.0,
+                )
             ):
                 raise GBManipulatorValueError(
-                    "Periodic termination cycling requires zero-vacuum grain bounds."
+                    "seriodic termination cycling requires zero-vacuum grain bounds"
                 )
         elif topology is BoundaryNormalTopology.SINGLE_INTERFACE_SLAB:
             left_vacuum = float(left_bounds[0] - xlo)
             right_vacuum = float(xhi - right_bounds[1])
+
             if left_vacuum < -tolerance or right_vacuum < -tolerance:
                 raise GBManipulatorValueError(
-                    "Slab grain bounds must lie inside the x box."
+                    "slab grain bounds must lie inside the x box"
                 )
             if left_vacuum <= tolerance and right_vacuum <= tolerance:
                 raise GBManipulatorValueError(
-                    "Slab termination cycling requires a free-surface or vacuum interval."
+                    "slab termination cycling requires a free-surface or vacuum "
+                    "interval"
                 )
 
         left_x = np.asarray(parent.left_grain["x"], dtype=float)
         right_x = np.asarray(parent.right_grain["x"], dtype=float)
+
         if (
             not np.all(np.isfinite(left_x))
             or not np.all(np.isfinite(right_x))
@@ -1728,11 +1810,12 @@ class GBManipulator:
             or np.any(right_x >= right_bounds[1] + tolerance)
         ):
             raise GBManipulatorValueError(
-                "Parent atoms do not lie inside their physical grain bounds."
+                "Parent atoms do not lie inside their physical grain bounds"
             )
 
         updated_left = np.array(parent.left_grain, copy=True)
         updated_right = np.array(parent.right_grain, copy=True)
+
         updated_left["x"] = _cycle_half_open(
             updated_left["x"],
             lower=float(left_bounds[0]),
@@ -1747,6 +1830,7 @@ class GBManipulator:
             shift=right_phase_shift,
             tolerance=tolerance,
         )
+
         updated_right = _translate_inplane(
             updated_right,
             dy=right_dy,
@@ -1755,43 +1839,12 @@ class GBManipulator:
             inplane_periodic=parent.inplane_periodic,
             tolerance=tolerance,
         )
+
         return np.hstack((updated_left, updated_right))
 
-    def cycle_grain_terminations(
-        self,
-        *,
-        left_phase_shift: float = 0.0,
-        right_phase_shift: float = 0.0,
-        right_dy: float = 0.0,
-        right_dz: float = 0.0,
-    ) -> np.ndarray:
-        """Cycle grain-local terminations for a periodic bicrystal or slab.
-
-        For a slab, each complete finite grain cycles through its own physical interval;
-        the GB-facing and free-surface terminations therefore remain coupled.
-
-        :param left_phase_shift: Keyword argument, optional, defaults to ``0.0``. Left
-            x phase shift in angstroms.
-        :param right_phase_shift: Keyword argument, optional, defaults to ``0.0``. Right
-            x phase shift in angstroms.
-        :param right_dy: Keyword argument, optional, defaults to ``0.0``. Right-grain y
-            translation in angstroms.
-        :param right_dz: Keyword argument, optional, defaults to ``0.0``. Right-grain z
-            translation in angstroms.
-        :return: Left-grain rows followed by right-grain rows after cycling.
-        :raises GBManipulatorValueError: If topology, geometry, or a displacement is
-            invalid.
-        """
-        return self._cycle_grain_terminations_atoms(
-            left_phase_shift=left_phase_shift,
-            right_phase_shift=right_phase_shift,
-            right_dy=right_dy,
-            right_dz=right_dz,
-        )
-
     # TODO: Independent GB-only slab termination control that preserves each outer
-    # free-surface termination is deferred. The current operation intentionally cycles
-    # each complete finite grain and couples its GB-facing and surface phases.
+    #   free-surface termination is deferred. The current operation intentionally cycles
+    #   each complete finite grain and couples its GB-facing and surface phases.
     def make_termination_candidate(
         self,
         *,
@@ -1814,7 +1867,7 @@ class GBManipulator:
         :raises GBManipulatorValueError: If topology, geometry, or a displacement is
             invalid.
         """
-        atoms = self._cycle_grain_terminations_atoms(
+        atoms = self.cycle_grain_terminations(
             left_phase_shift=left_phase_shift,
             right_phase_shift=right_phase_shift,
             right_dy=right_dy,
@@ -1833,50 +1886,46 @@ class GBManipulator:
         """Insert a topology-aware empty interval between the two grains.
 
         Periodic bicrystals expand the x box by twice the requested separation so both
-        the central and outer periodic interfaces gain the same spacing. Slabs expand
-        by the requested separation while preserving both outer vacuum widths.
+        the central and outer periodic interfaces gain the same spacing. Slabs expand by
+        the requested separation while preserving both outer vacuum widths.
 
         :param candidate: Geometry-bearing fixed-cell candidate from this manipulator.
         :param interface_separation: Keyword argument, required. Nonnegative central
             separation in angstroms.
         :return: Complete immutable separated candidate and updated geometry.
-        :raises GBManipulatorValueError: If topology, candidate provenance, or separation
-            is invalid.
+        :raises GBManipulatorValueError: If topology, candidate provenance, or
+            separation is invalid.
         """
         if not self.__one_parent:
             raise GBManipulatorValueError(
-                "Interface separation requires exactly one parent."
+                "interface separation requires exactly one parent"
             )
         if not isinstance(candidate, InterfaceCandidate):
-            raise GBManipulatorValueError(
-                "candidate must be an InterfaceCandidate."
-            )
+            raise GBManipulatorValueError("candidate must be an InterfaceCandidate")
         separation = _validate_finite_real(
             "interface_separation", interface_separation
         )
         if separation < 0.0:
-            raise GBManipulatorValueError(
-                "interface_separation must be nonnegative."
-            )
+            raise GBManipulatorValueError("interface_separation must be nonnegative")
         parent = self.__parents[0]
         tolerance = candidate.coordinate_tolerance
         if not np.isclose(
             candidate.interface_separation, 0.0, atol=tolerance, rtol=0.0
         ):
             raise GBManipulatorValueError(
-                "Interface separation cannot be reapplied to a separated candidate."
+                "interface separation cannot be reapplied to a separated candidate"
             )
         if candidate.normal_topology is not parent.normal_topology:
             raise GBManipulatorValueError(
-                "Candidate topology does not match the manipulator parent."
+                "candidate topology does not match the manipulator parent"
             )
         if candidate.normal_topology is BoundaryNormalTopology.UNKNOWN:
             raise GBManipulatorValueError(
-                "Interface separation requires known boundary-normal topology."
+                "interface separation requires known boundary-normal topology."
             )
         if candidate.inplane_periodic != parent.inplane_periodic:
             raise GBManipulatorValueError(
-                "Candidate in-plane periodicity does not match the parent."
+                "candidate in-plane periodicity does not match the parent"
             )
         if not np.allclose(
             candidate.box_dims, parent.box_dims, atol=tolerance, rtol=0.0
@@ -1884,7 +1933,7 @@ class GBManipulator:
             candidate.gb_plane_x, parent.gb_plane_x, atol=tolerance, rtol=0.0
         ):
             raise GBManipulatorValueError(
-                "Interface separation requires fixed-cell geometry from this parent."
+                "interface separation requires fixed-cell geometry from this parent"
             )
         if not np.allclose(
             candidate.left_grain_x_bounds,
@@ -1898,7 +1947,7 @@ class GBManipulator:
             rtol=0.0,
         ):
             raise GBManipulatorValueError(
-                "Candidate physical grain bounds do not match the parent."
+                "candidate physical grain bounds do not match the parent"
             )
 
         geometry = _separated_interface_geometry(
@@ -2361,9 +2410,9 @@ class GBManipulator:
              )
 
         if (num_to_insert is not None and
-                (
-                    num_to_insert < 1 or
-                    num_to_insert > int(0.25 * len(gb_atoms))
+                    (
+                        num_to_insert < 1 or
+                        num_to_insert > int(0.25 * len(gb_atoms))
                     )
                 ):
             raise GBManipulatorValueError(

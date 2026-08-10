@@ -1,854 +1,694 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
+"""Unit tests for conventional unit-cell construction and exact basis metadata."""
+
 import math
-import unittest
 
 import numpy as np
+import pytest
 
 from GBOpt.Atom import Atom
 from GBOpt.UnitCell import UnitCell, UnitCellTypeError, UnitCellValueError
 
+FCC_RECIPROCAL = np.array(
+    [
+        [-1.0, 1.0, 1.0],
+        [1.0, -1.0, 1.0],
+        [1.0, 1.0, -1.0],
+    ]
+)
+IDENTITY = np.eye(3)
 
-class TestUnitCell(unittest.TestCase):
-
-    def test_fcc_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='fcc', a0=1.0, atoms='Cu')
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, math.sqrt(2) * 0.25)
-        self.assertEqual(len(cell.unit_cell), 4)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [0.0, 0.5, 0.5],
-                        [0.5, 0.0, 0.5],
-                        [0.5, 0.5, 0.0]
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 1)
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [-1.0, 1.0, 1.0],
-                        [1.0, -1.0, 1.0],
-                        [1.0, 1.0, -1.0]
-                    ]
-                )
-            )
-        )
-        self.assertTrue(list(cell.ideal_bond_lengths.keys()) == [(1, 1)])
-        self.assertTrue(math.isclose(cell.ideal_bond_lengths[(1, 1)], 1 / np.sqrt(2)))
-        self.assertEqual(cell.ratio, {1: 1})
-
-    def test_bcc_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='bcc', a0=1.0, atoms='Fe')
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, math.sqrt(3) * 0.25)
-        self.assertEqual(len(cell.unit_cell), 2)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [0.5, 0.5, 0.5]
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 1)
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [1.0, 1.0, 0.0],
-                        [1.0, 0.0, 1.0],
-                        [0.0, 1.0, 1.0]
-                    ]
-                )
-            )
-        )
-        self.assertTrue(list(cell.ideal_bond_lengths.keys()) == [(1, 1)])
-        self.assertTrue(math.isclose(cell.ideal_bond_lengths[(1, 1)], np.sqrt(3) / 2))
-        self.assertEqual(cell.ratio, {1: 1})
-
-    def test_sc_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='sc', a0=1.0, atoms='H')
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, 0.5)
-        self.assertEqual(len(cell.unit_cell), 1)
-        positions = cell.positions()
-        self.assertTrue(np.allclose(positions, np.array([[0.0, 0.0, 0.0]])))
-        names = cell.names()
-        self.assertEqual(len(set(names)), 1)
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [1.0, 0.0, 0.0],
-                        [0.0, 1.0, 0.0],
-                        [0.0, 0.0, 1.0]
-                    ]
-                )
-            )
-        )
-        self.assertTrue(list(cell.ideal_bond_lengths.keys()) == [(1, 1)])
-        self.assertTrue(math.isclose(cell.ideal_bond_lengths[(1, 1)], 1))
-        self.assertEqual(cell.ratio, {1: 1})
-
-    def test_diamond_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='diamond', a0=1.0, atoms='C')
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, math.sqrt(3) * 0.125)
-        self.assertEqual(len(cell.unit_cell), 8)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [0.0, 0.5, 0.5],
-                        [0.5, 0.0, 0.5],
-                        [0.5, 0.5, 0.0],
-                        [0.25, 0.25, 0.25],
-                        [0.75, 0.75, 0.25],
-                        [0.75, 0.25, 0.75],
-                        [0.25, 0.75, 0.75]
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 1)
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [-1.0, 1.0, 1.0],
-                        [1.0, -1.0, 1.0],
-                        [1.0, 1.0, -1.0]
-                    ]
-                )
-            )
-        )
-        self.assertTrue(list(cell.ideal_bond_lengths.keys()) == [(1, 1)])
-        self.assertTrue(math.isclose(cell.ideal_bond_lengths[(1, 1)], np.sqrt(3) / 4))
-        self.assertEqual(cell.ratio, {1: 1})
-
-    def test_fluorite_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='fluorite', a0=1.0, atoms=['Ca', 'F'])
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, math.sqrt(3) * 0.125)
-        self.assertEqual(len(cell.unit_cell), 12)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [0.0, 0.5, 0.5],
-                        [0.5, 0.0, 0.5],
-                        [0.5, 0.5, 0.0],
-                        [0.25, 0.25, 0.25],
-                        [0.25, 0.25, 0.75],
-                        [0.25, 0.75, 0.25],
-                        [0.25, 0.75, 0.75],
-                        [0.75, 0.25, 0.25],
-                        [0.75, 0.25, 0.75],
-                        [0.75, 0.75, 0.25],
-                        [0.75, 0.75, 0.75],
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 2)
-        for i in range(4):
-            self.assertEqual(names[i], 'Ca')
-        for i in range(4, 12):
-            self.assertEqual(names[i], 'F')
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [-1.0, 1.0, 1.0],
-                        [1.0, -1.0, 1.0],
-                        [1.0, 1.0, -1.0]
-                    ]
-                )
-            )
-        )
-        ideal_fluorite_bonds = {
-            (1, 1): 1 / np.sqrt(2),
-            (1, 2): np.sqrt(3) / 4,
-            (2, 2): 0.5
-        }
-        self.assertTrue(cell.ideal_bond_lengths.keys() == ideal_fluorite_bonds.keys())
-        self.assertTrue(all([math.isclose(cell.ideal_bond_lengths[i],
-                        ideal_fluorite_bonds[i]) for i in ideal_fluorite_bonds.keys()]))
-        self.assertEqual(cell.ratio, {1: 1, 2: 2})
-
-    def test_rocksalt_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='rocksalt', a0=1.0, atoms=['Na', 'Cl'])
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, 0.25)
-        self.assertEqual(len(cell.unit_cell), 8)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0, 0, 0],
-                        [0, 0.5, 0.5],
-                        [0.5, 0, 0.5],
-                        [0.5, 0.5, 0],
-                        [0, 0, 0.5],
-                        [0, 0.5, 0],
-                        [0.5, 0, 0],
-                        [0.5, 0.5, 0.5],
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 2)
-        for i in range(4):
-            self.assertEqual(names[i], 'Na')
-        for i in range(4, 8):
-            self.assertEqual(names[i], 'Cl')
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [-1.0, 1.0, 1.0],
-                        [1.0, -1.0, 1.0],
-                        [1.0, 1.0, -1.0]
-                    ]
-                )
-            )
-        )
-        ideal_rocksalt_bonds = {
-            (1, 1): 1 / np.sqrt(2),
+BUILTIN_STRUCTURE_CASES = (
+    {
+        "structure": "sc",
+        "atoms": "H",
+        "radius": 0.5,
+        "positions": [[0.0, 0.0, 0.0]],
+        "names": ["H"],
+        "reciprocal": IDENTITY,
+        "ideal_bonds": {(1, 1): 1.0},
+        "ratio": {1: 1},
+        "rational_denominator": 1,
+    },
+    {
+        "structure": "bcc",
+        "atoms": "Fe",
+        "radius": math.sqrt(3) * 0.25,
+        "positions": [[0.0, 0.0, 0.0], [0.5, 0.5, 0.5]],
+        "names": ["Fe", "Fe"],
+        "reciprocal": np.array(
+            [[1.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+        ),
+        "ideal_bonds": {(1, 1): math.sqrt(3) / 2},
+        "ratio": {1: 1},
+        "rational_denominator": 2,
+    },
+    {
+        "structure": "fcc",
+        "atoms": "Cu",
+        "radius": math.sqrt(2) * 0.25,
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+        ],
+        "names": ["Cu"] * 4,
+        "reciprocal": FCC_RECIPROCAL,
+        "ideal_bonds": {(1, 1): 1 / math.sqrt(2)},
+        "ratio": {1: 1},
+        "rational_denominator": 2,
+    },
+    {
+        "structure": "diamond",
+        "atoms": "C",
+        "radius": math.sqrt(3) * 0.125,
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+            [0.25, 0.25, 0.25],
+            [0.75, 0.75, 0.25],
+            [0.75, 0.25, 0.75],
+            [0.25, 0.75, 0.75],
+        ],
+        "names": ["C"] * 8,
+        "reciprocal": FCC_RECIPROCAL,
+        "ideal_bonds": {(1, 1): math.sqrt(3) / 4},
+        "ratio": {1: 1},
+        "rational_denominator": 4,
+    },
+    {
+        "structure": "fluorite",
+        "atoms": ("Ca", "F"),
+        "radius": math.sqrt(3) * 0.125,
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+            [0.25, 0.25, 0.25],
+            [0.25, 0.25, 0.75],
+            [0.25, 0.75, 0.25],
+            [0.25, 0.75, 0.75],
+            [0.75, 0.25, 0.25],
+            [0.75, 0.25, 0.75],
+            [0.75, 0.75, 0.25],
+            [0.75, 0.75, 0.75],
+        ],
+        "names": ["Ca"] * 4 + ["F"] * 8,
+        "reciprocal": FCC_RECIPROCAL,
+        "ideal_bonds": {
+            (1, 1): 1 / math.sqrt(2),
+            (1, 2): math.sqrt(3) / 4,
+            (2, 2): 0.5,
+        },
+        "ratio": {1: 1, 2: 2},
+        "rational_denominator": 4,
+    },
+    {
+        "structure": "rocksalt",
+        "atoms": ("Na", "Cl"),
+        "radius": 0.25,
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+            [0.0, 0.0, 0.5],
+            [0.0, 0.5, 0.0],
+            [0.5, 0.0, 0.0],
+            [0.5, 0.5, 0.5],
+        ],
+        "names": ["Na"] * 4 + ["Cl"] * 4,
+        "reciprocal": FCC_RECIPROCAL,
+        "ideal_bonds": {
+            (1, 1): 1 / math.sqrt(2),
             (1, 2): 0.5,
-            (2, 2): 1 / np.sqrt(2)
-        }
-        self.assertTrue(cell.ideal_bond_lengths.keys() == ideal_rocksalt_bonds.keys())
-        self.assertTrue(all([math.isclose(cell.ideal_bond_lengths[i],
-                        ideal_rocksalt_bonds[i]) for i in ideal_rocksalt_bonds.keys()]))
-        self.assertEqual(cell.ratio, {1: 1, 2: 1})
+            (2, 2): 1 / math.sqrt(2),
+        },
+        "ratio": {1: 1, 2: 1},
+        "rational_denominator": 2,
+    },
+    {
+        "structure": "zincblende",
+        "atoms": ("Zn", "S"),
+        "radius": math.sqrt(3) * 0.125,
+        "positions": [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.5, 0.5],
+            [0.5, 0.0, 0.5],
+            [0.5, 0.5, 0.0],
+            [0.25, 0.25, 0.25],
+            [0.75, 0.75, 0.25],
+            [0.75, 0.25, 0.75],
+            [0.25, 0.75, 0.75],
+        ],
+        "names": ["Zn"] * 4 + ["S"] * 4,
+        "reciprocal": FCC_RECIPROCAL,
+        "ideal_bonds": {
+            (1, 1): 1 / math.sqrt(2),
+            (1, 2): math.sqrt(3) / 4,
+            (2, 2): 1 / math.sqrt(2),
+        },
+        "ratio": {1: 1, 2: 1},
+        "rational_denominator": 4,
+    },
+)
 
-    def test_zincblende_initialization(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='zincblende', a0=1.0, atoms=['Zn', 'S'])
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, math.sqrt(3) * 0.125)
-        self.assertEqual(len(cell.unit_cell), 8)
-        positions = cell.positions()
-        self.assertTrue(
-            np.allclose(
-                positions,
-                np.array(
-                    [
-                        [0.0, 0.0, 0.0],
-                        [0.0, 0.5, 0.5],
-                        [0.5, 0.0, 0.5],
-                        [0.5, 0.5, 0.0],
-                        [0.25, 0.25, 0.25],
-                        [0.75, 0.75, 0.25],
-                        [0.75, 0.25, 0.75],
-                        [0.25, 0.75, 0.75],
-                    ]
-                )
-            )
-        )
-        names = cell.names()
-        self.assertEqual(len(set(names)), 2)
-        for i in range(4):
-            self.assertEqual(names[i], 'Zn')
-        for i in range(4, 8):
-            self.assertEqual(names[i], 'S')
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [-1.0, 1.0, 1.0],
-                        [1.0, -1.0, 1.0],
-                        [1.0, 1.0, -1.0]
-                    ]
-                )
-            )
-        )
-        ideal_zincblende_bonds = {
-            (1, 1): 1 / np.sqrt(2),
-            (1, 2): np.sqrt(3) / 4,
-            (2, 2): 1 / np.sqrt(2)
-        }
-        self.assertTrue(cell.ideal_bond_lengths.keys() == ideal_zincblende_bonds.keys())
-        self.assertTrue(all([math.isclose(cell.ideal_bond_lengths[i],
-                        ideal_zincblende_bonds[i]) for i in ideal_zincblende_bonds.keys()]))
-        self.assertEqual(cell.ratio, {1: 1, 2: 1})
+MONATOMIC_NEIGHBOR_CASES = (
+    ("sc", "Po", 3.345, (1.0, math.sqrt(2), math.sqrt(3), 2.0)),
+    ("bcc", "Fe", 2.86, (math.sqrt(3) / 2, 1.0, math.sqrt(2), math.sqrt(11) / 2)),
+    ("fcc", "Cu", 3.54, (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2))),
+    (
+        "diamond",
+        "C",
+        3.567,
+        (math.sqrt(3) / 4, 1 / math.sqrt(2), math.sqrt(11) / 4, 1.0),
+    ),
+)
 
-    def test_custom_initialization(self):
-        cell = UnitCell()
-        custom_unit_cell = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-        custom_conventional = np.array([[1.0, 0.0, 0.0],
-                                        [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-        custom_reciprocal = np.array([[1.0, 0.0, 0.0],
-                                      [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-        custom_ideal_bonds = {
-            (1, 1): 1,
-            (1, 2): 1,
-            (2, 2): 1
-        }
-        custom_ratio = {1: 1, 2: 1}
-        custom_type_map = {'C': 1, 'H': 2}
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types='H',
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds
-                                )
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types=['H', 'C'],
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds,
-                                ratio={1: 0, 2: 2}
-                                )
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types=['H', 'C'],
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds,
-                                ratio={0: 1, 1: 1}
-                                )
-        with self.assertRaises(UnitCellTypeError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types=['H', 'C'],
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds,
-                                ratio="Error"
-                                )
-        with self.assertRaises(UnitCellTypeError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types=['H', 'C'],
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds,
-                                ratio="Error"
-                                )
-        cell.init_by_custom(unit_cell=custom_unit_cell,
-                            unit_cell_types=['H', 'C'],
-                            a0=1.0,
-                            conventional=custom_conventional,
-                            reciprocal=custom_reciprocal,
-                            ideal_bond_lengths=custom_ideal_bonds,
-                            ratio=custom_ratio
-                            )
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(len(cell.unit_cell), 2)
-        names = cell.names()
-        self.assertEqual(names[0], 'H')
-        self.assertEqual(names[1], 'C')
-        positions = cell.positions()
-        self.assertTrue(np.allclose(positions, custom_unit_cell))
-        names = cell.names()
-        self.assertEqual(len(set(names)), 2)
-        self.assertEqual(len(positions), len(names))
-        reciprocal = cell.reciprocal
-        self.assertTrue(
-            np.allclose(
-                reciprocal,
-                np.array(
-                    [
-                        [1.0, 0.0, 0.0],
-                        [0.0, 1.0, 0.0],
-                        [0.0, 0.0, 1.0]
-                    ]
-                )
-            )
-        )
-        self.assertTrue(cell.ideal_bond_lengths.keys() == custom_ideal_bonds.keys())
-        self.assertTrue(all([math.isclose(cell.ideal_bond_lengths[i],
-                        custom_ideal_bonds[i]) for i in custom_ideal_bonds.keys()]))
-        self.assertEqual(cell.ratio, custom_ratio)
-        self.assertEqual(cell.type_map, {'H': 1, 'C': 2})
-        cell.type_map = custom_type_map
-        self.assertEqual(cell.type_map, custom_type_map)
+BINARY_NEIGHBOR_CASES = (
+    (
+        "fluorite",
+        ("U", "O"),
+        5.454,
+        (math.sqrt(3) / 4, 1 / math.sqrt(2), math.sqrt(11) / 4, 1.0),
+        (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2)),
+        (0.5, 1 / math.sqrt(2), math.sqrt(3) / 2, 1.0),
+    ),
+    (
+        "rocksalt",
+        ("Na", "Cl"),
+        5.454,
+        (0.5, 1 / math.sqrt(2), math.sqrt(3) / 2, 1.0),
+        (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2)),
+        (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2)),
+    ),
+    (
+        "zincblende",
+        ("Zn", "S"),
+        5.454,
+        (math.sqrt(3) / 4, 1 / math.sqrt(2), math.sqrt(11) / 4, 1.0),
+        (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2)),
+        (1 / math.sqrt(2), 1.0, math.sqrt(6) / 2, math.sqrt(2)),
+    ),
+)
 
-    def test_not_implemented_structure(self):
-        cell = UnitCell()
-        with self.assertRaises(NotImplementedError):
-            cell.init_by_structure(structure='notimplemented', a0=1.0, atoms='H')
 
-    def test_inits_with_multiple_atoms_one_atom_type(self):
-        cell = UnitCell()
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_structure('fluorite', 1.0, 'Ca')
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_structure('rocksalt', 1.0, 'Na')
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_structure('zincblende', 1.0, 'Zn')
+def _custom_init_kwargs() -> dict:
+    return {
+        "unit_cell": np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]),
+        "unit_cell_types": ["H", "C"],
+        "a0": 1.0,
+        "conventional": np.eye(3),
+        "reciprocal": np.eye(3),
+        "ideal_bond_lengths": {(1, 1): 1.0, (1, 2): 1.0, (2, 2): 1.0},
+        "ratio": {1: 1, 2: 1},
+    }
 
-    def test_reciprocal_shape(self):
-        cell = UnitCell()
-        custom_unit_cell = np.array([[0.1, 0.2, 0.3]])
-        custom_conventional = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        custom_reciprocal = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
-        custom_ideal_bonds = {
-            (1, 1): 1,
-            (1, 2): 1,
-            (2, 2): 1
-        }
-        with self.assertRaises(UnitCellValueError):
-            cell.init_by_custom(unit_cell=custom_unit_cell,
-                                unit_cell_types='H',
-                                a0=1.0,
-                                conventional=custom_conventional,
-                                reciprocal=custom_reciprocal,
-                                ideal_bond_lengths=custom_ideal_bonds
-                                )
 
-    def test_lattice_parameter(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='fcc', a0=3.54, atoms='Cu')
-        cu_unit_cell = [
-            Atom('Cu', 0.0, 0.0, 0.0),
-            Atom('Cu', 0.0, 1.77, 1.77),
-            Atom('Cu', 1.77, 0.0, 1.77),
-            Atom('Cu', 1.77, 1.77, 0.0)
-        ]
-        cu_positions = [i['position'] for i in cu_unit_cell]
-        cell_positions = [i['position'] for i in cell.unit_cell]
-        self.assertEqual(cell_positions, cu_positions)
+def _assert_neighbor_shells(
+    cell: UnitCell,
+    expected: tuple[float, ...],
+    atom_type: int | None = None,
+) -> None:
+    for shell, expected_distance in enumerate(expected, start=1):
+        actual = cell.nn_distance(shell, atom_type)
+        assert actual == pytest.approx(expected_distance), f"neighbor shell {shell}"
 
-    def test_repr(self):
-        cell = UnitCell()
-        self.assertEqual(
-            repr(cell),
-            "UnitCell with 0 atoms\nLattice parameter (a0): 1.000 Å\nRadius: 0.000 Å\n"
-            "Atoms: []\nReciprocal lattice:\n[[0. 0. 0.]\n [0. 0. 0.]\n [0. 0. 0.]]")
-        cell.init_by_structure('sc', 1.0, 'H')
-        self.assertEqual(
-            repr(cell),
-            "UnitCell with 1 atom\nLattice parameter (a0): 1.000 Å\nRadius: 0.500 Å\n"
-            "Atoms: ['H': 0.000, 0.000, 0.000]\nReciprocal lattice:\n[[1. 0. 0.]\n [0. 1. 0.]\n [0. 0. 1.]]"
-        )
-        custom_ideal_bonds = {
-            (1, 1): 1,
-            (1, 2): 1,
-            (2, 2): 1
-        }
-        cell.init_by_custom(unit_cell=[[0, 0, 0]],
-                            unit_cell_types='H',
-                            a0=1.0,
-                            conventional=[[1.0, 0.0, 0.0], [
-                                0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                            reciprocal=[[1.0, 0.0, 0.0], [
-                                0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
-                            ideal_bond_lengths=custom_ideal_bonds)
-        self.assertEqual(
-            repr(cell),
-            "UnitCell with 1 atom\nLattice parameter (a0): 1.000 Å\nRadius: 0.500 Å\n"
-            "Atoms: ['H': 0.000, 0.000, 0.000]\nReciprocal lattice:\n[[1. 0. 0.]\n [0. 1. 0.]\n [0. 0. 1.]]"
-        )
 
-    def test_asarray(self):
-        cell = UnitCell()
-        cell.init_by_structure('fcc', 1.0, 'Cu')
-        expected = np.array([('Cu', 0.0, 0.0, 0.0),
-                             ('Cu', 0.0, 0.5, 0.5),
-                             ('Cu', 0.5, 0.0, 0.5),
-                             ('Cu', 0.5, 0.5, 0.0)], dtype=Atom.atom_dtype)
-        result = cell.asarray()
-        self.assertTrue(all(result == expected))
+# ---------------------------------------------------------------------------
+# Default state and built-in construction
+# ---------------------------------------------------------------------------
 
-        np.testing.assert_array_equal(result['name'], expected['name'])
-        np.testing.assert_array_equal(result['x'], expected['x'])
-        np.testing.assert_array_equal(result['y'], expected['y'])
-        np.testing.assert_array_equal(result['z'], expected['z'])
 
-    def test_init(self):
-        cell = UnitCell()
-        self.assertEqual(cell.unit_cell, [])
-        self.assertTrue(np.allclose(cell.primitive, np.zeros((3, 3))))
-        self.assertEqual(cell.a0, 1.0)
-        self.assertEqual(cell.radius, 0.0)
-        self.assertTrue(np.allclose(cell.reciprocal, np.zeros((3, 3))))
-        self.assertEqual(cell.type_map, {})
+def test_default_unit_cell_state():
+    cell = UnitCell()
 
-    def test_names_as_ints(self):
-        cell = UnitCell()
-        cell.init_by_structure(structure='fcc', a0=1.0, atoms='Cu')
-        self.assertTrue(np.allclose(cell.names(asint=True),
-                        np.array([1, 1, 1, 1], dtype=int)))
+    assert cell.unit_cell == []
+    np.testing.assert_array_equal(cell.primitive, np.zeros((3, 3)))
+    assert cell.a0 == 1.0
+    assert cell.radius == 0.0
+    np.testing.assert_array_equal(cell.reciprocal, np.zeros((3, 3)))
+    assert cell.type_map == {}
+    assert cell.rational_basis is None
 
-        cell.init_by_structure(
-            "fluorite", 5.52, ["Ca", "F"], type_map={"Ca": 2, "F": 1})
-        self.assertTrue(all(cell.names(asint=True) == [
-                        2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1]))
 
-    def test_setter(self):
-        cell = UnitCell()
-        cell.init_by_structure('fcc', 1.0, 'Ni')
-        with self.assertRaises(UnitCellValueError):
-            cell.a0 = -1.0
-        cell.a0 = 2.0
-        self.assertTrue(np.allclose(cell.primitive, np.array(
-            [[0, 1, 1], [1, 0, 1], [1, 1, 0]])))
-        self.assertEqual(cell.radius, math.sqrt(2) * 0.25 * 2)
-        self.assertTrue(np.allclose(cell.reciprocal, np.array(
-            [[-0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5]])))
+@pytest.mark.parametrize(
+    "case",
+    BUILTIN_STRUCTURE_CASES,
+    ids=lambda case: case["structure"],
+)
+def test_builtin_structure_initialization(case):
+    cell = UnitCell()
+    cell.init_by_structure(case["structure"], 1.0, case["atoms"])
 
-    def test_fcc_nn_calculations(self):
-        cell = UnitCell()
+    assert cell.a0 == 1.0
+    assert cell.radius == pytest.approx(case["radius"])
+    assert len(cell.unit_cell) == len(case["positions"])
+    np.testing.assert_allclose(
+        cell.positions(),
+        np.asarray(case["positions"], dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    np.testing.assert_array_equal(cell.names(), np.asarray(case["names"]))
+    np.testing.assert_allclose(
+        cell.reciprocal,
+        case["reciprocal"],
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert cell.ideal_bond_lengths == pytest.approx(case["ideal_bonds"])
+    assert cell.ratio == case["ratio"]
+
+
+def test_builtin_positions_scale_with_initial_lattice_parameter():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 3.54, "Cu")
+
+    coordinates = np.column_stack(
+        (cell.asarray()["x"], cell.asarray()["y"], cell.asarray()["z"])
+    )
+    np.testing.assert_allclose(
+        coordinates,
+        np.array(
+            [
+                [0.0, 0.0, 0.0],
+                [0.0, 1.77, 1.77],
+                [1.77, 0.0, 1.77],
+                [1.77, 1.77, 0.0],
+            ]
+        ),
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_init_by_structure_rejects_unsupported_structure():
+    cell = UnitCell()
+
+    with pytest.raises(NotImplementedError, match="not recognized/implemented"):
+        cell.init_by_structure("notimplemented", 1.0, "H")
+
+
+@pytest.mark.parametrize("structure", ["fluorite", "rocksalt", "zincblende"])
+def test_binary_structures_require_two_atom_types(structure):
+    cell = UnitCell()
+
+    with pytest.raises(UnitCellValueError, match="requires exactly 2 atom types"):
+        cell.init_by_structure(structure, 1.0, "H")
+
+
+# ---------------------------------------------------------------------------
+# Custom construction and validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "exception", "match"),
+    [
+        pytest.param(
+            "unit_cell_types",
+            "H",
+            UnitCellValueError,
+            "length mismatch",
+            id="type-count-mismatch",
+        ),
+        pytest.param(
+            "ratio",
+            {1: 0, 2: 2},
+            UnitCellValueError,
+            "positive ints",
+            id="nonpositive-ratio-value",
+        ),
+        pytest.param(
+            "ratio",
+            {0: 1, 1: 1},
+            UnitCellValueError,
+            "positive ints",
+            id="nonpositive-ratio-key",
+        ),
+        pytest.param(
+            "ratio",
+            "Error",
+            UnitCellTypeError,
+            "ratio must be a dict",
+            id="invalid-ratio-type",
+        ),
+        pytest.param(
+            "reciprocal",
+            np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]),
+            UnitCellValueError,
+            "incorrect shape for reciprocal vectors",
+            id="invalid-reciprocal-shape",
+        ),
+    ],
+)
+def test_init_by_custom_rejects_invalid_input(field, value, exception, match):
+    kwargs = _custom_init_kwargs()
+    kwargs[field] = value
+
+    with pytest.raises(exception, match=match):
+        UnitCell().init_by_custom(**kwargs)
+
+
+def test_custom_initialization_sets_requested_state():
+    cell = UnitCell()
+    kwargs = _custom_init_kwargs()
+    cell.init_by_custom(**kwargs)
+
+    assert cell.a0 == 1.0
+    assert len(cell.unit_cell) == 2
+    np.testing.assert_array_equal(cell.names(), np.array(["H", "C"]))
+    np.testing.assert_allclose(
+        cell.positions(), kwargs["unit_cell"], rtol=0.0, atol=1e-12
+    )
+    np.testing.assert_array_equal(cell.reciprocal, np.eye(3))
+    assert cell.ideal_bond_lengths == pytest.approx(kwargs["ideal_bond_lengths"])
+    assert cell.ratio == kwargs["ratio"]
+    assert cell.type_map == {"H": 1, "C": 2}
+    assert cell.rational_basis is None
+
+
+# ---------------------------------------------------------------------------
+# Conversion, representation, and type mapping
+# ---------------------------------------------------------------------------
+
+
+def test_asarray_returns_expected_atom_records():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 1.0, "Cu")
+    expected = np.array(
+        [
+            ("Cu", 0.0, 0.0, 0.0),
+            ("Cu", 0.0, 0.5, 0.5),
+            ("Cu", 0.5, 0.0, 0.5),
+            ("Cu", 0.5, 0.5, 0.0),
+        ],
+        dtype=Atom.atom_dtype,
+    )
+
+    np.testing.assert_array_equal(cell.asarray(), expected)
+
+
+def test_repr_default_unit_cell():
+    assert repr(UnitCell()) == (
+        "UnitCell with 0 atoms\n"
+        "Lattice parameter (a0): 1.000 Å\n"
+        "Radius: 0.000 Å\n"
+        "Atoms: []\n"
+        "Reciprocal lattice:\n"
+        "[[0. 0. 0.]\n [0. 0. 0.]\n [0. 0. 0.]]"
+    )
+
+
+def test_repr_initialized_unit_cell():
+    cell = UnitCell()
+    cell.init_by_structure("sc", 1.0, "H")
+
+    assert repr(cell) == (
+        "UnitCell with 1 atom\n"
+        "Lattice parameter (a0): 1.000 Å\n"
+        "Radius: 0.500 Å\n"
+        "Atoms: ['H': 0.000, 0.000, 0.000]\n"
+        "Reciprocal lattice:\n"
+        "[[1. 0. 0.]\n [0. 1. 0.]\n [0. 0. 1.]]"
+    )
+
+
+@pytest.mark.parametrize(
+    ("type_map", "expected"),
+    [
+        pytest.param({"O": 1, "U": 2}, {"U": 2, "O": 1}, id="string-to-int"),
+        pytest.param({1: "U", 2: "O"}, {"U": 1, "O": 2}, id="int-to-string"),
+    ],
+)
+def test_type_map_accepts_both_mapping_directions(type_map, expected):
+    cell = UnitCell()
+    cell.init_by_structure("fluorite", 2.0, ("U", "O"))
+
+    cell.type_map = type_map
+
+    assert cell.type_map == expected
+
+
+@pytest.mark.parametrize(
+    ("value", "exception", "match"),
+    [
+        pytest.param(
+            {2: "U", 3: "O"},
+            UnitCellValueError,
+            "minimum integer value",
+            id="integer-keys-do-not-start-at-one",
+        ),
+        pytest.param(
+            {"O": 2, "U": 3},
+            UnitCellValueError,
+            "minimum integer value",
+            id="integer-values-do-not-start-at-one",
+        ),
+        pytest.param(
+            "Error",
+            UnitCellTypeError,
+            "type_map must be a dict",
+            id="not-a-dictionary",
+        ),
+    ],
+)
+def test_type_map_rejects_invalid_mappings(value, exception, match):
+    cell = UnitCell()
+    cell.init_by_structure("fluorite", 2.0, ("U", "O"))
+
+    with pytest.raises(exception, match=match):
+        cell.type_map = value
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        pytest.param(None, [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2], id="default"),
+        pytest.param(
+            {"F": 1, "Ca": 2},
+            [2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1],
+            id="custom",
+        ),
+    ],
+)
+def test_types_respects_type_map(mapping, expected):
+    cell = UnitCell()
+    cell.init_by_structure("fluorite", 5.52, ("Ca", "F"))
+    if mapping is not None:
+        cell.type_map = mapping
+
+    np.testing.assert_array_equal(cell.types(), np.asarray(expected))
+
+
+@pytest.mark.parametrize(
+    ("mapping", "expected"),
+    [
+        pytest.param(None, [1, 1, 1, 1], id="default"),
+        pytest.param(
+            {"Ca": 2, "F": 1},
+            [2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1],
+            id="custom",
+        ),
+    ],
+)
+def test_names_as_ints_respects_type_map(mapping, expected):
+    cell = UnitCell()
+    if mapping is None:
         cell.init_by_structure("fcc", 1.0, "Cu")
-        self.assertAlmostEqual(cell.nn_distance(1), 1/np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2), 1)
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4), np.sqrt(2))
+    else:
+        cell.init_by_structure("fluorite", 5.52, ("Ca", "F"), type_map=mapping)
 
-        cell.a0 = 3.54
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * np.sqrt(2))
-
-    def test_bcc_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("bcc", 1.0, "Fe")
-        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(2), 1)
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(4), np.sqrt(11) / 2)
-
-        cell.a0 = 2.86
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * np.sqrt(11) / 2)
-
-    def test_sc_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("sc", 1.0, "Po")
-        self.assertAlmostEqual(cell.nn_distance(1), 1)
-        self.assertAlmostEqual(cell.nn_distance(2), np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(3))
-        self.assertAlmostEqual(cell.nn_distance(4), 2)
-
-        cell.a0 = 3.345
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(3))
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * 2)
-
-    def test_diamond_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("diamond", 1.0, "C")
-        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3) / 4)
-        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11) / 4)
-        self.assertAlmostEqual(cell.nn_distance(4), 1)
-
-        cell.a0 = 3.567
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3) / 4)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11) / 4)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
-
-    def test_fluorite_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("fluorite", 1.0, ["U", "O"])
-        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(4), 1)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), 1/np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), 0.5)
-        self.assertAlmostEqual(cell.nn_distance(2, 2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), 1)
-
-        cell.a0 = 5.454
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 * 0.5)
-        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0)
-
-    def test_rocksalt_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("rocksalt", 1.0, ["Na", "Cl"])
-        self.assertAlmostEqual(cell.nn_distance(1), 0.5)
-        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4), 1)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 2), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(2))
-
-        cell.a0 = 5.454
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * 0.5)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(3) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(2))
-
-    def test_zincblende_nn_calculations(self):
-        cell = UnitCell()
-        cell.init_by_structure("zincblende", 1.0, ["Zn", "S"])
-        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3) / 4)
-        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11) / 4)
-        self.assertAlmostEqual(cell.nn_distance(4), 1)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 2), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(2))
-
-        cell.a0 = 5.454
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3) / 4)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11) / 4)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), cell.a0 * np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(2))
-
-    def notest_custom_nn_calculations(self):
-        cell = UnitCell()
-        custom_unit_cell = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]])
-        custom_conventional = np.array(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        )
-        custom_reciprocal = np.array(
-            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-        )
-        custom_ideal_bonds = {
-            (1, 1): 1,
-            (1, 2): 1,
-            (2, 2): 1
-        }
-        custom_ratio = {1: 1, 2: 1}
-        cell.init_by_custom(unit_cell=custom_unit_cell,
-                            unit_cell_types=['H', 'C'],
-                            a0=1.0,
-                            conventional=custom_conventional,
-                            reciprocal=custom_reciprocal,
-                            ideal_bond_lengths=custom_ideal_bonds,
-                            ratio=custom_ratio
-                            )
-        self.assertAlmostEqual(cell.nn_distance(1), np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2), 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(4), 1)
-
-        self.assertAlmostEqual(cell.nn_distance(1, 1), 1/np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2, 1), 1)
-        self.assertAlmostEqual(cell.nn_distance(3, 1), np.sqrt(6)/2)
-        self.assertAlmostEqual(cell.nn_distance(4, 1), np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2, 2), np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), np.sqrt(19)/4)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), np.sqrt(6)/2)
-
-        cell.a0 = 3.3
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 * np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0 * 1 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0)
-
-        self.assertAlmostEqual(cell.nn_distance(1), cell.a0 / np.sqrt(2))
-        self.assertAlmostEqual(cell.nn_distance(2), cell.a0)
-        self.assertAlmostEqual(cell.nn_distance(3), cell.a0 * np.sqrt(6) / 2)
-        self.assertAlmostEqual(cell.nn_distance(4), cell.a0 * np.sqrt(2))
-
-        self.assertAlmostEqual(cell.nn_distance(1, 2), cell.a0 * np.sqrt(3)/4)
-        self.assertAlmostEqual(cell.nn_distance(2, 2), cell.a0 * np.sqrt(11)/4)
-        self.assertAlmostEqual(cell.nn_distance(3, 2), cell.a0 * np.sqrt(19)/4)
-        self.assertAlmostEqual(cell.nn_distance(4, 2), cell.a0 * np.sqrt(6)/2)
-
-    def test_type_map_property(self):
-        cell = UnitCell()
-        cell.init_by_structure("fcc", 1.0, "Cu")
-
-        self.assertEqual(cell.type_map, {"Cu": 1})
-
-        cell.init_by_structure("fluorite", 2.0, ["U", "O"])
-        self.assertEqual(cell.type_map, {"U": 1, "O": 2})
-        cell.type_map = {"O": 1, "U": 2}
-        self.assertEqual(cell.type_map, {"U": 2, "O": 1})
-        cell.type_map = {1: "U", 2: "O"}
-        self.assertEqual(cell.type_map, {"U": 1, "O": 2})
-
-        with self.assertRaises(UnitCellValueError):
-            cell.type_map = {2: "U", 3: "O"}
-
-        with self.assertRaises(UnitCellValueError):
-            cell.type_map = {"O": 2, "U": 3}
-
-        with self.assertRaises(UnitCellTypeError):
-            cell.type_map = "Error"
-
-    def test_types_method(self):
-        cell = UnitCell()
-        cell.init_by_structure("fluorite", 5.52, ["Ca", "F"])
-        self.assertTrue(all(cell.types() == [1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2]))
-        cell.type_map = {"F": 1, "Ca": 2}
-        self.assertTrue(all(cell.types() == [2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1]))
+    np.testing.assert_array_equal(
+        cell.names(asint=True), np.asarray(expected, dtype=int)
+    )
 
 
-if __name__ == '__main__':
-    unittest.main()
+# ---------------------------------------------------------------------------
+# Lattice-parameter mutation
+# ---------------------------------------------------------------------------
 
 
-class TestRationalBasis(unittest.TestCase):
-    """Focused regressions for exact built-in basis metadata."""
+def test_a0_rejects_nonpositive_value():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 1.0, "Ni")
 
-    def test_fluorite_rational_basis_matches_structured_basis(self):
-        cell = UnitCell()
-        cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+    with pytest.raises(UnitCellValueError, match="Must be > 0"):
+        cell.a0 = -1.0
 
-        basis = cell.rational_basis
-        self.assertIsNotNone(basis)
-        self.assertEqual(basis.denominator, 4)
-        self.assertEqual(len(basis.names), 12)
-        self.assertEqual(basis.names.count("U"), 4)
-        self.assertEqual(basis.names.count("O"), 8)
-        self.assertEqual(
-            len({tuple(int(value) for value in row) for row in basis.numerators}),
-            12,
-        )
-        self.assertTrue(np.all(np.asarray(basis.numerators, dtype=int) >= 0))
-        self.assertTrue(np.all(np.asarray(basis.numerators, dtype=int) < 4))
-        self.assertTrue(np.array_equal(cell.names(), np.asarray(basis.names)))
-        self.assertTrue(
-            np.allclose(
-                np.column_stack((
-                    cell.asarray()["x"],
-                    cell.asarray()["y"],
-                    cell.asarray()["z"],
-                )) / cell.a0,
-                np.asarray(basis.numerators, dtype=float) / basis.denominator,
-            )
-        )
+    assert cell.a0 == 1.0
 
-    def test_rational_basis_numerators_are_defensive_and_read_only(self):
-        cell = UnitCell()
-        cell.init_by_structure("fcc", 3.615, "Cu")
 
-        first = cell.rational_basis.numerators
-        self.assertFalse(first.flags.writeable)
-        with self.assertRaises(ValueError):
-            first[0, 0] = 1
+def test_a0_rescales_geometry_without_changing_rational_basis():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 1.0, "Ni")
+    basis_before = cell.rational_basis
+    assert basis_before is not None
+    numerators_before = basis_before.numerators
 
-        second = cell.rational_basis.numerators
-        self.assertTrue(np.array_equal(second, np.array(
+    cell.a0 = 2.0
+
+    np.testing.assert_allclose(
+        cell.primitive,
+        np.array([[0, 1, 1], [1, 0, 1], [1, 1, 0]], dtype=float),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert cell.radius == pytest.approx(math.sqrt(2) * 0.5)
+    np.testing.assert_allclose(
+        cell.reciprocal,
+        np.array(
+            [[-0.5, 0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, -0.5]]
+        ),
+        rtol=0.0,
+        atol=1e-12,
+    )
+    assert cell.rational_basis is not None
+    assert cell.rational_basis.denominator == basis_before.denominator
+    assert cell.rational_basis.names == basis_before.names
+    np.testing.assert_array_equal(cell.rational_basis.numerators, numerators_before)
+
+
+# ---------------------------------------------------------------------------
+# Nearest-neighbor distances
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("structure", "atoms", "scaled_a0", "expected"),
+    MONATOMIC_NEIGHBOR_CASES,
+    ids=[case[0] for case in MONATOMIC_NEIGHBOR_CASES],
+)
+def test_monatomic_neighbor_shells_scale_with_lattice_parameter(
+    structure, atoms, scaled_a0, expected
+):
+    cell = UnitCell()
+    cell.init_by_structure(structure, 1.0, atoms)
+    _assert_neighbor_shells(cell, expected)
+
+    cell.a0 = scaled_a0
+    _assert_neighbor_shells(cell, tuple(scaled_a0 * value for value in expected))
+
+
+@pytest.mark.parametrize(
+    ("structure", "atoms", "scaled_a0", "all_types", "type_one", "type_two"),
+    BINARY_NEIGHBOR_CASES,
+    ids=[case[0] for case in BINARY_NEIGHBOR_CASES],
+)
+def test_binary_neighbor_shells_scale_with_lattice_parameter(
+    structure,
+    atoms,
+    scaled_a0,
+    all_types,
+    type_one,
+    type_two,
+):
+    cell = UnitCell()
+    cell.init_by_structure(structure, 1.0, atoms)
+
+    _assert_neighbor_shells(cell, all_types)
+    _assert_neighbor_shells(cell, type_one, atom_type=1)
+    _assert_neighbor_shells(cell, type_two, atom_type=2)
+
+    cell.a0 = scaled_a0
+    _assert_neighbor_shells(
+        cell, tuple(scaled_a0 * value for value in all_types)
+    )
+    _assert_neighbor_shells(
+        cell, tuple(scaled_a0 * value for value in type_one), atom_type=1
+    )
+    _assert_neighbor_shells(
+        cell, tuple(scaled_a0 * value for value in type_two), atom_type=2
+    )
+
+
+# ---------------------------------------------------------------------------
+# Exact rational basis metadata
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "case",
+    BUILTIN_STRUCTURE_CASES,
+    ids=lambda case: case["structure"],
+)
+def test_builtin_rational_basis_matches_structured_basis(case):
+    cell = UnitCell()
+    cell.init_by_structure(case["structure"], 2.5, case["atoms"])
+
+    basis = cell.rational_basis
+    assert basis is not None
+    assert basis.denominator == case["rational_denominator"]
+    assert basis.names == tuple(case["names"])
+
+    numerators = basis.numerators
+    assert numerators.shape == (len(case["positions"]), 3)
+    assert len({tuple(int(value) for value in row) for row in numerators}) == len(
+        case["positions"]
+    )
+    assert all(
+        0 <= int(value) < basis.denominator
+        for value in numerators.flat
+    )
+    coordinates = np.column_stack(
+        (cell.asarray()["x"], cell.asarray()["y"], cell.asarray()["z"])
+    )
+    np.testing.assert_allclose(
+        coordinates / cell.a0,
+        np.asarray(numerators, dtype=float) / basis.denominator,
+        rtol=0.0,
+        atol=1e-12,
+    )
+
+
+def test_rational_basis_numerators_are_defensive_and_read_only():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 3.615, "Cu")
+
+    assert cell.rational_basis is not None
+    first = cell.rational_basis.numerators
+    second = cell.rational_basis.numerators
+
+    assert first is not second
+    assert not first.flags.writeable
+    assert not second.flags.writeable
+    np.testing.assert_array_equal(first, second)
+    with pytest.raises(ValueError):
+        first[0, 0] = 1
+    np.testing.assert_array_equal(
+        cell.rational_basis.numerators,
+        np.array(
             [[0, 0, 0], [0, 1, 1], [1, 0, 1], [1, 1, 0]],
             dtype=object,
-        )))
+        ),
+    )
 
-    def test_custom_unit_cell_does_not_claim_exact_rational_metadata(self):
-        cell = UnitCell()
-        cell.init_by_custom(
-            unit_cell=np.array([[0.0, 0.0, 0.0]]),
-            unit_cell_types=("Cu",),
-            a0=3.615,
-            conventional=np.eye(3),
-            reciprocal=np.eye(3),
-            ideal_bond_lengths={(1, 1): 1.0},
-        )
 
-        self.assertIsNone(cell.rational_basis)
+def test_custom_reinitialization_clears_rational_basis_metadata():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 3.615, "Cu")
+    assert cell.rational_basis is not None
+
+    cell.init_by_custom(**_custom_init_kwargs())
+
+    assert cell.rational_basis is None
+
+
+def test_builtin_reinitialization_replaces_rational_basis_metadata():
+    cell = UnitCell()
+    cell.init_by_structure("fcc", 3.615, "Cu")
+    fcc_basis = cell.rational_basis
+
+    cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+
+    assert cell.rational_basis is not fcc_basis
+    assert cell.rational_basis is not None
+    assert cell.rational_basis.denominator == 4
+    assert cell.rational_basis.names.count("U") == 4
+    assert cell.rational_basis.names.count("O") == 8

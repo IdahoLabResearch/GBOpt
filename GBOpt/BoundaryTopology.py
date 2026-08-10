@@ -2,9 +2,9 @@
 
 """Define physical topology along the grain-boundary normal.
 
-This module owns the immutable topology vocabulary shared by construction and
-interface manipulation. Coordinate inference, external file parsing, atom generation,
-and optimizer policy do not belong here.
+This module owns the immutable topology vocabulary shared by construction and interface
+manipulation. Coordinate inference, external file parsing, atom generation, and
+optimizer policy do not belong here.
 """
 
 from __future__ import annotations
@@ -49,8 +49,9 @@ def normalize_boundary_normal_topology(
 ) -> BoundaryNormalTopology:
     """Return validated boundary-normal topology metadata.
 
-    :param value: Topology as an enum member, serialized string, or ``None`` when
-        topology metadata is unavailable.
+    :param value: Topology as an enum member, one of its string values
+        (``"periodic_bicrystal"``, ``"single_interface_slab"``, or ``"unknown"``), or
+        ``None`` when topology metadata is unavailable.
     :return: Validated topology. ``None`` normalizes to ``UNKNOWN``.
     :raises BoundaryTopologyError: If ``value`` is not supported.
     """

@@ -24,7 +24,7 @@ from GBOpt.Utils.integer_linalg import (
 
 
 class UnitCellError(Exception):
-    """Base class for exceptions in the UnitCell class"""
+    """Base class for exceptions in the UnitCell class."""
 
 
 class UnitCellValueError(UnitCellError):
@@ -64,8 +64,8 @@ class RationalBasis:
 
     Each row in ``numerators`` is paired with the species at the same index in
     ``names``. Dividing the integer rows by ``denominator`` gives conventional-cell
-    fractional coordinates in the canonical half-open interval ``[0, 1)``. Row order
-    is preserved so built-in metadata follows the established structured-basis order.
+    fractional coordinates in the canonical half-open interval ``[0, 1)``. Row order is
+    preserved so built-in metadata follows the established structured-basis order.
 
     :param names: Ordered species name for every basis site.
     :param numerators: Exact coordinate numerators with shape ``(basis_size, 3)``.
@@ -80,45 +80,48 @@ class RationalBasis:
     _numerator_rows: tuple[tuple[int, int, int], ...] = field(repr=False)
 
     def __init__(
-            self, names: Sequence[str], numerators: np.ndarray,
-            denominator: int) -> None:
+        self,
+        names: Sequence[str],
+        numerators: np.ndarray,
+        denominator: int
+    ) -> None:
         denominator_array = _as_unitcell_int_array(
             (denominator,), (1,), "rational-basis denominator"
         )
         denominator = int(denominator_array[0])
         if denominator <= 0:
             raise UnitCellValueError(
-                "The rational-basis denominator must be greater than zero."
+                "the rational-basis denominator must be greater than zero"
             )
 
         if isinstance(names, (str, bytes)):
             raise UnitCellTypeError(
-                "Rational-basis names must be a sequence of strings."
+                "rational-basis names must be a sequence of strings"
             )
         try:
             names = tuple(names)
         except TypeError as exc:
             raise UnitCellTypeError(
-                "Rational-basis names must be a sequence of strings."
+                "rational-basis names must be a sequence of strings"
             ) from exc
         if any(not isinstance(name, str) for name in names):
-            raise UnitCellTypeError("Every rational-basis name must be a string.")
+            raise UnitCellTypeError("every rational-basis name must be a string")
         if not names:
-            raise UnitCellValueError("A rational basis must contain at least one site.")
+            raise UnitCellValueError("a rational basis must contain at least one site")
 
         try:
             numerator_array = np.asarray(numerators, dtype=object)
         except (TypeError, ValueError) as exc:
             raise UnitCellValueError(
-                "Rational-basis numerators must have shape (basis_size, 3)."
+                "rational-basis numerators must have shape (basis_size, 3)"
             ) from exc
         if numerator_array.ndim != 2 or numerator_array.shape[1] != 3:
             raise UnitCellValueError(
-                "Rational-basis numerators must have shape (basis_size, 3)."
+                "rational-basis numerators must have shape (basis_size, 3)"
             )
         if numerator_array.shape[0] != len(names):
             raise UnitCellValueError(
-                "Rational-basis names and numerator rows must have equal lengths."
+                "rational-basis names and numerator rows must have equal lengths"
             )
 
         exact_numerators = _as_unitcell_int_array(
@@ -133,8 +136,8 @@ class RationalBasis:
                 integer = int(value)
                 if integer < 0 or integer >= denominator:
                     raise UnitCellValueError(
-                        "Rational-basis coordinates must lie in the half-open interval "
-                        "[0, denominator)."
+                        "rational-basis coordinates must lie in the half-open interval "
+                        "[0, denominator)"
                     )
                 normalized_row.append(integer)
             normalized_rows.append(tuple(normalized_row))
@@ -142,8 +145,8 @@ class RationalBasis:
         coordinate_rows = tuple(normalized_rows)
         if len(coordinate_rows) != len(set(coordinate_rows)):
             raise UnitCellValueError(
-                "Rational-basis coordinates must be unique within the conventional "
-                "cell, regardless of species."
+                "rational-basis coordinates must be unique within the conventional "
+                "cell, regardless of species"
             )
 
         object.__setattr__(self, "names", names)
@@ -152,11 +155,7 @@ class RationalBasis:
 
     @property
     def numerators(self) -> np.ndarray:
-        """Return a read-only copy of the exact coordinate numerators.
-
-        :return: Object-dtype array containing exact Python integers with shape
-            ``(basis_size, 3)``.
-        """
+        """Read-only copy of the exact coordinate numerators."""
         stored_copy = np.array(self._numerator_rows, dtype=object)
         stored_copy.setflags(write=False)
         readonly_view = stored_copy.view()
@@ -164,6 +163,25 @@ class RationalBasis:
         return readonly_view
 
 
+# Exact rational decorated-basis specifications for built-in crystal structures.
+#
+# Each entry maps a structure name to:
+#
+#     (
+#         common_denominator,
+#         (
+#             (species_index, x_numerator, y_numerator, z_numerator),
+#             ...
+#         ),
+#     )
+#
+# The coordinate numerators share the entry's positive common denominator and therefore
+# represent exact conventional-cell fractional coordinates. The species index identifies
+# the corresponding entry in the structure's atom-type specification.
+#
+# These specifications provide authoritative exact basis coordinates for exact supercell
+# enumeration, avoiding reconstruction of rational coordinates from the floating-point
+# Cartesian basis stored by UnitCell.
 _RATIONAL_BASIS_SPECS = {
     "sc": (
         1,
@@ -246,8 +264,8 @@ _RATIONAL_BASIS_SPECS = {
 
 class UnitCell:
     """
-    Helper class for the managing a unit cell and the types of each atom.
-    Atom positions are given as fractional coordinates. Types start at 1
+    Helper class for the managing a unit cell and the types of each atom. Atom positions
+    are given as fractional coordinates. Types start at 1.
     """
 
     __slots__ = [
@@ -276,8 +294,12 @@ class UnitCell:
         self.__rational_basis = None
 
     def init_by_structure(
-            self, structure: str, a0: float, atoms: str | Sequence[str],
-            type_map: dict[str, int] | dict[int, str] = None) -> None:
+        self,
+        structure: str,
+        a0: float,
+        atoms: str | Sequence[str],
+        type_map: dict[str, int] | dict[int, str] | None = None
+    ) -> None:
         """
         Initialize the UnitCell by crystal structure.
 
@@ -292,7 +314,6 @@ class UnitCell:
             Note that the mapping requires sequential values starting from 1. Optional,
             defaults to setting the atom types based on the order of their appearance in
             "atoms."
-        :return: None.
         :raises UnitCellTypeError: If structure or atoms have invalid types.
         :raises UnitCellValueError: If the number of atom types does not match the
             selected structure.
@@ -301,13 +322,15 @@ class UnitCell:
             been implemented.
         """
         if not isinstance(structure, str):
-            raise UnitCellTypeError("The crystal structure must be specified as a string.")
+            raise UnitCellTypeError(
+                "the crystal structure must be specified as a string"
+            )
 
         try:
             denominator, basis_spec = _RATIONAL_BASIS_SPECS[structure]
         except KeyError as exc:
             raise NotImplementedError(
-                f"Lattice structure {structure} not recognized/implemented"
+                f"lattice structure {structure} not recognized/implemented"
             ) from exc
 
         if isinstance(atoms, str):
@@ -316,17 +339,17 @@ class UnitCell:
             atoms = tuple(atoms)
         else:
             raise UnitCellTypeError(
-                "atoms must be a species string or an ordered sequence of strings."
+                "atoms must be a species string or an ordered sequence of strings"
             )
         if any(not isinstance(atom, str) for atom in atoms):
-            raise UnitCellTypeError("Every atom type must be specified as a string.")
+            raise UnitCellTypeError("every atom type must be specified as a string")
 
         required_atom_count = max(entry[0] for entry in basis_spec) + 1
         if len(atoms) != required_atom_count:
             suffix = "s" if required_atom_count != 1 else ""
             raise UnitCellValueError(
-                f"The {structure!r} crystal structure requires exactly "
-                f"{required_atom_count} atom type{suffix}."
+                f"the {structure!r} crystal structure requires exactly "
+                f"{required_atom_count} atom type{suffix}"
             )
 
         rational_basis = RationalBasis(
@@ -461,8 +484,8 @@ class UnitCell:
             self.__ratio = {1: 1, 2: 1}
         else:
             raise UnitCellRuntimeError(
-                "The validated rational-basis specification has no matching "
-                f"structure initialization branch: {structure!r}."
+                "the validated rational-basis specification has no matching structure "
+                f"initialization branch: {structure!r}"
             )
         for i in range(len(unit_cell)):
             unit_cell[i]["position"] *= a0
@@ -486,11 +509,17 @@ class UnitCell:
         self.__unit_cell = unit_cell
         self.__rational_basis = rational_basis
 
-    def init_by_custom(self, unit_cell: np.ndarray,
-                       unit_cell_types: str | Sequence[str], a0: float,
-                       conventional: np.ndarray, reciprocal: np.ndarray,
-                       ideal_bond_lengths: dict, ratio: dict[int, int] = {1: 1},
-                       type_map: dict[int, str] | dict[str, int] = None) -> None:
+    def init_by_custom(
+        self,
+        unit_cell: np.ndarray,
+        unit_cell_types: str | Sequence[str],
+        a0: float,
+        conventional: np.ndarray,
+        reciprocal: np.ndarray,
+        ideal_bond_lengths: dict,
+        ratio: dict[int, int] | None = None,
+        type_map: dict[int, str] | dict[str, int] | None = None
+    ) -> None:
         """
         Initialize the UnitCell with a custom-built lattice.
 
@@ -516,31 +545,31 @@ class UnitCell:
         :raises UnitCellValueError: Exception raised when the reciprocal shape is not
             (3,3).
         """
+        if ratio is None:
+            ratio = {1: 1}
         self.__a0 = a0
         if len(unit_cell_types) != len(unit_cell):
             raise UnitCellValueError(
-                "Length mismatch between unit cell types and unit cell")
+                "length mismatch between unit cell types and unit cell")
         else:
             cell_types = unit_cell_types
 
         if not isinstance(ratio, dict):
-            raise UnitCellTypeError(
-                "The 'ratio' dict must be a dict of positive ints."
-            )
+            raise UnitCellTypeError("ratio must be a dict of positive ints")
         for key, val in ratio.items():
             if not isinstance(key, int) or not isinstance(val, int):
                 raise UnitCellTypeError(
-                    "Key and value in the 'ratio' dict must be positive ints"
+                    "key and value in the 'ratio' dict must be positive ints"
                 )
             if key < 1 or val < 1:
                 raise UnitCellValueError(
-                    "Key and value in the 'ratio' duct must be positive ints"
+                    "key and value in the 'ratio' dict must be positive ints"
                 )
         ratio_sum = sum([val for val in ratio.values()])
         if not len(unit_cell) % ratio_sum == 0:
             raise UnitCellValueError(
-                f"The number of atoms ({len(unit_cell)}) in the UnitCell must be an "
-                f"integer multiple of the ratio ({ratio_sum})."
+                f"the number of atoms ({len(unit_cell)}) in the UnitCell must be an "
+                f"integer multiple of the ratio ({ratio_sum})"
             )
 
         self.__unit_cell = [
@@ -553,14 +582,16 @@ class UnitCell:
             conventional = np.array(reciprocal)
         if conventional.shape != (3, 3):
             raise UnitCellValueError(
-                "Incorrect shape for conventional vectors. Must be (3,3)")
+                "incorrect shape for conventional vectors. Must be (3,3)"
+            )
         self.__conventional = conventional
 
         if not isinstance(reciprocal, np.ndarray):
             reciprocal = np.array(reciprocal)
         if reciprocal.shape != (3, 3):
             raise UnitCellValueError(
-                "Incorrect shape for reciprocal vectors. Must be (3,3)")
+                "incorrect shape for reciprocal vectors. Must be (3,3)"
+            )
         self.__reciprocal = reciprocal
 
         self.__ideal_bond_lengths = ideal_bond_lengths
@@ -576,11 +607,11 @@ class UnitCell:
             self.type_map = type_map
 
     def positions(self) -> np.ndarray:
-        """Returns the positions of the atoms in the UnitCell."""
+        """Positions of the atoms in the UnitCell."""
         return self.__a0 * np.vstack([a.position.asarray() for a in self.__unit_cell])
 
     def names(self, *, asint=False) -> np.ndarray:
-        """Returns an array containing the types of atoms in the UnitCell."""
+        """Array containing the types of atoms in the UnitCell."""
         if asint:
             names = [a.name for a in self.__unit_cell]
             return np.hstack([self.type_map[name] for name in names], dtype=int)
@@ -588,9 +619,7 @@ class UnitCell:
             return np.hstack([a.name for a in self.__unit_cell])
 
     def types(self) -> np.ndarray:
-        """
-        Returns an array assigning a "type" number to each unique atom type.
-        """
+        """Array assigning a "type" number to each unique atom type."""
         names = np.array([a["name"] for a in self.__unit_cell])
         converted_names = np.array([self.type_map[name] for name in names])
 
@@ -598,18 +627,18 @@ class UnitCell:
 
     @property
     def reciprocal(self) -> np.ndarray:
-        """Returns the reciprocal lattice for the defined UnitCell."""
+        """Reciprocal lattice for the defined UnitCell."""
         return self.__reciprocal
 
     @property
     def a0(self) -> float:
-        """Returns the lattice parameter for the defined UnitCell."""
+        """Lattice parameter for the defined UnitCell."""
         return self.__a0
 
     @a0.setter
     def a0(self, value: float) -> None:
         if value <= 0:
-            raise UnitCellValueError("Invalid value for a0. Must be > 0.")
+            raise UnitCellValueError("invalid value for a0. Must be > 0")
         self.__primitive /= self.__a0 / 2.0
         self.__conventional /= self.__a0
         self.__radius /= self.__a0
@@ -655,9 +684,9 @@ class UnitCell:
     def rational_basis(self) -> RationalBasis | None:
         """Return exact built-in basis metadata, when authoritatively defined.
 
-        Built-in structures provide exact rational metadata. Custom and
-        uninitialized cells return ``None`` because arbitrary floating-point
-        coordinates are not rationalized approximately.
+        Built-in structures provide exact rational metadata. Custom and uninitialized
+        cells return ``None`` because arbitrary floating-point coordinates are not
+        rationalized approximately.
 
         :return: Immutable exact basis metadata for a built-in structure, or ``None``
             for a custom or uninitialized cell.
@@ -665,11 +694,7 @@ class UnitCell:
         return self.__rational_basis
 
     def asarray(self) -> np.ndarray:
-        """
-        Gives the unit cell as a structured numpy array with the atom type and position.
-
-        :return: Structured numpy array with atom type and position.
-        """
+        """UnitCell as a structured numpy array with the atom type and position."""
         return np.array(
             [tuple(atom["name", "x", "y", "z"]) for atom in self.__unit_cell],
             dtype=Atom.atom_dtype
@@ -687,10 +712,7 @@ class UnitCell:
 
     @property
     def type_map(self) -> dict[str, int]:
-        """
-        Returns the string-to-int map that is used to assign types/strings to each
-        atom.
-        """
+        """String-to-int map that is used to assign types/strings to each atom."""
         return self.__type_map
 
     @type_map.setter
@@ -705,39 +727,39 @@ class UnitCell:
                 "{'H': 1, 'He': 2}"
             )
         if (
-            all([isinstance(key, str) for key in value.keys()]) and
-            all([isinstance(val, int) for val in value.values()])
+            all(isinstance(key, str) for key in value) and
+            all(isinstance(val, int) for val in value.values())
         ):
             if not min(value.values()) == 1:
                 raise UnitCellValueError(
-                    "The minimum integer value for the type map must be equal to 1.")
+                    "the minimum integer value for the type map must be equal to 1"
+                )
             if not all(
-                [val1 + 1 == val2
-                 for val1, val2 in zip(
-                     sorted(list(value.values()))[:-1], sorted(list(value.values()))[1:]
-                 )
-                 ]
+                val1 + 1 == val2
+                for val1, val2 in zip(
+                    sorted(value.values())[:-1], sorted(value.values())[1:]
+                )
             ):
                 raise UnitCellValueError(
-                    "Integer values must be sequential starting from 1."
+                    "integer values must be sequential starting from 1"
                 )
             self.__type_map = value
         elif (
-            all([isinstance(key, int) for key in value.keys()]) and
-            all([isinstance(val, str) for val in value.values()])
+            all(isinstance(key, int) for key in value) and
+            all(isinstance(val, str) for val in value.values())
         ):
             if not min(value.keys()) == 1:
                 raise UnitCellValueError(
-                    "The minimum integer value for the type map must be equal to 1.")
+                    "the minimum integer value for the type map must be equal to 1"
+                )
             if not all(
-                [val1 + 1 == val2
-                 for val1, val2 in zip(
-                     sorted(list(value.keys()))[:-1], sorted(list(value.keys()))[1:]
-                 )
-                 ]
+                val1 + 1 == val2
+                for val1, val2 in zip(
+                    sorted(value.keys())[:-1], sorted(value.keys())[1:]
+                )
             ):
                 raise UnitCellValueError(
-                    "Integer values must be sequential starting from 1."
+                    "integer values must be sequential starting from 1"
                 )
             self.__type_map = {val: key for key, val in value.items()}
         else:
@@ -793,7 +815,8 @@ class UnitCell:
 
             rcut += step
         raise UnitCellRuntimeError(
-            f"Could not find {nn} unique neighbor distances within {rcut=}")
+            f"could not find {nn} unique neighbor distances within {rcut=}"
+        )
 
     def __repr__(self):
         structure_info = f"UnitCell with {len(self.__unit_cell)} " + \
@@ -806,8 +829,10 @@ class UnitCell:
         )
         reciprocal_info = f"Reciprocal lattice:\n{self.__reciprocal}"
 
-        return (f"{structure_info}\n"
-                f"{lattice_info}\n"
-                f"{radius_info}\n"
-                f"Atoms: [{atom_info}]\n"
-                f"{reciprocal_info}")
+        return (
+            f"{structure_info}\n"
+            f"{lattice_info}\n"
+            f"{radius_info}\n"
+            f"Atoms: [{atom_info}]\n"
+            f"{reciprocal_info}"
+        )
