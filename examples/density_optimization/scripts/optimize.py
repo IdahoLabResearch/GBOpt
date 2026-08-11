@@ -33,8 +33,8 @@ from slurm_utils import SlurmJob, submit_job, wait_for_jobs
 
 from GBOpt import GBMaker, GBManipulator, GBMinimizer
 from GBOpt.BoundarySpec import FiveDOFSpec
+from GBOpt.Checkpoint import ENERGY_PENALTY
 
-PENALTY = 1.0e30
 BOUNDARY = "sigma5_310_STGB"
 
 MATERIAL_PARAMS = {
@@ -198,6 +198,7 @@ def evaluate_batch(
     lmp_binary: str = "lmp",
     input_script: str = "lmp.in",
     job_walltime: str = "06:00:00",
+    checkpoint=None,
     **kwargs,
 ) -> List[Dict[str, Any]]:
     """Submit one SLURM/KOKKOS LAMMPS job per candidate and collect GBE results."""
@@ -306,7 +307,7 @@ def evaluate_batch(
             reason = _detect_failure_reason([logfile, output_txt])
             if reason is not None:
                 results.append({
-                    "energy":    PENALTY, "final_dump": None,
+                    "energy":    ENERGY_PENALTY, "final_dump": None,
                     "num_atoms": int(len(_unwrap_candidate(candidates[i]))),
                     "parents":   list(lineages[i]),
                     "status":    "failed", "fail_reason": reason,
@@ -323,7 +324,7 @@ def evaluate_batch(
 
         txt = results_out.read_text().strip().split()
         gbe_val = float(txt[0])
-        status = "ok" if gbe_val < PENALTY else "failed"
+        status = "ok" if gbe_val < ENERGY_PENALTY else "failed"
         record = {
             "energy":    gbe_val,
             "final_dump": str(final_dump),
@@ -411,11 +412,11 @@ def run_density_optimization(
         box_dims = manipulator.parents[0].box_dims
         n_gb_core = _count_gb_core_atoms(atom_positions, box_dims, gb.gb_thickness)
         gbe, dump_file = _single(gb, manipulator, atom_positions, unique_id, **kw)
-        if gbe < PENALTY:
+        if gbe < ENERGY_PENALTY:
             density_gbe_log.append((n_gb_core / n_perfect, float(gbe)))
         return -n_gb_core, dump_file
 
-    def get_density_batch(gb, manipulators, candidates, lineages, unique_ids, **kw):
+    def get_density_batch(gb, manipulators, candidates, lineages, unique_ids, checkpoint=None, **kw):
         """Batch wrapper: computes core counts, runs LAMMPS, patches energies."""
         core_counts = [
             _count_gb_core_atoms(
@@ -425,9 +426,14 @@ def run_density_optimization(
         ]
         results = _batch(gb, manipulators, candidates, lineages, unique_ids, **kw)
         for count, result in zip(core_counts, results):
-            if result["energy"] < PENALTY:
+            if result["energy"] < ENERGY_PENALTY:
                 density_gbe_log.append((count / n_perfect, float(result["energy"])))
             result["energy"] = -count
+        if checkpoint is not None:
+            for uid, result in zip(unique_ids, results):
+                if not checkpoint.is_done(str(uid)):
+                    checkpoint.record(
+                        str(uid), result["energy"], result.get("final_dump"))
         return results
 
     # --- GA ---
@@ -444,7 +450,7 @@ def run_density_optimization(
 
     best_neg_count, best_dump = ga.run_GA(
         unique_id=1,
-        # checkpoint_file="checkpoint.json",
+        checkpoint_file="checkpoint.json",
     )
     best_n_gb_core = -best_neg_count
     best_normalized = best_n_gb_core / n_perfect
@@ -488,7 +494,8 @@ def main() -> None:
     # lmp.in uses `include ../../potential.setup` and `include ../../min_strat.commands`,
     # which resolve to work_dir/ when LAMMPS runs from workdir.X/gen_Y/.
     work_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy(lammps_dir / args.material / "potential.setup", work_dir / "potential.setup")
+    shutil.copy(lammps_dir / args.material / "potential.setup",
+                work_dir / "potential.setup")
     shutil.copy(lammps_dir / "min_strat.commands", work_dir / "min_strat.commands")
 
     params = MATERIAL_PARAMS[args.material]
