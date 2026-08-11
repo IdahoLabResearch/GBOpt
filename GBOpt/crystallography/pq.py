@@ -1,6 +1,6 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-"""P/Q matrix canonicalization and row-rotation recovery.
+"""P/Q canonicalization and rotation recovery.
 
 Provides canonical forms for grain orientation matrices and recovers exact scaled
 rotations from paired P/Q row matrices. Does not import ``BoundaryEmbedding``, boundary
@@ -24,6 +24,10 @@ from .integer import (
 from .reduction import gauss_reduce_2d, gauss_reduce_2d_paired
 from .rotation import validate_scaled_rotation_matrix
 from .types import CrystallographyValueError, ScaledRotation
+
+# ---------------------------------------------------------------------------
+# Exact integer P/Q canonicalization and rotation recovery
+# ---------------------------------------------------------------------------
 
 
 def _first_nonzero_sign(row: np.ndarray) -> int:

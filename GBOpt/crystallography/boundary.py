@@ -20,6 +20,7 @@ from GBOpt.BoundarySpec import (
     BoundarySpecOrthogonalityError,
     CSLApproxSpec,
     CSLExactSpec,
+    FiveDOFSpec,
     PQSpec,
 )
 from GBOpt.Utils.integer_linalg import cross_int3
@@ -33,6 +34,7 @@ from .embedding import (
     primitive_metadata,
 )
 from .integer import row_gcd_reduce
+from .orientation import orientation_matrices_from_five_dof
 from .plane import inplane_area_index, plane_null_basis, rotation_preserves_plane
 from .pq import (
     canonicalize_pq_paired,
@@ -206,7 +208,7 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     where ``R_mis`` is the rotation about the given axis by ``angle_deg``.
 
     :param spec: A ``CSLApproxSpec`` instance.
-    :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=True``, and
+    :return: ``BoundaryEmbedding`` with ``exact=False``, ``coherent=False``, and
         ``source="csl"``.
     """
     plane = np.asarray(spec.plane, dtype=float)
@@ -232,7 +234,42 @@ def csl_approx_spec_to_embedding(spec: CSLApproxSpec) -> BoundaryEmbedding:
     )
     R_right = R_left @ R_mis
 
-    return embedding_from_rotation_rows(R_left, R_right, source="csl")
+    return embedding_from_rotation_rows(R_left, R_right, source="csl", coherent=False)
+
+
+def five_dof_spec_to_embedding(spec: FiveDOFSpec) -> BoundaryEmbedding:
+    """Convert a validated ``FiveDOFSpec`` to an approximate embedding.
+
+    The boundary adapter translates the validated five-DOF specification into
+    floating-point row-orientation matrices through
+    :func:`orientation_matrices_from_five_dof`, then delegates ``BoundaryEmbedding``
+    construction and final rotation validation to :func:`embedding_from_rotation_rows`.
+
+    Exactification is intentionally not attempted here. Five-DOF rationalization into
+    exact integer P/Q matrices belongs to the separate exactification path.
+
+    :param spec: Validated five-DOF boundary specification containing ``[alpha, beta,
+        gamma, theta, phi]`` in radians.
+    :return: Approximate ``BoundaryEmbedding`` with ``P=None``, ``Q=None``,
+        ``exact=False``, ``coherent=False``, and ``source="five_dof"``.
+    :raises BoundarySpecError: If the five-DOF values cannot be translated into proper
+        floating-point orientation matrices.
+    :raises BoundarySpecOrthogonalityError: If the translated left or right rows do not
+        form a proper orientation matrix during embedding construction.
+    """
+    try:
+        R_left, R_right = orientation_matrices_from_five_dof(spec.params)
+    except CrystallographyValueError as exc:
+        raise BoundarySpecError(
+            f"Invalid five-DOF orientation: {exc}"
+        ) from exc
+
+    return embedding_from_rotation_rows(
+        R_left,
+        R_right,
+        source="five_dof",
+        coherent=False,
+    )
 
 
 def primitive_bicrystal_atom_count(
@@ -274,5 +311,6 @@ __all__ = [
     "pq_spec_to_embedding",
     "csl_exact_spec_to_embedding",
     "csl_approx_spec_to_embedding",
+    "five_dof_spec_to_embedding",
     "primitive_bicrystal_atom_count",
 ]

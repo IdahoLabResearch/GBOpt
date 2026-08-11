@@ -8,11 +8,13 @@ from GBOpt.BoundarySpec import (
     BoundarySpecOrthogonalityError,
     CSLApproxSpec,
     CSLExactSpec,
+    FiveDOFSpec,
     PQSpec,
 )
-from GBOpt.crystallography import (
+from GBOpt.crystallography.boundary import (
     csl_approx_spec_to_embedding,
     csl_exact_spec_to_embedding,
+    five_dof_spec_to_embedding,
     pq_spec_to_embedding,
     primitive_bicrystal_atom_count,
 )
@@ -362,12 +364,7 @@ def test_pq_spec_supplied_mode_does_not_fabricate_primitive_metadata_for_unrecov
 
     emb = pq_spec_to_embedding(spec)
 
-    _assert_embedding_flags(
-        emb,
-        exact=True,
-        coherent=True,
-        source="pq",
-    )
+    _assert_embedding_flags(emb, exact=True, coherent=True, source="pq")
     _assert_proper_rotation_pair(emb)
 
     assert emb.P is not None
@@ -626,7 +623,7 @@ def test_sigma5_twist_csl_embedding_pins_expected_primitive_pq_rows():
 
 def test_csl_approx_spec_to_embedding_flags(approx_sigma5_spec):
     emb = csl_approx_spec_to_embedding(approx_sigma5_spec)
-    _assert_embedding_flags(emb, exact=False, coherent=True, source="csl")
+    _assert_embedding_flags(emb, exact=False, coherent=False, source="csl")
 
 
 def test_csl_approx_spec_to_embedding_P_Q_are_none(approx_sigma5_spec):
@@ -646,7 +643,7 @@ def test_csl_approx_spec_to_embedding_zero_angle_gives_same_rotations():
     np.testing.assert_allclose(emb.R_left, emb.R_right, atol=1e-12, rtol=0.0)
 
 
-def test_csl_approx_spec_to_embedding_non_axis_aligned_plane():
+def test_csl_approx_spec_to_embedding_is_approximate_and_incoherent():
     spec = CSLApproxSpec(
         axis=[1, 0, 0],
         plane=[1, 1, 1],
@@ -656,7 +653,7 @@ def test_csl_approx_spec_to_embedding_non_axis_aligned_plane():
     emb = csl_approx_spec_to_embedding(spec)
 
     assert emb.exact is False
-    assert emb.coherent is True
+    assert emb.coherent is False
     assert emb.source == "csl"
     assert emb.P is None
     assert emb.Q is None
@@ -671,6 +668,55 @@ def test_csl_approx_spec_to_embedding_non_axis_aligned_plane():
     )
 
     _assert_proper_rotation_pair(emb)
+
+
+# --------------------------------------------------------------------------------------
+# five_dof_spec_to_embedding
+# --------------------------------------------------------------------------------------
+
+
+def test_five_dof_spec_to_embedding_delegates_to_rotation_embedding(
+    monkeypatch,
+):
+    spec = FiveDOFSpec([0, 0, 0, 0, 0])
+    expected_left = np.eye(3)
+    expected_right = np.eye(3)
+    expected_embedding = object()
+
+    monkeypatch.setattr(
+        "GBOpt.crystallography.boundary.orientation_matrices_from_five_dof",
+        lambda params: (expected_left, expected_right),
+    )
+
+    calls = {}
+
+    def fake_embedding_from_rotation_rows(
+        R_left,
+        R_right,
+        *,
+        source,
+        coherent,
+    ):
+        calls.update(
+            R_left=R_left,
+            R_right=R_right,
+            source=source,
+            coherent=coherent,
+        )
+        return expected_embedding
+
+    monkeypatch.setattr(
+        "GBOpt.crystallography.boundary.embedding_from_rotation_rows",
+        fake_embedding_from_rotation_rows,
+    )
+
+    result = five_dof_spec_to_embedding(spec)
+
+    assert result is expected_embedding
+    assert calls["R_left"] is expected_left
+    assert calls["R_right"] is expected_right
+    assert calls["source"] == "five_dof"
+    assert calls["coherent"] is False
 
 
 # --------------------------------------------------------------------------------------

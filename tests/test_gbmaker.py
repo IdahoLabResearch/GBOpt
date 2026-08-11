@@ -468,6 +468,55 @@ def test_invalid_public_mismatch_arguments_raise(kwargs, match):
 
 
 # --------------------------------------------------------------------------------------
+# Approximate incoherent interfaces
+# --------------------------------------------------------------------------------------
+
+
+def _build_non_csl_approximate_boundary() -> GBMaker:
+    spec = CSLApproxSpec(
+        axis=[0, 0, 1],
+        plane=[1, 0, 0],
+        angle_deg=17.3,
+    )
+    return GBMaker.from_boundary_spec(
+        3.615,
+        "fcc",
+        "Cu",
+        spec,
+        mode="approximate",
+        gb_thickness=0.0,
+        repeat_factor=2,
+        x_dim_min=8.0,
+        vacuum=5.0,
+        interaction_distance=1.0,
+    )
+
+
+def test_non_csl_approximate_spec_builds_as_incoherent():
+    with pytest.warns(
+        UserWarning,
+        match=r"Gap equalization would remove all atoms from the right grain",
+    ):
+        gb = _build_non_csl_approximate_boundary()
+
+    assert gb.whole_system.size > 0
+    assert gb.inplane_periodic == (False, False)
+    assert gb._GBMaker__embedding is not None
+    assert gb._GBMaker__embedding.coherent is False
+
+
+def test_non_csl_approximate_spec_caps_inplane_box():
+    with pytest.warns(
+        UserWarning,
+        match=r"Gap equalization would remove all atoms from the right grain",
+    ):
+        gb = _build_non_csl_approximate_boundary()
+
+    assert gb.spacing["y"] <= 15.0 * gb.a0
+    assert gb.spacing["z"] <= 15.0 * gb.a0
+
+
+# --------------------------------------------------------------------------------------
 # Commensurate-pair search
 # --------------------------------------------------------------------------------------
 
@@ -670,6 +719,71 @@ def test_find_commensurate_pair_rejects_invalid_max_n(max_n):
         match=r"max_n must be a positive integer",
     ):
         _find_commensurate_pair(1.0, 1.0, max_n=max_n)
+
+
+@pytest.fixture
+def compact_gbmaker_options():
+    return {
+        "gb_thickness": 10.0,
+        "repeat_factor": 2,
+        "x_dim_min": 30.0,
+        "vacuum": 10.0,
+        "interaction_distance": 1.0,
+        "gb_id": 1,
+    }
+
+
+def test_legacy_constructor_emits_single_deprecation_warning(
+    compact_gbmaker_options,
+):
+    theta = math.radians(36.869898)
+
+    with pytest.warns(
+        DeprecationWarning,
+        match=r"GBMaker\(\.\.\.\)",
+    ) as caught:
+        gbm = GBMaker(
+            a0=3.61,
+            structure="fcc",
+            misorientation=np.array(
+                [theta, 0.0, 0.0, 0.0, -theta / 2.0]
+            ),
+            atom_types="Cu",
+            **compact_gbmaker_options,
+        )
+
+    assert len(caught) == 1
+    assert gbm.whole_system.size > 0
+
+
+def test_from_boundary_spec_does_not_emit_legacy_deprecation_warning(
+    compact_gbmaker_options,
+    recwarn,
+):
+    spec = CSLApproxSpec(
+        axis=[0, 0, 1],
+        plane=[1, 0, 0],
+        angle_deg=36.87,
+    )
+
+    gbm = GBMaker.from_boundary_spec(
+        3.61,
+        "fcc",
+        "Cu",
+        spec,
+        mode="approximate",
+        **compact_gbmaker_options,
+    )
+
+    legacy_deprecations = [
+        warning
+        for warning in recwarn
+        if issubclass(warning.category, DeprecationWarning)
+        and "GBMaker(...)" in str(warning.message)
+    ]
+
+    assert not legacy_deprecations
+    assert gbm.whole_system.size > 0
 
 
 class TestGBMaker(unittest.TestCase):
