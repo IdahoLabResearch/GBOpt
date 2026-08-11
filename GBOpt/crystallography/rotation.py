@@ -11,14 +11,13 @@ documentation.
 from __future__ import annotations
 
 import math
-import operator
 from typing import Literal
 
 import numpy as np
 from numpy.typing import ArrayLike
 
 from ._guards import _require_cubic
-from .integer import as_int_array, integer_det3, row_gcd_reduce
+from .integer import as_int_array, as_positive_int, integer_det3, row_gcd_reduce
 from .types import (
     CrystallographyDivisibilityError,
     CrystallographyValueError,
@@ -26,33 +25,51 @@ from .types import (
 )
 
 
-def _require_positive_integer(value: object, name: str) -> int:
-    """Return value as a Python int only if it is a positive integer scalar.
+def _minimal_integral_row_pair(
+    direction: np.ndarray,
+    row_rotation: ScaledRotation,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Construct one exactly paired integer row under a scaled rotation.
 
-    :param value: Candidate scalar to validate.
-    :param name: Name used in error messages.
-    :return: value converted to Python int.
-    :raises CrystallographyValueError: If value is boolean, is not indexable as an
-        integer, or is not positive.
+    ``row_rotation`` represents the row-vector mapping ``q = p @ M / N``. The supplied
+    direction is first GCD-reduced to a primitive integer row. That primitive row is
+    then multiplied by the smallest positive integer scale for which every component of
+    its rotated image is divisible by ``N``. The returned rows therefore satisfy
+    ``image_row == paired_row @ M / N`` exactly in integer arithmetic.
+
+    :param direction: Integer-valued row direction. It may be non-primitive, but it must
+        be one-dimensional and valid for :func:`row_gcd_reduce`.
+    :param row_rotation: Valid exact row-convention scaled rotation ``M / N``.
+    :return: ``(paired_row, image_row)`` as object-dtype integer arrays. ``paired_row``
+        is the minimally scaled primitive input direction and ``image_row`` is its exact
+        integral image under ``row_rotation``.
+    :raises CrystallographyValueError: If ``direction`` is not a valid integer row or if
+        the computed scale fails to produce an exactly divisible image, which indicates
+        an internal inconsistency in the pairing calculation.
     """
-    if isinstance(value, (bool, np.bool_)):
+    primitive = row_gcd_reduce(np.asarray(direction, dtype=object))
+    numerator_matrix = np.asarray(row_rotation.matrix, dtype=object)
+    denominator = int(row_rotation.denominator)
+    image_numerator = primitive @ numerator_matrix
+
+    common_divisor = math.gcd(
+        denominator,
+        *(abs(int(component)) for component in image_numerator),
+    )
+    scale = denominator // common_divisor
+    paired_row = scale * primitive
+    scaled_image = paired_row @ numerator_matrix
+
+    if any(int(component) % denominator for component in scaled_image):
         raise CrystallographyValueError(
-            f"{name} must be a positive integer; got {value!r}."
+            "Internal error while constructing exact paired P/Q rows."
         )
 
-    try:
-        integer = operator.index(value)
-    except TypeError as exc:
-        raise CrystallographyValueError(
-            f"{name} must be a positive integer; got {value!r}."
-        ) from exc
-
-    if integer <= 0:
-        raise CrystallographyValueError(
-            f"{name} must be a positive integer; got {value!r}."
-        )
-
-    return int(integer)
+    image_row = np.array(
+        [int(component) // denominator for component in scaled_image],
+        dtype=object,
+    )
+    return paired_row, image_row
 
 
 def _scaled_row_images(
@@ -63,20 +80,23 @@ def _scaled_row_images(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Apply a row-convention scaled rotation to exactly three integer rows.
 
-    This is the batched companion to ``scaled_row_image`` for 3 by 3 row matrices. It
-    validates ``rotation`` once, then applies ``row @ rotation.matrix /
-    rotation.denominator`` to each row of ``rows``. When a row image divides evenly by
-    the denominator, the exact integer image is returned. Otherwise, the corresponding
-    ``allow_inexact`` flag controls whether the primitive numerator direction is
+    This batched companion to ``scaled_row_image`` validates the rotation once and then
+    applies ``row @ rotation.matrix / rotation.denominator`` to each input row. Exactly
+    divisible images are returned directly. For an inexact image, the corresponding
+    ``allow_inexact`` flag determines whether the primitive numerator direction is
     returned or an exception is raised.
 
-    :param rows: 3 by 3 integer-valued row matrix. Each row is transformed independently
-        under ``rotation``.
+    :param rows: 3 by 3 integer-valued row matrix whose rows are transformed
+        independently.
     :param rotation: Row-convention scaled rotation to apply.
-    :param allow_inexact: Three Boolean flags, one per row.
-    :return: Three object-dtype integer arrays containing the transformed row images in
-        row order.
-    :raises CrystallographyDivisibilityError: If any row image is not exactly
+    :param allow_inexact: Three Boolean flags controlling whether each respective row
+        may return a primitive numerator direction instead of an exactly divisible
+        image. Keyword argument.
+    :return: Three object-dtype integer arrays containing the transformed rows in input
+        order.
+    :raises CrystallographyValueError: If ``rows`` or ``rotation`` fails exact
+        validation.
+    :raises CrystallographyDivisibilityError: If a row image is not exactly
         integer-valued and its corresponding ``allow_inexact`` flag is ``False``.
     """
     int_rows = as_int_array(rows, (len(rows), 3), "rows")
@@ -169,13 +189,14 @@ def validate_scaled_rotation_matrix(
         identity, the Gram diagonal is not a perfect square, the determinant is
         inconsistent with the derived denominator, or the supplied denominator does not
         match the derived denominator.
+    :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
     """
     _require_cubic(lattice_metric)
     int_matrix = as_int_array(input_matrix, (3, 3), "input_matrix")
     expected_denom = (
         None
         if denominator is None
-        else _require_positive_integer(denominator, "denominator")
+        else as_positive_int(denominator, "denominator")
     )
 
     if reduce_common_factor:
@@ -225,6 +246,8 @@ def transpose_rotation_convention(rotation: ScaledRotation) -> ScaledRotation:
     :param rotation: Row-convention scaled rotation to transpose.
     :return: Validated scaled rotation with numerator ``rotation.matrix.T``, the same
         denominator, and the same source.
+    :raises CrystallographyValueError: If ``rotation`` does not satisfy the exact
+        scaled-rotation orthogonality and determinant identities.
     """
     return validate_scaled_rotation_matrix(
         np.asarray(rotation.matrix, dtype=object).T,
@@ -258,6 +281,9 @@ def scaled_row_image(
         returned array is object dtype.
     :raises CrystallographyDivisibilityError: If the image is not exactly integer-valued
         and ``allow_inexact=False``.
+    :raises CrystallographyValueError: If ``row`` is not an exact integer vector of
+        length three or, when ``validate_rotation`` is true, ``rotation`` fails the
+        exact scaled-rotation identities.
     """
     if validate_rotation:
         assert_scaled_rotation(rotation)

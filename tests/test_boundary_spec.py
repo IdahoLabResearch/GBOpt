@@ -1,4 +1,5 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
+
 import numpy as np
 import pytest
 
@@ -94,11 +95,9 @@ def _metadata_kwargs(**overrides):
         "basis_mode": "primitive",
         "input_area_index": 10,
         "primitive_area_index": 5,
-        "input_reduction_index": 2,
         "orientation_area_index": 5,
         "plane": (0, 0, 1),
         "rotation_denominator": 10,
-        "conventional_cell_multiplier": 10,
     }
     kwargs.update(overrides)
     return kwargs
@@ -558,7 +557,6 @@ def test_primitive_metadata_allows_orientation_area_not_multiple_of_primitive_ar
         **_metadata_kwargs(
             primitive_area_index=5,
             orientation_area_index=1,
-            conventional_cell_multiplier=10,
         )
     )
 
@@ -571,11 +569,9 @@ def test_primitive_metadata_normalizes_valid_fields():
         **_metadata_kwargs(
             input_area_index=np.int64(10),
             primitive_area_index=np.int64(5),
-            input_reduction_index=np.int64(2),
             orientation_area_index=np.int64(5),
             plane=[0, 0, 1],
             rotation_denominator=np.int64(10),
-            conventional_cell_multiplier=np.int64(10),
         )
     )
 
@@ -589,110 +585,170 @@ def test_primitive_metadata_normalizes_valid_fields():
     assert metadata.conventional_cell_multiplier == 10
 
 
+def test_primitive_cell_metadata_derives_none_reduction_without_input_area():
+    metadata = PrimitiveCellMetadata(
+        basis_mode="primitive",
+        primitive_area_index=5,
+        orientation_area_index=1,
+        plane=(0, 0, 1),
+        rotation_denominator=10,
+    )
+
+    assert metadata.input_area_index is None
+    assert metadata.input_reduction_index is None
+    assert metadata.conventional_cell_multiplier == 10
+
+
+def test_primitive_metadata_supplied_mode_records_input_area_as_single_reduction():
+    result = PrimitiveCellMetadata(
+        basis_mode="supplied",
+        input_area_index=5,
+        primitive_area_index=5,
+        orientation_area_index=5,
+        plane=(0, 0, 1),
+        rotation_denominator=5,
+    )
+
+    assert result.basis_mode == "supplied"
+    assert result.input_area_index == 5
+    assert result.primitive_area_index == 5
+    assert result.orientation_area_index == 5
+    assert result.input_reduction_index == 1
+    assert result.conventional_cell_multiplier == 10
+
+
 @pytest.mark.parametrize(
     ("overrides", "error_type", "message"),
     [
         pytest.param(
-            {"basis_mode": "literal"},
+            {"basis_mode": "orthogonal"},
             BoundarySpecValueError,
             r"PrimitiveCellMetadata\.basis_mode",
-            id="invalid_basis_mode",
+            id="invalid-basis-mode",
         ),
         pytest.param(
             {"primitive_area_index": 0},
             BoundarySpecValueError,
-            r"primitive_area_index must be a positive integer",
-            id="non_positive_primitive_area_index",
+            r"PrimitiveCellMetadata\.primitive_area_index "
+            r"must be a positive integer",
+            id="zero-primitive-area-index",
+        ),
+        pytest.param(
+            {"primitive_area_index": -1},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.primitive_area_index "
+            r"must be a positive integer",
+            id="negative-primitive-area-index",
+        ),
+        pytest.param(
+            {"primitive_area_index": 1.5},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.primitive_area_index "
+            r"must be a positive integer",
+            id="noninteger-primitive-area-index",
         ),
         pytest.param(
             {"primitive_area_index": np.bool_(True)},
             BoundarySpecTypeError,
-            r"primitive_area_index must not be boolean",
-            id="boolean_primitive_area_index",
+            r"PrimitiveCellMetadata\.primitive_area_index "
+            r"must not be boolean",
+            id="boolean-primitive-area-index",
         ),
         pytest.param(
             {"input_area_index": 0},
             BoundarySpecValueError,
-            r"input_area_index must be a positive integer",
-            id="non_positive_input_area_index",
+            r"PrimitiveCellMetadata\.input_area_index "
+            r"must be a positive integer",
+            id="zero-input-area-index",
         ),
         pytest.param(
-            {"input_area_index": 11, "input_reduction_index": 2},
+            {"input_area_index": -1},
             BoundarySpecValueError,
-            r"input_area_index must be an integer multiple of primitive_area_index",
-            id="input_area_not_multiple_of_primitive_area",
+            r"PrimitiveCellMetadata\.input_area_index "
+            r"must be a positive integer",
+            id="negative-input-area-index",
         ),
         pytest.param(
-            {"input_area_index": 10, "input_reduction_index": None},
+            {"input_area_index": 7},
             BoundarySpecValueError,
-            r"input_reduction_index is required when input_area_index is provided",
-            id="missing_input_reduction_index",
-        ),
-        pytest.param(
-            {"input_area_index": 10, "input_reduction_index": 0},
-            BoundarySpecValueError,
-            r"input_reduction_index must be a positive integer",
-            id="non_positive_input_reduction_index",
-        ),
-        pytest.param(
-            {"input_area_index": 10, "input_reduction_index": 3},
-            BoundarySpecValueError,
-            r"input_reduction_index must equal input_area_index // primitive_area_index",
-            id="mismatched_input_reduction_index",
-        ),
-        pytest.param(
-            {"input_area_index": None, "input_reduction_index": 1},
-            BoundarySpecValueError,
-            r"input_reduction_index must be None when input_area_index is None",
-            id="input_reduction_without_input_area",
-        ),
-        pytest.param(
-            {"plane": (0, 0, 0)},
-            BoundarySpecValueError,
-            r"PrimitiveCellMetadata\.plane must not be all-zero",
-            id="zero_plane",
-        ),
-        pytest.param(
-            {"plane": (True, 0, 1)},
-            BoundarySpecTypeError,
-            r"PrimitiveCellMetadata\.plane\(0,\)=True is not an integer",
-            id="boolean_plane_entry",
-        ),
-        pytest.param(
-            {"plane": (1.5, 0, 0)},
-            BoundarySpecValueError,
-            r"PrimitiveCellMetadata\.plane\(0,\)=1\.5 is not exactly integer-valued",
-            id="non_integer_plane_entry",
-        ),
-        pytest.param(
-            {"rotation_denominator": 0},
-            BoundarySpecValueError,
-            r"rotation_denominator must be a positive integer",
-            id="non_positive_rotation_denominator",
-        ),
-        pytest.param(
-            {"conventional_cell_multiplier": 11},
-            BoundarySpecValueError,
-            r"conventional_cell_multiplier must equal 2 \* primitive_area_index",
-            id="wrong_conventional_cell_multiplier",
+            r"PrimitiveCellMetadata\.input_area_index "
+            r"must be an integer multiple of primitive_area_index",
+            id="indivisible-input-area-index",
         ),
         pytest.param(
             {"orientation_area_index": 0},
             BoundarySpecValueError,
-            r"orientation_area_index must be a positive integer",
-            id="non_positive_orientation_area_index",
+            r"PrimitiveCellMetadata\.orientation_area_index "
+            r"must be a positive integer",
+            id="zero-orientation-area-index",
         ),
         pytest.param(
-            {"orientation_area_index": np.bool_(True)},
-            BoundarySpecTypeError,
-            r"orientation_area_index must not be boolean",
-            id="boolean_orientation_area_index",
+            {"orientation_area_index": -1},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.orientation_area_index "
+            r"must be a positive integer",
+            id="negative-orientation-area-index",
         ),
         pytest.param(
             {"orientation_area_index": 1.5},
             BoundarySpecValueError,
-            r"orientation_area_index must be a positive integer",
-            id="non_integer_orientation_area_index",
+            r"PrimitiveCellMetadata\.orientation_area_index "
+            r"must be a positive integer",
+            id="noninteger-orientation-area-index",
+        ),
+        pytest.param(
+            {"orientation_area_index": np.bool_(True)},
+            BoundarySpecTypeError,
+            r"PrimitiveCellMetadata\.orientation_area_index "
+            r"must not be boolean",
+            id="boolean-orientation-area-index",
+        ),
+        pytest.param(
+            {"plane": [1, 0]},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.plane must have shape \(3,\)",
+            id="short-plane",
+        ),
+        pytest.param(
+            {"plane": [0, 0, 0]},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.plane must not be all-zero",
+            id="zero-plane",
+        ),
+        pytest.param(
+            {"plane": [1.5, 0, 0]},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.plane\(0,\)=1\.5 "
+            r"is not exactly integer-valued",
+            id="noninteger-plane",
+        ),
+        pytest.param(
+            {"plane": [True, 0, 0]},
+            BoundarySpecTypeError,
+            r"PrimitiveCellMetadata\.plane\(0,\)=True "
+            r"is not an integer",
+            id="boolean-plane",
+        ),
+        pytest.param(
+            {"rotation_denominator": 0},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.rotation_denominator "
+            r"must be a positive integer",
+            id="zero-rotation-denominator",
+        ),
+        pytest.param(
+            {"rotation_denominator": 1.5},
+            BoundarySpecValueError,
+            r"PrimitiveCellMetadata\.rotation_denominator "
+            r"must be a positive integer",
+            id="noninteger-rotation-denominator",
+        ),
+        pytest.param(
+            {"rotation_denominator": True},
+            BoundarySpecTypeError,
+            r"PrimitiveCellMetadata\.rotation_denominator "
+            r"must not be boolean",
+            id="boolean-rotation-denominator",
         ),
     ],
 )
@@ -752,10 +808,8 @@ def test_boundary_embedding_stores_primitive_metadata():
         input_area_index=10,
         primitive_area_index=5,
         orientation_area_index=5,
-        input_reduction_index=2,
         plane=(0, 0, 1),
         rotation_denominator=10,
-        conventional_cell_multiplier=10,
     )
 
     emb = _make_embedding(metadata=metadata)

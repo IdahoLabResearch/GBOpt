@@ -153,15 +153,15 @@ def _require_int_array(array: ArrayLike, shape: tuple[int, ...], name: str) -> _
 
 
 def _array_repr(array: ArrayLike, *, name: str) -> str:
-    """Return a compact single-line representation for an ndarray field.
+    """Return a compact single-line representation of an array field.
 
-    The representation includes shape, dtype, writeability, and a compact value preview
-    suitable for logging. Whitespace is normalized so one dataclass instance generally
-    occupies one log line.
+    The representation includes the field name, shape, dtype, writeability, and a
+    compact value preview. Whitespace is normalized so that one dataclass instance
+    generally occupies one log line.
 
     :param array: Array-like field value to represent.
-    :param name: Field name to include in the returned representation.
-    :return: Single-line representation of the array field.
+    :param name: Field name included in the returned representation. Keyword argument.
+    :return: Compact single-line representation of the array field.
     """
     arr = np.asarray(array)
     values = np.array2string(

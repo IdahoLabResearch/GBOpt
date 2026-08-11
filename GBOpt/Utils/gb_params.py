@@ -46,6 +46,10 @@ from GBOpt.BoundarySpec import (
     FiveDOFSpec,
     PQSpec,
 )
+from GBOpt.crystallography._limits import (
+    DEFAULT_MAX_PQ_DETERMINANT,
+    DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+)
 from GBOpt.crystallography.boundary import (
     csl_approx_spec_to_embedding,
     csl_exact_spec_to_embedding,
@@ -60,7 +64,7 @@ from GBOpt.crystallography.orientation import (
     validate_orientation_matrix,
 )
 from GBOpt.crystallography.pq import canonicalize_pq_paired
-from GBOpt.crystallography.types import CrystallographyValueError
+from GBOpt.crystallography.types import CrystallographyError
 
 if __package__ in (None, ""):
     repo_root = Path(__file__).resolve().parents[2]
@@ -577,24 +581,34 @@ def _normalize_core_payload(
 def _embedding_from_spec(
     spec: FiveDOFSpec | PQSpec | CSLExactSpec | CSLApproxSpec,
     *,
-    max_exact_atoms: int,
+    max_primitive_area_index: int,
+    max_pq_determinant: int
 ) -> BoundaryEmbedding:
     """Convert a validated boundary specification to its package embedding.
 
     :param spec: Validated five-DOF, P/Q, exact CSL, or approximate CSL specification.
-    :param max_exact_atoms: Exact-cell size bound forwarded only to exact CSL embedding
-        construction. Keyword-only.
+    :param max_primitive_area_index: Bounds the minimal in-plane CSL area index.
+        Forwarded to exact CSL embedding only. Keyword argument, optional, defaults to
+        ``10000``.
+    :param max_pq_determinant: Bounds abs(det(P)) and abs(det(Q)) for both the selected
+        exact embedding and the final exactly paired P/Q matrices. Keyword argument,
+        optional, defaults to ``10000``.
     :return: Boundary embedding produced by the corresponding crystallography adapter.
     :raises TypeError: If ``spec`` has an unsupported type.
     """
     if isinstance(spec, FiveDOFSpec):
         return five_dof_spec_to_embedding(spec)
     if isinstance(spec, PQSpec):
-        return pq_spec_to_embedding(spec)
+        return pq_spec_to_embedding(
+            spec,
+            max_primitive_area_index=max_primitive_area_index,
+            max_pq_determinant=max_pq_determinant,
+        )
     if isinstance(spec, CSLExactSpec):
         return csl_exact_spec_to_embedding(
             spec,
-            max_exact_atoms=max_exact_atoms,
+            max_primitive_area_index=max_primitive_area_index,
+            max_pq_determinant=max_pq_determinant,
         )
     if isinstance(spec, CSLApproxSpec):
         return csl_approx_spec_to_embedding(spec)
@@ -623,7 +637,8 @@ def _convert_payload(
     payload: object,
     target: str,
     *,
-    max_exact_atoms: int = 10_000,
+    max_primitive_area_index: int = DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+    max_pq_determinant: int = DEFAULT_MAX_PQ_DETERMINANT,
 ) -> dict[str, Any]:
     """Convert a supported core-format payload to another representation.
 
@@ -633,8 +648,11 @@ def _convert_payload(
 
     :param payload: Input object in ``five_dof``, ``pq``, or ``csl`` core format.
     :param target: Requested output format, currently ``"five_dof"`` or ``"pq"``.
-    :param max_exact_atoms: Exact-cell size bound forwarded to exact CSL embedding and
-        five-DOF exactification operations. Keyword-only, defaults to ``10_000``.
+    :param max_primitive_area_index: Bounds the minimal in-plane CSL area index. Keyword
+        argument, optional, defaults to ``10000``.
+    :param max_pq_determinant: Bounds abs(det(P)) and abs(det(Q)) for both the selected
+        exact embedding and the final exactly paired P/Q matrices. Keyword argument,
+        optional, defaults to ``10000``.
     :return: Normalized JSON-safe payload in ``target`` format. If source and target are
         equal, the normalized source payload is returned.
     :raises ValueError: If ``target`` is unsupported, the requested conversion is
@@ -648,7 +666,8 @@ def _convert_payload(
     if target == "five_dof":
         embedding = _embedding_from_spec(
             spec,
-            max_exact_atoms=max_exact_atoms,
+            max_primitive_area_index=max_primitive_area_index,
+            max_pq_determinant=max_pq_determinant,
         )
         return _five_dof_payload(_five_dof_spec_from_embedding(embedding))
 
@@ -656,23 +675,25 @@ def _convert_payload(
         if isinstance(spec, CSLExactSpec):
             embedding = _embedding_from_spec(
                 spec,
-                max_exact_atoms=max_exact_atoms,
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
             )
             if embedding.P is None or embedding.Q is None:
                 raise ValueError("Exact CSL embedding did not provide P/Q matrices.")
-            return _pq_payload(PQSpec(embedding.P, embedding.Q, basis_mode="primitive"))
+            return _pq_payload(
+                PQSpec(
+                    embedding.P,
+                    embedding.Q,
+                    basis_mode="primitive"
+                )
+            )
 
         if isinstance(spec, FiveDOFSpec):
-            try:
-                P, Q = exactify_five_dof(
-                    np.asarray(spec.params, dtype=np.float64),
-                    max_exact_atoms=max_exact_atoms,
-                )
-            except NotImplementedError as exc:
-                raise ValueError(
-                    "Conversion from 'five_dof' to 'pq' requires five_dof "
-                    "exactification, which is not implemented."
-                ) from exc
+            P, Q = exactify_five_dof(
+                np.asarray(spec.params, dtype=np.float64),
+                max_primitive_area_index=max_primitive_area_index,
+                max_pq_determinant=max_pq_determinant,
+            )
             return _pq_payload(PQSpec(P, Q, basis_mode="primitive"))
 
     raise ValueError(f"Conversion from {source!r} to {target!r} is not available.")
@@ -772,7 +793,7 @@ def _command_csl(args: argparse.Namespace) -> int:
 
     :param args: Parsed :class:`argparse.Namespace` exposing integer ``axis`` and
         ``plane`` vectors, exactly one of ``quat`` or ``angle``, optional ``sigma``, and
-        the ``max_exact_atoms`` bound.
+        the ``max_primitive_area_index`` and ``max_pq_determinant`` bounds.
     :return: Process status code ``0`` after successful validation and JSON emission.
     """
     spec = _build_csl_spec(
@@ -782,7 +803,11 @@ def _command_csl(args: argparse.Namespace) -> int:
         angle_deg=args.angle,
         sigma=args.sigma,
     )
-    _embedding_from_spec(spec, max_exact_atoms=args.max_exact_atoms)
+    _embedding_from_spec(
+        spec,
+        max_primitive_area_index=args.max_primitive_area_index,
+        max_pq_determinant=args.max_pq_determinant,
+    )
     _print_payload(_csl_payload(spec))
     return 0
 
@@ -791,7 +816,8 @@ def _command_convert(args: argparse.Namespace) -> int:
     """Handle the ``convert`` CLI subcommand.
 
     :param args: Parsed :class:`argparse.Namespace` exposing ``input_file``,
-        ``input_json``, target format ``to``, and ``max_exact_atoms``.
+        ``input_json``, target format ``to``, ``max_primitive_area_index`` and
+        ``max_pq_determinant``.
     :return: Process status code ``0`` after printing the converted JSON payload.
     """
     payload = _load_core_payload(args)
@@ -799,7 +825,8 @@ def _command_convert(args: argparse.Namespace) -> int:
         _convert_payload(
             payload,
             args.to,
-            max_exact_atoms=args.max_exact_atoms,
+            max_primitive_area_index=args.max_primitive_area_index,
+            max_pq_determinant=args.max_pq_determinant,
         )
     )
     return 0
@@ -809,19 +836,18 @@ def _command_exactify(args: argparse.Namespace) -> int:
     """Handle the ``exactify`` CLI subcommand.
 
     :param args: Parsed :class:`argparse.Namespace` exposing five floating-point
-        ``params`` in radians and the ``max_exact_atoms`` bound.
+        ``params`` in radians and the ``max_primitive_area_index`` and
+        ``max_pq_determinant`` bounds.
     :return: Process status code ``0`` after printing the exact P/Q payload.
     :raises ValueError: If parameters cannot be converted to floating point or
         exactification is not implemented.
     """
     five_dof = FiveDOFSpec(args.params)
-    try:
-        P, Q = exactify_five_dof(
-            np.asarray(five_dof.params, dtype=np.float64),
-            max_exact_atoms=args.max_exact_atoms,
-        )
-    except NotImplementedError as exc:
-        raise ValueError("five_dof exactification is not implemented.") from exc
+    P, Q = exactify_five_dof(
+        np.asarray(five_dof.params, dtype=np.float64),
+        max_primitive_area_index=args.max_primitive_area_index,
+        max_pq_determinant=args.max_pq_determinant,
+    )
 
     _print_payload(_pq_payload(PQSpec(P, Q, basis_mode="primitive")))
     return 0
@@ -962,7 +988,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     csl_kind.add_argument("--angle", type=float, metavar="DEG")
     csl.add_argument("--sigma", type=int, default=None)
-    csl.add_argument("--max-exact-atoms", type=int, default=10_000)
+    csl.add_argument(
+        "--max-primitive-area-index",
+        type=int,
+        default=DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+    )
+    csl.add_argument(
+        "--max-pq-determinant",
+        type=int,
+        default=DEFAULT_MAX_PQ_DETERMINANT,
+    )
     csl.set_defaults(handler=_command_csl)
 
     convert = subparsers.add_parser(
@@ -973,12 +1008,21 @@ def _build_parser() -> argparse.ArgumentParser:
     convert_input.add_argument("--input-json")
     convert_input.add_argument("--input-file")
     convert.add_argument("--to", choices=("five_dof", "pq"), required=True)
-    convert.add_argument("--max-exact-atoms", type=int, default=10_000)
+    convert.add_argument(
+        "--max-primitive-area-index",
+        type=int,
+        default=DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+    )
+    convert.add_argument(
+        "--max-pq-determinant",
+        type=int,
+        default=DEFAULT_MAX_PQ_DETERMINANT,
+    )
     convert.set_defaults(handler=_command_convert)
 
     exactify = subparsers.add_parser(
         "exactify",
-        help="Exactify five_dof parameters through the exactification hook.",
+        help="Exactify five_dof parameters to canonical P/Q when they describe a cubic CSL.",
     )
     exactify.add_argument(
         "--params",
@@ -987,7 +1031,16 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar=("ALPHA", "BETA", "GAMMA", "THETA", "PHI"),
         required=True,
     )
-    exactify.add_argument("--max-exact-atoms", type=int, default=10_000)
+    exactify.add_argument(
+        "--max-primitive-area-index",
+        type=int,
+        default=DEFAULT_MAX_PRIMITIVE_AREA_INDEX,
+    )
+    exactify.add_argument(
+        "--max-pq-determinant",
+        type=int,
+        default=DEFAULT_MAX_PQ_DETERMINANT,
+    )
     exactify.set_defaults(handler=_command_exactify)
 
     canonicalize = subparsers.add_parser(
@@ -1033,7 +1086,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return int(args.handler(args))
     except (
         BoundarySpecError,
-        CrystallographyValueError,
+        CrystallographyError,
         KeyError,
         OSError,
         ValueError,

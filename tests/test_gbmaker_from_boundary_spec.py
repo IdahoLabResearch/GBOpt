@@ -9,6 +9,7 @@ from GBOpt.BoundarySpec import (
     BoundarySpecError,
     CSLApproxSpec,
     CSLExactSpec,
+    FiveDOFSpec,
     PQSpec,
 )
 from GBOpt.crystallography import (
@@ -43,6 +44,9 @@ SIGMA5_TWIST_EXACT_SPEC = CSLExactSpec(
     axis=[0, 0, 1],
     plane=[0, 0, 1],
     quat=[3, 0, 0, 1],
+)
+SIGMA5_TILT_FIVE_DOF_SPEC = FiveDOFSpec(
+    params=[np.arctan2(3, 4), 0.0, 0.0, 0.0, 0.0]
 )
 
 EXACT_SPECS = [
@@ -123,22 +127,56 @@ def test_from_boundary_spec_defaults_to_exact_mode(build_gb, spec):
     assert set(gb.whole_system["name"]) == {"Cu"}
 
 
+@pytest.mark.parametrize(
+    "spec",
+    [
+        pytest.param(SIGMA5_TILT_EXACT_SPEC, id="csl-exact"),
+        pytest.param(SIGMA5_TILT_FIVE_DOF_SPEC, id="five-dof"),
+    ],
+)
 def test_from_boundary_spec_equivalent_exact_specs_build_equivalent_bicrystals(
     build_gb,
+    spec,
 ):
-    gb_pq = build_gb(SIGMA5_TILT_PQ_SPEC, mode="exact")
-    gb_csl = build_gb(SIGMA5_TILT_EXACT_SPEC, mode="exact")
+    reference = build_gb(SIGMA5_TILT_PQ_SPEC, mode="exact")
+    result = build_gb(spec, mode="exact")
 
     np.testing.assert_array_equal(
-        _sorted_atoms(gb_csl.whole_system),
-        _sorted_atoms(gb_pq.whole_system),
+        _sorted_atoms(result.whole_system),
+        _sorted_atoms(reference.whole_system),
     )
     np.testing.assert_allclose(
-        gb_csl.box_dims,
-        gb_pq.box_dims,
-        atol=1e-12,
+        result.box_dims,
+        reference.box_dims,
+        atol=1.0e-12,
         rtol=0.0,
     )
+
+
+def test_from_boundary_spec_exact_five_dof_reports_exactification_failure(
+    build_gb,
+):
+    spec = FiveDOFSpec(
+        params=[0.0, 0.0, 0.1, 0.0, 0.0]
+    )
+
+    with pytest.raises(
+        BoundarySpecError,
+        match="could not be exactified",
+    ):
+        build_gb(spec, mode="exact")
+
+
+def test_from_boundary_spec_prefer_exact_uses_exact_five_dof_path(
+    build_gb,
+):
+    gb = build_gb(
+        SIGMA5_TILT_FIVE_DOF_SPEC,
+        mode="prefer_exact",
+    )
+
+    assert gb.whole_system.size > 0
+    assert gb.uses_exact_construction is True
 
 
 # --------------------------------------------------------------------------------------

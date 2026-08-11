@@ -5,6 +5,7 @@ import pytest
 from GBOpt.crystallography.integer import (
     as_int_array,
     as_int_vector,
+    as_positive_int,
     cross_int3,
     dot_int,
     integer_adj3,
@@ -48,6 +49,40 @@ def test_as_int_vector_wrong_length_raises_crystallography_value_error():
 def test_as_int_vector_non_integer_input_raises_crystallography_value_error():
     with pytest.raises(CrystallographyValueError, match="exactly integer-valued"):
         as_int_vector([1.5, 2, 3], 3, "v")
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        pytest.param(1, 1, id="python-int"),
+        pytest.param(np.int64(7), 7, id="numpy-int"),
+    ],
+)
+def test_as_positive_int_returns_python_int(value, expected):
+    result = as_positive_int(value, "limit")
+
+    assert result == expected
+    assert type(result) is int
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(0, id="zero"),
+        pytest.param(-1, id="negative"),
+        pytest.param(1.0, id="float"),
+        pytest.param(True, id="bool"),
+        pytest.param(np.bool_(True), id="numpy-bool"),
+        pytest.param("1", id="string"),
+        pytest.param(None, id="none"),
+    ],
+)
+def test_as_positive_int_rejects_invalid_values(value):
+    with pytest.raises(
+        CrystallographyValueError,
+        match="limit must be a positive integer",
+    ):
+        as_positive_int(value, "limit")
 
 
 def test_row_gcd_reduce_reduces_by_common_component_gcd():

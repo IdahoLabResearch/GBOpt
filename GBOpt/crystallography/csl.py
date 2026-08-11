@@ -20,7 +20,13 @@ from GBOpt.Utils.integer_normal_forms import (
     smith_normal_form_3x3,
 )
 
-from .integer import as_int_array, as_int_vector, integer_adj3, integer_det3
+from .integer import (
+    as_int_array,
+    as_int_vector,
+    as_positive_int,
+    integer_adj3,
+    integer_det3,
+)
 from .reduction import lll_reduce
 from .types import (
     CoincidenceCheck,
@@ -51,11 +57,8 @@ def sigma_from_snf_diagonal(denominator: int, diagonal: Int3) -> tuple[int, Int3
         is the per-axis kernel modulus ``denominator / gcd(diagonal[i], denominator)``.
     :raises CrystallographyValueError: If ``denominator`` is not positive.
     """
-    denom = int(denominator)
-    if denom <= 0:
-        raise CrystallographyValueError(
-            f"denominator must be positive; got {denom}."
-        )
+    denom = as_positive_int(denominator, "denominator")
+
     diag = as_int_vector(diagonal, 3, "diagonal")
     m1, m2, m3 = (
         denom // math.gcd(abs(d), denom)
@@ -153,11 +156,7 @@ def dsc_basis(
             "non-cubic lattice bases are not implemented"
         )
     int_matrix = as_int_array(csl_basis, (3, 3), "csl_basis")
-    if not isinstance(sigma, (int, np.integer)) or sigma <= 0:
-        raise CrystallographyValueError(
-            f"sigma must be a positive integer; got {sigma}."
-        )
-    sigma = int(sigma)
+    sigma = as_positive_int(sigma, "sigma")
     det = integer_det3(int_matrix)
     abs_det = abs(det)
     if abs_det != sigma:
@@ -198,17 +197,11 @@ def verify_coincidence_basis(
     """
     int_rotation = as_int_array(rotation.matrix, (3, 3), "rotation.matrix")
     int_basis = as_int_array(csl_basis, (3, 3), "csl_basis")
-    denominator = int(rotation.denominator)
-    if denominator <= 0:
-        raise CrystallographyValueError(
-            f"rotation.denominator must be positive; got {rotation.denominator}."
-        )
+    denominator = rotation.denominator
+
     if sigma is not None:
-        if not isinstance(sigma, (int, np.integer)) or sigma <= 0:
-            raise CrystallographyValueError(
-                f"sigma must be a positive integer; got {sigma}."
-            )
-        sigma = int(sigma)
+        sigma = as_positive_int(sigma, "sigma")
+
     residual = (int_rotation @ int_basis) % denominator
     det_basis = abs(integer_det3(int_basis))
     ok = bool(np.all(residual == 0))

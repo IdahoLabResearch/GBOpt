@@ -491,54 +491,59 @@ class CSLApproxSpec(_CSLSpecBase):
         object.__setattr__(self, "angle_deg", angle)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, kw_only=True, slots=True)
 class PrimitiveCellMetadata:
     """Primitive boundary-defining cell metadata for exact embeddings.
 
-    Stores boundary-topology quantities produced by the CSL or PQ adapter, not crystal
-    structure data. ``UnitCell`` holds the atomic basis and lattice parameter; this
-    class holds boundary-level geometry: optional caller-input area provenance, minimal
-    primitive CSL area, optional returned orientation-row area, boundary-plane normal,
-    and exact rotation denominator.
+    Stores boundary-topology quantities produced by the CSL or P/Q adapters, not
+    crystal-structure data. ``UnitCell`` owns the atomic basis and lattice parameter;
+    this class records the primitive boundary-cell topology and provenance.
 
-    ``orientation_area_index`` describes the area of the returned
-    ``BoundaryEmbedding.P`` orientation rows when reported. It is descriptive only and is
-    not required to be an integer multiple of ``primitive_area_index`` because
-    orthogonal embeddings may use orientation rows rather than a CSL supercell basis.
+    ``input_reduction_index`` and ``conventional_cell_multiplier`` are derived
+    attributes. They are not constructor arguments:
 
-    :param basis_mode: ``"primitive"``or ``"supplied"`` construction path that produced
-        this metadata.
-    :param input_area_index: In-plane area index of caller-provided ``P`` rows, when
-        available.
+    * ``input_reduction_index`` is ``input_area_index // primitive_area_index`` when an
+      input area is available.
+    * ``conventional_cell_multiplier`` is ``2 * primitive_area_index``.
+
+    ``orientation_area_index`` describes the area index of the returned
+    ``BoundaryEmbedding.P`` rows when reported. It is descriptive only and need not be
+    an integer multiple of ``primitive_area_index`` because an orthogonal orientation
+    frame is not necessarily a primitive CSL basis.
+
+    :param basis_mode: Construction path that produced the metadata: ``"primitive"`` or
+        ``"supplied"``.
     :param primitive_area_index: Minimal in-plane area index of the primitive CSL cell.
-    :param input_reduction_index: ``input_area_index // primitive_area_index`` when
-        ``input_area_index`` is available; otherwise ``None``.
-    :param orientation_area_index: In-plane area index of the returned
-        ``BoundaryEmbedding.P`` rows, when useful to report.
     :param plane: Primitive boundary-plane normal ``(h, k, l)``.
-    :param rotation_denominator: Denominator ``N`` of the exact scaled rotation that
-        produced this boundary.
-    :param conventional_cell_multiplier: Atom-count multiplier ``2 *
-        primitive_area_index`` for converting a conventional-cell atom count to a
-        primitive bicrystal atom count.
+    :param rotation_denominator: Positive denominator ``N`` of the exact scaled rotation
+        that produced the boundary.
+    :param input_area_index: In-plane area index of caller-provided ``P`` rows, when
+        available. It must be an integer multiple of ``primitive_area_index``. Keyword
+        argument, optional, defaults to ``None``.
+    :param orientation_area_index: In-plane area index of the returned
+        ``BoundaryEmbedding.P`` rows, when useful to report. Keyword argument, optional,
+        defaults to ``None``.
+    :ivar input_reduction_index: Derived input-to-primitive area ratio, or ``None``.
+    :ivar conventional_cell_multiplier: Derived multiplier ``2 * primitive_area_index``.
     """
 
     basis_mode: Literal["primitive", "supplied"]
-    input_area_index: int | None
     primitive_area_index: int
-    input_reduction_index: int | None
-    orientation_area_index: int | None
     plane: tuple[int, int, int]
     rotation_denominator: int
-    conventional_cell_multiplier: int
+    input_area_index: int | None = None
+    orientation_area_index: int | None = None
+
+    input_reduction_index: int | None = field(init=False)
+    conventional_cell_multiplier: int = field(init=False)
 
     def __post_init__(self) -> None:
-        """Validate primitive-cell metadata consistency and normalize stored values.
+        """Validate inputs, normalize stored values, and derive dependent fields.
 
-        :raises BoundarySpecValueError: If basis_mode is invalid, if an area index is not
-            positive, if an area index is not a multiple of primitive_area_index, if a
-            reduction index is inconsistent with its area indices, or if
-            conventional_cell_multiplier is not twice primitive_area_index.
+        :raises BoundarySpecTypeError: If a field contains an invalid scalar type.
+        :raises BoundarySpecValueError: If ``basis_mode`` is invalid, an integer field
+            is nonpositive, ``plane`` is malformed or zero, or ``input_area_index`` is
+            not divisible by ``primitive_area_index``.
         """
         if self.basis_mode not in ("primitive", "supplied"):
             raise BoundarySpecValueError(
@@ -553,10 +558,6 @@ class PrimitiveCellMetadata:
         rotation_denominator = _validate_positive_integer(
             self.rotation_denominator,
             "PrimitiveCellMetadata.rotation_denominator",
-        )
-        conventional_cell_multiplier = _validate_positive_integer(
-            self.conventional_cell_multiplier,
-            "PrimitiveCellMetadata.conventional_cell_multiplier",
         )
         plane = _validate_nonzero_int_vector(
             self.plane,
@@ -574,38 +575,12 @@ class PrimitiveCellMetadata:
             if input_area_index % primitive_area_index != 0:
                 raise BoundarySpecValueError(
                     "PrimitiveCellMetadata.input_area_index must be an integer "
-                    "multiple of primitive_area_index."
+                    "multiple of primitive_area_index; got "
+                    f"input_area_index={input_area_index}, "
+                    f"primitive_area_index={primitive_area_index}."
                 )
-
-            expected_input_reduction_index = input_area_index // primitive_area_index
-            if self.input_reduction_index is None:
-                raise BoundarySpecValueError(
-                    "PrimitiveCellMetadata.input_reduction_index is required when "
-                    "input_area_index is provided."
-                )
-
-            input_reduction_index = _validate_positive_integer(
-                self.input_reduction_index,
-                "PrimitiveCellMetadata.input_reduction_index",
-            )
-            if input_reduction_index != expected_input_reduction_index:
-                raise BoundarySpecValueError(
-                    "PrimitiveCellMetadata.input_reduction_index must equal "
-                    "input_area_index // primitive_area_index; got "
-                    f"{input_reduction_index}, expected {expected_input_reduction_index}."
-                )
-        elif self.input_reduction_index is not None:
-            raise BoundarySpecValueError(
-                "PrimitiveCellMetadata.input_reduction_index must be None when "
-                "input_area_index is None."
-            )
-
-        expected_multiplier = 2 * primitive_area_index
-        if conventional_cell_multiplier != expected_multiplier:
-            raise BoundarySpecValueError(
-                "PrimitiveCellMetadata.conventional_cell_multiplier must equal "
-                f"2 * primitive_area_index; got {conventional_cell_multiplier}, "
-                f"expected {expected_multiplier}."
+            input_reduction_index = (
+                input_area_index // primitive_area_index
             )
 
         orientation_area_index = None
@@ -615,16 +590,36 @@ class PrimitiveCellMetadata:
                 "PrimitiveCellMetadata.orientation_area_index",
             )
 
-        object.__setattr__(self, "input_area_index", input_area_index)
-        object.__setattr__(self, "primitive_area_index", primitive_area_index)
-        object.__setattr__(self, "input_reduction_index", input_reduction_index)
-        object.__setattr__(self, "orientation_area_index", orientation_area_index)
+        object.__setattr__(
+            self,
+            "primitive_area_index",
+            primitive_area_index,
+        )
+        object.__setattr__(
+            self,
+            "rotation_denominator",
+            rotation_denominator,
+        )
         object.__setattr__(self, "plane", plane)
-        object.__setattr__(self, "rotation_denominator", rotation_denominator)
+        object.__setattr__(
+            self,
+            "input_area_index",
+            input_area_index,
+        )
+        object.__setattr__(
+            self,
+            "orientation_area_index",
+            orientation_area_index,
+        )
+        object.__setattr__(
+            self,
+            "input_reduction_index",
+            input_reduction_index,
+        )
         object.__setattr__(
             self,
             "conventional_cell_multiplier",
-            conventional_cell_multiplier,
+            2 * primitive_area_index,
         )
 
 

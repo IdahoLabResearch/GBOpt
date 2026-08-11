@@ -5,7 +5,6 @@ import pytest
 from GBOpt.BoundarySpec import (
     BoundaryEmbedding,
     BoundarySpecError,
-    BoundarySpecOrthogonalityError,
     CSLApproxSpec,
     CSLExactSpec,
     FiveDOFSpec,
@@ -20,10 +19,10 @@ from GBOpt.crystallography.boundary import (
 )
 from GBOpt.crystallography.integer import as_int_array, integer_det3
 from GBOpt.crystallography.pq import (
-    canonicalize_pq,
     recover_exact_row_rotation_from_paired_pq,
 )
 from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
+from GBOpt.crystallography.types import CrystallographyValueError
 
 # --------------------------------------------------------------------------------------
 # Shared test data
@@ -121,21 +120,25 @@ def test_pq_spec_to_embedding_identity_r_left_r_right(identity_pq_spec):
     np.testing.assert_allclose(emb.R_right, np.eye(3), atol=1e-12, rtol=0.0)
 
 
-def test_pq_spec_to_embedding_sigma5_r_right_matches_canonical(sigma5_supplied_pq_spec):
-    emb = pq_spec_to_embedding(sigma5_supplied_pq_spec)
+def test_pq_spec_to_embedding_sigma5_r_right_matches_expected(
+    sigma5_supplied_pq_spec,
+):
+    embedding = pq_spec_to_embedding(sigma5_supplied_pq_spec)
 
-    P_raw = np.array(SIGMA5_36_P, dtype=float)
-    Q_raw = np.array(SIGMA5_36_Q, dtype=float)
-    _, Q_c = canonicalize_pq(P_raw, Q_raw)
-
-    Q_c_float = np.asarray(Q_c, dtype=float)
-    R_right_expected = Q_c_float / np.linalg.norm(
-        Q_c_float,
-        axis=1,
-        keepdims=True,
+    expected = np.array(
+        [
+            [4.0 / 5.0, -3.0 / 5.0, 0.0],
+            [3.0 / 5.0, 4.0 / 5.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
     )
 
-    np.testing.assert_allclose(emb.R_right, R_right_expected, atol=1e-12, rtol=0.0)
+    np.testing.assert_allclose(
+        embedding.R_right,
+        expected,
+        atol=1.0e-12,
+        rtol=0.0,
+    )
 
 
 def test_pq_spec_to_embedding_sigma5_r_right_is_proper_rotation(
@@ -296,6 +299,27 @@ def test_pq_spec_primitive_orthogonal_fallback_preserves_input_reduction_metadat
     )
 
 
+def test_pq_spec_primitive_translates_crystallography_failure(monkeypatch):
+    def raise_primitive_failure(*args, **kwargs):
+        raise CrystallographyValueError("forced primitive validation failure")
+
+    monkeypatch.setattr(
+        "GBOpt.crystallography.boundary.primitive_embedding_from_row_rotation",
+        raise_primitive_failure,
+    )
+
+    spec = PQSpec(
+        P=list(SIGMA5_TWIST_PRIMITIVE_P),
+        Q=list(SIGMA5_TWIST_PRIMITIVE_Q),
+    )
+
+    with pytest.raises(
+        BoundarySpecError,
+        match="forced primitive validation failure",
+    ):
+        pq_spec_to_embedding(spec)
+
+
 # --------------------------------------------------------------------------------------
 # pq_spec_to_embedding - supplied basis mode
 # --------------------------------------------------------------------------------------
@@ -449,16 +473,44 @@ def test_csl_exact_spec_to_embedding_twist_rotations_derive_from_final_pq():
 
 
 def test_csl_exact_spec_to_embedding_large_denominator_stays_exact():
-    spec = CSLExactSpec(axis=[128, 1, 1], plane=[1, 0, 0], quat=[128, 128, 1, 1])
-    emb = csl_exact_spec_to_embedding(spec, max_exact_atoms=10**9)
+    spec = CSLExactSpec(
+        axis=[128, 1, 1],
+        plane=[1, 0, 0],
+        quat=[128, 128, 1, 1],
+    )
+
+    emb = csl_exact_spec_to_embedding(
+        spec,
+        max_primitive_area_index=10**9,
+        max_pq_determinant=10**9,
+    )
+
     assert emb.exact is True
     assert emb.P is not None
     assert emb.Q is not None
-    for R in (emb.R_left, emb.R_right):
-        np.testing.assert_allclose(R @ R.T, np.eye(3), atol=1e-10)
-    np.testing.assert_array_equal(emb.P.astype(int), np.eye(3, dtype=int))
-    expected_Q = np.array([[16383, 0, 256], [256, 0, -16383], [0, 1, 0]], dtype=int)
-    np.testing.assert_array_equal(emb.Q.astype(int), expected_Q)
+
+    for rotation in (emb.R_left, emb.R_right):
+        np.testing.assert_allclose(
+            rotation @ rotation.T,
+            np.eye(3),
+            atol=1e-10,
+        )
+
+    np.testing.assert_array_equal(
+        emb.P.astype(int),
+        np.eye(3, dtype=int),
+    )
+    np.testing.assert_array_equal(
+        emb.Q.astype(int),
+        np.array(
+            [
+                [16383, 0, 256],
+                [256, 0, -16383],
+                [0, 1, 0],
+            ],
+            dtype=int,
+        ),
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -499,51 +551,6 @@ def test_csl_exact_spec_uses_orthogonal_embedding_when_rotation_does_not_preserv
     assert emb.metadata.input_reduction_index is None
     assert emb.metadata.orientation_area_index == 1
     assert emb.metadata.plane == (1, 0, 0)
-    assert emb.metadata.rotation_denominator == 10
-    assert emb.metadata.conventional_cell_multiplier == 10
-
-
-def test_csl_exact_spec_to_embedding_orthogonality_error_uses_orthogonal_fallback(
-    monkeypatch,
-):
-    primitive_calls = []
-
-    def raise_orthogonality_error(row_rotation, plane, **kwargs):
-        primitive_calls.append(
-            {
-                "plane": tuple(int(x) for x in plane),
-                "source": kwargs.get("source"),
-                "max_exact_atoms": kwargs.get("max_exact_atoms"),
-            }
-        )
-        raise BoundarySpecOrthogonalityError("forced orthogonality failure")
-
-    monkeypatch.setattr(
-        "GBOpt.crystallography.boundary.primitive_embedding_from_row_rotation",
-        raise_orthogonality_error,
-    )
-
-    spec = CSLExactSpec(axis=[0, 0, 1], plane=[0, 0, 1], quat=[3, 0, 0, 1])
-    emb = csl_exact_spec_to_embedding(spec)
-
-    assert primitive_calls == [
-        {
-            "plane": (0, 0, 1),
-            "source": "csl",
-            "max_exact_atoms": 10_000,
-        }
-    ]
-
-    _assert_embedding_flags(emb, exact=True, coherent=True, source="csl")
-    _assert_proper_rotation_pair(emb)
-
-    assert emb.metadata is not None
-    assert emb.metadata.basis_mode == "primitive"
-    assert emb.metadata.input_area_index is None
-    assert emb.metadata.primitive_area_index == 5
-    assert emb.metadata.input_reduction_index is None
-    assert emb.metadata.orientation_area_index == 5
-    assert emb.metadata.plane == (0, 0, 1)
     assert emb.metadata.rotation_denominator == 10
     assert emb.metadata.conventional_cell_multiplier == 10
 

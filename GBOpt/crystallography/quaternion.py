@@ -18,7 +18,7 @@ from numpy.typing import ArrayLike
 from scipy.spatial.transform import Rotation
 
 from ._guards import _require_cubic
-from .integer import as_int_vector
+from .integer import as_int_vector, as_positive_int
 from .types import (
     CrystallographyValueError,
     Int4,
@@ -63,7 +63,9 @@ def quaternion_to_scaled_rotation(
     :param lattice_metric: Reserved non-cubic metric hook; only ``None`` is currently
         supported. Keyword argument, optional, defaults to ``None``.
     :return: Exact scaled rotation in the project row-vector convention.
-    :raises CrystallographyValueError: If ``quat`` is the zero quaternion.
+    :raises CrystallographyValueError: If ``quat`` is malformed, contains non-integer
+        entries, or is the zero quaternion.
+    :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
     """
     _require_cubic(lattice_metric)
     if canonicalize:
@@ -94,70 +96,183 @@ def quaternion_to_scaled_rotation(
     )
 
 
-def integer_quaternion_from_unit(quat: ArrayLike, *, max_denominator: int = 10001) -> Int4:
-    """Recover a primitive integer quaternion proportional to a unit quaternion.
+def _validated_float_quaternion(quat: ArrayLike) -> np.ndarray:
+    """Return a validated finite floating-point quaternion.
 
-    :param quat: Unit quaternion in Hamilton scalar-first order ``[w, x, y, z]``.
-    :param max_denominator: Maximum rational denominator used when recovering integer
-        ratios from floating-point components. Keyword argument, optional, defaults to
-        ``10001``.
-    :return: Primitive integer quaternion.
-    :raises CrystallographyValueError: If the input is not length 4, is zero, or has
-        non-finite values; max_denominator is not a positive integer; or the recovered
-        integer quaternion does not match the supplied unit quaternion.
+    :param quat: Candidate quaternion in Hamilton scalar-first order ``[w, x, y, z]``.
+    :return: Finite ``float64`` array with shape ``(4,)``.
+    :raises CrystallographyValueError: If ``quat`` cannot be converted to floating
+        point, does not have shape ``(4,)``, or contains a non-finite value.
     """
-    arr = np.asarray(quat, dtype=float)
-    if arr.shape != (4,):
-        raise CrystallographyValueError(f"quat must have shape (4,); got {arr.shape}.")
-    if not np.all(np.isfinite(arr)):
-        raise CrystallographyValueError("quat must contain only finite values.")
-    if (
-        not isinstance(max_denominator, int)
-        or max_denominator < 1
-        or isinstance(max_denominator, (bool, np.bool_))
-    ):
+    try:
+        arr = np.asarray(quat, dtype=np.float64)
+    except (TypeError, ValueError, OverflowError) as exc:
         raise CrystallographyValueError(
-            f"max_denominator must be a positive integer, got {max_denominator!r}."
+            "quat must be a finite four-component quaternion."
+        ) from exc
+
+    if arr.shape != (4,):
+        raise CrystallographyValueError(
+            f"quat must have shape (4,); got {arr.shape}."
         )
-    # 1e-14: numerical zero floor (well below float64 machine epsilon ~2.2e-16 times
-    # typical quaternion magnitudes); components smaller than this are treated as
-    # exactly zero before computing ratios relative to the largest-magnitude component.
-    zero_tol = 1e-14
+    if not np.all(np.isfinite(arr)):
+        raise CrystallographyValueError(
+            "quat must contain only finite values."
+        )
+
+    return arr
+
+
+def _integer_quaternion_candidate_from_unit(
+    quat: ArrayLike,
+    *,
+    max_denominator: int = 10001,
+) -> Int4:
+    """Return a bounded-denominator integer candidate for a quaternion direction.
+
+    The candidate is primitive and uses the canonical quaternion sign convention.
+    This helper deliberately performs no reconstruction-accuracy check. Callers are
+    responsible for applying the error metric and tolerance appropriate to their
+    operation.
+
+    :param quat: Quaternion direction in Hamilton scalar-first order
+        ``[w, x, y, z]``. The input need not be exactly unit length.
+    :param max_denominator: Maximum denominator used when rationalizing component
+        ratios. Keyword argument, optional, defaults to ``10001``.
+    :return: Primitive canonical integer quaternion.
+    :raises CrystallographyValueError: If ``quat`` cannot be converted to a finite
+        four-component vector, is effectively zero, or ``max_denominator`` is not a
+        positive integer.
+    """
+    try:
+        arr = np.asarray(quat, dtype=np.float64)
+    except (TypeError, ValueError) as exc:
+        raise CrystallographyValueError(
+            "quat must be a finite four-component quaternion."
+        ) from exc
+
+    max_denominator = as_positive_int(
+        max_denominator,
+        "max_denominator",
+    )
+
+    if arr.shape != (4,):
+        raise CrystallographyValueError(
+            f"quat must have shape (4,); got {arr.shape}."
+        )
+    if not np.all(np.isfinite(arr)):
+        raise CrystallographyValueError(
+            "quat must contain only finite values."
+        )
+
+    # Components below this numerical floor are treated as exact zeros when
+    # constructing ratios relative to the largest-magnitude component.
+    zero_tol = 1.0e-14
     abs_arr = np.abs(arr)
     if not np.any(abs_arr > zero_tol):
-        raise CrystallographyValueError("quat is the zero quaternion.")
+        raise CrystallographyValueError(
+            "quat is the zero quaternion."
+        )
 
     reference_index = int(np.argmax(abs_arr))
     reference = float(arr[reference_index])
 
     fractions = [
-        Fraction(0, 1)
-        if abs(float(v)) <= zero_tol
-        else Fraction(float(v) / reference).limit_denominator(max_denominator)
-        for v in arr
+        (
+            Fraction(0, 1)
+            if abs(float(component)) <= zero_tol
+            else Fraction(float(component) / reference).limit_denominator(
+                max_denominator
+            )
+        )
+        for component in arr
     ]
 
-    denominator_lcm = math.lcm(*(value.denominator for value in fractions))
-    int_components = [int(value * denominator_lcm) for value in fractions]
-    int_quat = normalize_integer_quaternion(tuple(int_components))
+    denominator_lcm = math.lcm(
+        *(fraction.denominator for fraction in fractions)
+    )
+    components = tuple(
+        int(fraction * denominator_lcm)
+        for fraction in fractions
+    )
 
-    int_quat_arr = np.asarray(int_quat, dtype=float)
-    recovered = int_quat_arr / np.linalg.norm(int_quat_arr)
+    return normalize_integer_quaternion(components)
 
-    # arr may not be exactly unit-norm due to floating-point; renormalize defensively
-    target = arr / np.linalg.norm(arr)
-    if np.dot(recovered, target) < 0:
+
+def integer_quaternion_from_unit(
+    quat: ArrayLike,
+    *,
+    max_denominator: int = 10001,
+) -> Int4:
+    """Recover a primitive integer quaternion proportional to a unit quaternion.
+
+    This public convenience function constructs a bounded-denominator candidate and
+    verifies that its normalized quaternion direction matches the supplied direction
+    within a fixed componentwise tolerance. Callers that require a different error
+    metric should use their own operation-specific policy around the private candidate
+    constructor.
+
+    :param quat: Unit quaternion in Hamilton scalar-first order ``[w, x, y, z]``.
+    :param max_denominator: Maximum rational denominator used when recovering integer
+        ratios from floating-point components. Keyword argument, optional, defaults to
+        ``10001``.
+    :return: Primitive canonical integer quaternion.
+    :raises CrystallographyValueError: If validation or rationalization fails, or if
+        the recovered integer quaternion does not reproduce the supplied quaternion
+        direction within the fixed public-function tolerance.
+    """
+    int_quat = _integer_quaternion_candidate_from_unit(
+        quat,
+        max_denominator=max_denominator,
+    )
+
+    # Candidate construction has already validated conversion, shape, finiteness,
+    # and nonzero magnitude.
+    target = np.asarray(quat, dtype=np.float64)
+    target /= np.linalg.norm(target)
+
+    int_quat_array = np.asarray(int_quat, dtype=np.float64)
+    recovered = int_quat_array / np.linalg.norm(int_quat_array)
+
+    if float(np.dot(recovered, target)) < 0.0:
         recovered = -recovered
 
-    # 1e-9: reconstruction accuracy tolerance; verifies that the recovered integer
-    # quaternion, when renormalized, reproduces the original unit quaternion direction
-    # to within acceptable float64 round-trip error.
-    if not np.allclose(recovered, target, atol=1e-9, rtol=0.0):
+    if not np.allclose(
+        recovered,
+        target,
+        atol=1.0e-9,
+        rtol=0.0,
+    ):
         raise CrystallographyValueError(
-            "Recovered integer quaternion does not match the supplied unit quaternion."
+            "Recovered integer quaternion does not match the supplied "
+            "unit quaternion."
         )
 
     return int_quat
+
+
+def _unit_integer_quaternion(values: tuple[int, int, int, int]) -> np.ndarray:
+    """Return a scale-safe unit vector for a nonzero integer quaternion.
+
+    The integer components are divided by their largest absolute value before
+    normalization to avoid unnecessary floating-point overflow.
+
+    :param values: Integer quaternion in Hamilton scalar-first order ``(w, x, y, z)``.
+    :return: Unit-length ``float64`` quaternion with shape ``(4,)``.
+    :raises CrystallographyValueError: If ``values`` is the zero quaternion.
+    """
+    scale = max(map(abs, values))
+    if scale == 0:
+        raise CrystallographyValueError(
+            "Quaternion must be non-zero."
+        )
+
+    scaled = np.fromiter(
+        (value / scale for value in values),
+        dtype=np.float64,
+        count=4,
+    )
+    return scaled / np.linalg.norm(scaled)
 
 
 def quaternion_to_rotation_matrix(quat: ArrayLike) -> np.ndarray:
@@ -175,29 +290,24 @@ def quaternion_to_rotation_matrix(quat: ArrayLike) -> np.ndarray:
     :raises CrystallographyValueError: If the shape is invalid, the quaternion is
         non-finite or zero, or a non-unit quaternion is not integer-valued.
     """
-    quat_array = np.asarray(quat, dtype=float)
-    if quat_array.shape != (4,):
-        raise CrystallographyValueError(
-            f"Quaternion must be a 1-D array of length 4; got shape {quat_array.shape}."
-        )
-    norm = float(np.linalg.norm(quat_array))
-    if not np.isfinite(norm) or norm == 0.0:
-        raise CrystallographyValueError("Quaternion must be non-zero and finite.")
-    # 1e-12: tight tolerance for unit-norm check; properly normalized quaternions
-    # from scipy or explicit normalization should be within a few ULPs of 1.
-    if not np.isclose(norm, 1.0, atol=1e-12, rtol=0.0):
-        # 1e-9: looser tolerance for integer-valuedness; integer-valued floats
-        # can carry small rounding errors from upstream arithmetic.
-        if not np.allclose(quat_array, np.round(quat_array), atol=1e-9, rtol=0.0):
+    try:
+        int_quat = as_int_vector(quat, 4, "quat")
+    except CrystallographyValueError:
+        quat_array = _validated_float_quaternion(quat)
+        norm = float(np.linalg.norm(quat_array))
+        if norm == 0.0:
             raise CrystallographyValueError(
-                f"Quaternion components must be integer-valued; got {quat_array}. "
+                "Quaternion must be non-zero."
+            )
+        if not np.isclose(norm, 1.0, atol=1.0e-12, rtol=0.0):
+            raise CrystallographyValueError(
                 "Non-unit quaternions must be exact integer quaternions."
             )
-        int_q = np.round(quat_array).astype(int)
-        quat_array = int_q.astype(float) / np.sqrt(float(np.dot(int_q, int_q)))
+        quat_array = quat_array / norm
+    else:
+        quat_array = _unit_integer_quaternion(int_quat)
 
-    scalar_last = quat_array[[1, 2, 3, 0]]
-    return Rotation.from_quat(scalar_last).as_matrix()
+    return Rotation.from_quat(quat_array[[1, 2, 3, 0]]).as_matrix()
 
 
 __all__ = [

@@ -16,14 +16,13 @@ import math
 import numpy as np
 from numpy.typing import ArrayLike
 
-from GBOpt.Utils.integer_linalg import cross_int3, dot_int
 from GBOpt.Utils.integer_normal_forms import (
     ExactNormalFormError,
     primitive_integer_null_basis_3d,
 )
 
 from ._guards import _require_cubic
-from .integer import as_int_array, as_int_vector, row_gcd_reduce
+from .integer import as_int_array, as_int_vector, cross_int3, dot_int, row_gcd_reduce
 from .rotation import scaled_row_image
 from .types import (
     CrystallographyDivisibilityError,
@@ -160,6 +159,7 @@ def inplane_basis_from_csl(
     :raises CrystallographyValueError: If projected null-basis construction fails, the
         constructed in-plane CSL vectors are linearly dependent, or the constructed
         basis is not in the plane.
+    :raises CrystallographyNotImplementedError: If ``lattice_metric`` is not ``None``.
     """
     _require_cubic(lattice_metric)
     int_basis = as_int_array(csl_basis, (3, 3), "csl_basis")
@@ -206,6 +206,8 @@ def rotation_preserves_plane(
         Keyword argument, optional, defaults to ``False``.
     :return: ``True`` when the rotation maps the plane to itself, or to its opposite if
         ``allow_antiparallel`` is ``True``.
+    :raises CrystallographyValueError: If ``plane`` is not a valid nonzero integer
+        three-vector or if an exact rotation validation failure occurs.
     """
     plane_int = np.asarray(primitive_plane(plane), dtype=object)
 

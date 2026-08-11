@@ -16,9 +16,7 @@ from fractions import Fraction
 
 import numpy as np
 
-from GBOpt.Utils.integer_linalg import dot_int
-
-from .integer import as_int_array, integer_det3
+from .integer import as_int_array, dot_int, integer_det3
 from .types import CrystallographyValueError
 
 
@@ -157,6 +155,8 @@ def gauss_reduce_2d(v1: np.ndarray, v2: np.ndarray) -> tuple[np.ndarray, np.ndar
     :param v1: First integer-valued in-plane basis vector.
     :param v2: Second integer-valued in-plane basis vector.
     :return: Reduced basis ``(shorter, longer)``.
+    :raises CrystallographyValueError: If either input is not a one-dimensional exact
+        integer vector or the vector lengths differ.
     """
     q1 = np.zeros_like(v1, dtype=object)
     q2 = np.zeros_like(v2, dtype=object)

@@ -10,6 +10,7 @@ rank-deficient inputs rather than silently rounding.
 
 from __future__ import annotations
 
+import operator
 from collections.abc import Callable
 from typing import TypeVar
 
@@ -47,6 +48,8 @@ def as_int_array(array: ArrayLike, shape: tuple[int, ...], name: str) -> np.ndar
         or 2D tuple ``(m, n)``.
     :param name: Name used in error messages.
     :return: Object-dtype ndarray of Python integers.
+    :raises CrystallographyValueError: If ``array`` has the wrong shape or contains an
+        entry that is not exactly integer-valued.
     """
     return _translate_exact_error(ilinalg.as_int_array, array, shape, name)
 
@@ -61,8 +64,41 @@ def as_int_vector(values: ArrayLike, length: int, name: str) -> tuple[int, ...]:
     :param length: Expected number of elements.
     :param name: Name used in error messages.
     :return: Tuple of Python ints.
+    :raises CrystallographyValueError: If ``values`` has the wrong length or contains an
+        entry that is not exactly integer-valued.
     """
     return _translate_exact_error(ilinalg.as_int_vector, values, length, name)
+
+
+def as_positive_int(value: object, name: str) -> int:
+    """Return a positive Python integer from an integer scalar.
+
+    Boolean values are rejected even though ``bool`` is a subclass of ``int``.
+
+    :param value: Candidate Python or NumPy integer scalar.
+    :param name: Parameter name used in validation error messages.
+    :return: Validated value converted to a Python ``int``.
+    :raises CrystallographyValueError: If ``value`` is not an integer scalar or is
+        less than or equal to zero.
+    """
+    if isinstance(value, (bool, np.bool_)):
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        )
+
+    try:
+        result = operator.index(value)  # type: ignore[ty:invalid-argument-type]
+    except TypeError as exc:
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        ) from exc
+
+    if result <= 0:
+        raise CrystallographyValueError(
+            f"{name} must be a positive integer; got {value!r}."
+        )
+
+    return int(result)
 
 
 def row_gcd_reduce(row: np.ndarray) -> np.ndarray:
@@ -71,6 +107,8 @@ def row_gcd_reduce(row: np.ndarray) -> np.ndarray:
     :param row: One-dimensional integer-valued row.
     :return: GCD-reduced row as object-dtype array of Python integers. An all-zero row
         is returned unchanged.
+    :raises CrystallographyValueError: If ``row`` is malformed or contains a value that
+        is not exactly integer-valued.
     """
     return _translate_exact_error(ilinalg.row_gcd_reduce, row)
 
@@ -81,6 +119,8 @@ def dot_int(x: ArrayLike, y: ArrayLike) -> int:
     :param x: First array-like vector.
     :param y: Second array-like vector.
     :return: Exact Python-int dot product.
+    :raises CrystallographyValueError: If either operand is malformed, contains a
+        non-integer value, or the operands have unequal lengths.
     """
     return _translate_exact_error(ilinalg.dot_int, x, y)
 
@@ -91,6 +131,8 @@ def cross_int3(x: ArrayLike, y: ArrayLike) -> np.ndarray:
     :param x: First length-3 array-like vector.
     :param y: Second length-3 array-like vector.
     :return: Length-3 object-dtype cross product.
+    :raises CrystallographyValueError: If either operand is not an exact integer vector
+        of length three.
     """
     return _translate_exact_error(ilinalg.cross_int3, x, y)
 
@@ -100,6 +142,8 @@ def integer_det3(matrix: ArrayLike) -> int:
 
     :param matrix: 3 by 3 integer-valued matrix.
     :return: Exact Python-int determinant.
+    :raises CrystallographyValueError: If ``matrix`` is not an exact integer matrix with
+        shape ``(3, 3)``.
     """
     return _translate_exact_error(ilinalg.det3_int, matrix)
 
@@ -109,6 +153,8 @@ def integer_adj3(matrix: ArrayLike) -> list[list[int]]:
 
     :param matrix: 3 by 3 integer-valued matrix.
     :return: 3 by 3 list-of-lists representing ``adj(matrix)``.
+    :raises CrystallographyValueError: If ``matrix`` is not an exact integer matrix with
+        shape ``(3, 3)``.
     """
     return _translate_exact_error(ilinalg.adjugate3_int, matrix)
 
@@ -116,6 +162,7 @@ def integer_adj3(matrix: ArrayLike) -> list[list[int]]:
 __all__ = [
     "as_int_array",
     "as_int_vector",
+    "as_positive_int",
     "row_gcd_reduce",
     "dot_int",
     "cross_int3",

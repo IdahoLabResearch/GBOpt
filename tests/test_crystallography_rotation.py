@@ -4,6 +4,7 @@ import pytest
 
 from GBOpt.crystallography.quaternion import quaternion_to_scaled_rotation
 from GBOpt.crystallography.rotation import (
+    _minimal_integral_row_pair,
     assert_scaled_rotation,
     scaled_row_image,
     transpose_rotation_convention,
@@ -29,6 +30,71 @@ SIGMA5_QUAT = (2, 0, 0, 1)
 @pytest.fixture
 def sigma5_rotation():
     return quaternion_to_scaled_rotation(SIGMA5_QUAT)
+
+
+# --------------------------------------------------------------------------------------
+# _minimal_integral_row_pair
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("direction", "expected_reference", "expected_image"),
+    [
+        pytest.param(
+            [1, 0, 0],
+            [5, 0, 0],
+            [3, -4, 0],
+            id="requires-denominator-scaling",
+        ),
+        pytest.param(
+            [2, 0, 0],
+            [5, 0, 0],
+            [3, -4, 0],
+            id="reduces-input-before-scaling",
+        ),
+        pytest.param(
+            [0, 0, 7],
+            [0, 0, 1],
+            [0, 0, 1],
+            id="already-integral-image",
+        ),
+        pytest.param(
+            [1, 1, 0],
+            [5, 5, 0],
+            [7, -1, 0],
+            id="mixed-components",
+        ),
+    ],
+)
+def test_minimal_integral_row_pair_returns_expected_exact_pair(
+    sigma5_rotation,
+    direction,
+    expected_reference,
+    expected_image,
+):
+    reference_row, image_row = _minimal_integral_row_pair(
+        np.array(direction, dtype=object),
+        sigma5_rotation,
+    )
+
+    np.testing.assert_array_equal(reference_row, expected_reference)
+    np.testing.assert_array_equal(image_row, expected_image)
+    assert reference_row.dtype == object
+    assert image_row.dtype == object
+
+
+def test_minimal_integral_row_pair_satisfies_exact_rotation_contract(
+    sigma5_rotation,
+):
+    reference_row, image_row = _minimal_integral_row_pair(
+        np.array([1, 1, 0], dtype=object),
+        sigma5_rotation,
+    )
+
+    np.testing.assert_array_equal(
+        reference_row @ np.asarray(sigma5_rotation.matrix, dtype=object),
+        sigma5_rotation.denominator * image_row,
+    )
 
 
 # --------------------------------------------------------------------------------------
