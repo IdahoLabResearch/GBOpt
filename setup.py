@@ -12,9 +12,11 @@ setup(
         "numba",
         "pandas",
         "matplotlib",
-        "pytest",
-        "spglib"
+        "spglib",
     ],
+    extras_require={
+        "test": ["pytest"]
+    },
     author="Chaitanya Bhave and Jarin French",
     author_email="chaitanya.bhave@inl.gov and jarin.french@inl.gov",
     description="A package for grain boundary optimization",

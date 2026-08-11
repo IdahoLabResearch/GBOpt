@@ -27,3 +27,45 @@ preferred-citation:
   month: 9
   volume: 35
   start: 102763
+references:
+  - type: article
+    title: "Survey of computed grain boundary properties in face-centered cubic metals: I. Grain boundary energy"
+    authors:
+      - family-names: Olmsted
+        given-names: David L.
+      - family-names: Foiles
+        given-names: Stephen M.
+      - family-names: Holm
+        given-names: Elizabeth A.
+    doi: 10.1016/j.actamat.2009.04.007
+    journal: Acta Materialia
+    year: 2009
+    volume: 57
+    issue: 13
+    start: 3694
+    end: 3703
+    url: "https://www.sciencedirect.com/science/article/pii/S1359645409002274"
+    notes: "Supplementary data used in the GBOpt test suite."
+  - type: article
+    title: "A molecular dynamics survey of grain boundary energy in uranium dioxide and cerium dioxide"
+    authors:
+      - family-names: Zhang
+        given-names: Yongfeng
+      - family-names: Hansen
+        given-names: Evan D.
+      - family-names: Harbison
+        given-names: Tim
+      - family-names: Masengale
+        given-names: Sean
+      - family-names: French
+        given-names: Jarin
+      - family-names: Aagesen
+        given-names: Larry K.
+    doi: 10.1111/jace.18340
+    journal: "Journal of the American Ceramic Society"
+    year: 2022
+    volume: 105
+    start: 4471
+    end: 4486
+    url: "https://ceramics.onlinelibrary.wiley.com/doi/full/10.1111/jace.18340"
+    notes: "Supplementary data used in the GBOpt test suite."

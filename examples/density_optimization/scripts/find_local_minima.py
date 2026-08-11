@@ -107,7 +107,7 @@ lx, ly = lower_envelope_binned(all_n[mask], all_gbe[mask], n_bins=60)
 ly_smooth = uniform_filter1d(ly, size=5, mode="nearest")
 peak_idx, _ = find_peaks(-ly_smooth, prominence=args.prominence)
 
-# Refine to nearest raw minimum within ±3 bins
+# Refine to nearest raw minimum within +/- 3 bins
 refined = []
 for i in peak_idx:
     lo, hi = max(0, i - 3), min(len(ly), i + 4)

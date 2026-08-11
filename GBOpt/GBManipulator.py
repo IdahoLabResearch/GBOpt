@@ -1461,10 +1461,14 @@ class GBManipulator:
                     partial_probabilities = probabilities[available_neighbors]
                     partial_probabilities = partial_probabilities / \
                         np.sum(partial_probabilities)
-                    selected_indices = self.__rng.choice(
+                    selected_neighbor_offsets = self.__rng.choice(
                         list(range(len(available_neighbors))), ratio, replace=False,
                         p=partial_probabilities
                     )
+                    selected_indices = [
+                        available_neighbors[offset]
+                        for offset in selected_neighbor_offsets
+                    ]
                     atoms_to_add[atom_type].extend(selected_indices)
         else:
             atoms_to_add = {}

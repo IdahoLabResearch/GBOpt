@@ -313,9 +313,9 @@ def _symbolic(rad: float, tol: float = 1e-6) -> str:
     for k in range(2, 8):
         sq = float(np.sqrt(k))
         for n in range(1, 9):
-            pos_args.append((n / sq, f"{n}/√{k}" if n != 1 else f"1/√{k}"))
+            pos_args.append((n / sq, f"{n}/sqrt({k})" if n != 1 else f"1/sqrt({k})"))
         for d in range(1, 9):
-            pos_args.append((sq / d, f"√{k}/{d}" if d != 1 else f"√{k}"))
+            pos_args.append((sq / d, f"sqrt({k})/{d}" if d != 1 else f"sqrt({k})"))
 
     for arg, label in pos_args:
         v = float(np.arctan(arg))

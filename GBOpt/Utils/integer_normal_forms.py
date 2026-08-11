@@ -1,0 +1,446 @@
+# Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
+
+"""Exact integer normal-form routines for small CSL matrices.
+
+This module implements Smith normal form, column Hermite normal form, and saturated
+integer null-space basis construction for 3D lattice calculations. General exact integer
+linear-algebra utilities live in ``GBOpt.Utils.integer_linalg``.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TypeVar
+
+import numpy as np
+from numpy.typing import ArrayLike
+
+from GBOpt.Utils.integer_linalg import (
+    ExactIntegerError,
+    as_int_array,
+    cross_int3,
+    det3_int_checked,
+    dot_int,
+    extended_gcd,
+    identity_int,
+)
+
+_T = TypeVar("_T")
+
+
+class ExactNormalFormError(ExactIntegerError):
+    """Base exception for integer normal-form computation failures."""
+
+
+@dataclass(frozen=True)
+class SmithNormalForm:
+    """Smith normal-form decomposition ``U @ A @ V == D``.
+
+    A dataclass rather than a plain tuple so callers can use named fields ``U``, ``D``,
+    and ``V`` unambiguously.
+
+    :param U: Left unimodular transformation matrix.
+    :param D: Diagonal Smith normal-form matrix.
+    :param V: Right unimodular transformation matrix.
+    """
+
+    U: np.ndarray
+    D: np.ndarray
+    V: np.ndarray
+
+
+def _translate_integer_error(func, *args: object, **kwargs: object) -> _T:
+    """Call an exact integer helper and translate validation failures.
+
+    :param func: Callable from ``integer_linalg`` or another exact-integer helper.
+    :param args: Positional arguments forwarded to ``func``.
+    :param kwargs: Keyword arguments forwarded to ``func``.
+    :return: Result returned by ``func``.
+    :raises ExactNormalFormError: If ``func`` raises ``ExactIntegerError``.
+    """
+    try:
+        return func(*args, **kwargs)
+    except ExactIntegerError as exc:
+        raise ExactNormalFormError(str(exc)) from exc
+
+
+def _as_normal_form_matrix(
+    matrix: ArrayLike,
+    shape: tuple[int, ...],
+    name: str,
+) -> np.ndarray:
+    """Return a shape-checked integer array for normal-form routines.
+
+    :param matrix: Array-like input to validate.
+    :param shape: Required shape.
+    :param name: Name used in error messages.
+    :return: Object-dtype ndarray containing Python integers.
+    """
+    return _translate_integer_error(as_int_array, matrix, shape, name)
+
+
+def _identity(n: int) -> np.ndarray:
+    """Return an ``n`` by ``n`` identity matrix with Python-int entries.
+
+    :param n: Matrix dimension.
+    :return: Object-dtype identity matrix.
+    """
+    return _translate_integer_error(identity_int, n)
+
+
+def _elimination_transform(a: int, b: int) -> tuple[int, int, int, int]:
+    """Return coefficients that combine a pivot vector with one to eliminate.
+
+    The returned coefficients map ``primary`` and ``secondary`` to ``primary_coeff *
+    primary + secondary_coeff * secondary`` and ``elim_primary_coeff * primary +
+    elim_secondary_coeff * secondary``. For active entries ``a`` and ``b``, the
+    transformed secondary entry is zero and the primary entry becomes ``gcd(a, b)``.
+
+    :param a: Pivot-row or pivot-column entry at the active coordinate.
+    :param b: Entry to be eliminated at the active coordinate.
+    :return: Integer combination coefficients ``(primary_coeff, secondary_coeff,
+        elim_primary_coeff, elim_secondary_coeff)``.
+    :raises ExactNormalFormError: If ``a`` is zero, or if exact extended-GCD arithmetic
+        fails.
+    """
+    if a == 0:
+        raise ExactNormalFormError("Cannot eliminate with a zero pivot.")
+    if b % a == 0:
+        return 1, 0, -(b // a), 1
+
+    try:
+        gcd_value, primary_coeff, secondary_coeff = extended_gcd(a, b)
+    except ExactIntegerError as exc:
+        raise ExactNormalFormError(str(exc)) from exc
+
+    return (
+        primary_coeff,
+        secondary_coeff,
+        -b // gcd_value,
+        a // gcd_value,
+    )
+
+
+def _select_pivot(A: np.ndarray, start: int) -> tuple[int, int] | None:
+    """Return the smallest nonzero pivot position in ``A[start:, start:]``.
+
+    This helper is specialized for 3 by 3 matrices.
+
+    :param A: 3 by 3 integer matrix being reduced.
+    :param start: First row and column index still under consideration.
+    :return: ``(row, col)`` of the smallest-magnitude nonzero entry in the active
+        submatrix, or ``None`` if the active submatrix is zero.
+    """
+    best: tuple[int, int, int] | None = None
+    for i in range(start, 3):
+        for j in range(start, 3):
+            if A[i, j] != 0:
+                value = abs(int(A[i, j]))
+                if best is None or value < best[0]:
+                    best = (value, i, j)
+
+    if best is None:
+        return None
+    return best[1], best[2]
+
+
+def primitive_integer_null_basis_3d(covector: ArrayLike) -> np.ndarray:
+    """Return primitive integer columns spanning ``covector @ x == 0``.
+
+    The returned 3 by 2 matrix has columns ``e1`` and ``e2``. They are generated by
+    unimodular column operations, so they span the full integer null lattice rather than
+    a sublattice. The orientation is chosen so ``cross(e1, e2)`` points along the
+    primitive covector direction.
+
+    :param covector: Nonzero length-3 integer covector.
+    :return: 3 by 2 object-dtype matrix whose columns form a primitive integer null
+        basis.
+    :raises ExactNormalFormError: If ``covector`` is the zero vector, or if exact
+        arithmetic used during null-basis construction fails.
+    """
+    vec = _as_normal_form_matrix(covector, (3,), "covector")
+    if not any(int(value) for value in vec):
+        raise ExactNormalFormError("covector must not be the zero vector.")
+
+    reduced = vec.copy()
+    transform = _identity(3)
+
+    for i in range(2):
+        nonzero = next((j for j in range(i, 3) if reduced[j] != 0), None)
+        if nonzero is None:
+            break
+
+        if nonzero != i:
+            reduced[[i, nonzero]] = reduced[[nonzero, i]]
+            transform[:, [i, nonzero]] = transform[:, [nonzero, i]]
+
+        for j in range(i + 1, 3):
+            if reduced[j] == 0:
+                continue
+
+            try:
+                gcd_value, a, b = extended_gcd(int(reduced[i]), int(reduced[j]))
+            except ExactIntegerError as exc:
+                raise ExactNormalFormError(str(exc)) from exc
+
+            c = int(reduced[i]) // gcd_value
+            d = int(reduced[j]) // gcd_value
+
+            old_i = transform[:, i].copy()
+            old_j = transform[:, j].copy()
+
+            transform[:, i] = a * old_i + b * old_j
+            transform[:, j] = -d * old_i + c * old_j
+
+            reduced[i] = gcd_value
+            reduced[j] = 0
+
+    basis = transform[:, 1:3].astype(object, copy=False)
+
+    try:
+        normal = cross_int3(basis[:, 0], basis[:, 1])
+        if dot_int(normal, vec) < 0:
+            basis[:, 1] = -basis[:, 1]
+    except ExactIntegerError as exc:
+        raise ExactNormalFormError(str(exc)) from exc
+
+    return basis
+
+
+def smith_normal_form_3x3(A: ArrayLike) -> SmithNormalForm:
+    """Return exact ``U``, ``D``, and ``V`` with ``U @ A @ V == D``.
+
+    The implementation tracks every Euclidean row and column operation with Python
+    integers. No fixed-width NumPy integer arithmetic is used.
+
+    :param A: 3 by 3 integer-valued matrix to decompose.
+    :return: ``SmithNormalForm(U, D, V)`` where ``D`` is diagonal and each nonzero
+        diagonal entry divides the next diagonal entry.
+    :raises ExactNormalFormError: If an internal Smith-normal-form postcondition check
+        fails.
+    """
+    original = _as_normal_form_matrix(A, (3, 3), "A")
+    D = original.copy()
+    U = _identity(3)
+    V = _identity(3)
+
+    def swap_rows(i: int, j: int) -> None:
+        """Swap active rows in ``D`` and the matching rows in ``U``.
+
+        :param i: First row index to swap.
+        :param j: Second row index to swap.
+        """
+        if i == j:
+            return
+        D[[i, j], :] = D[[j, i], :]
+        U[[i, j], :] = U[[j, i], :]
+
+    def swap_cols(i: int, j: int) -> None:
+        """Swap active columns in ``D`` and the matching columns in ``V``.
+
+        :param i: First column index to swap.
+        :param j: Second column index to swap.
+        """
+        if i == j:
+            return
+        D[:, [i, j]] = D[:, [j, i]]
+        V[:, [i, j]] = V[:, [j, i]]
+
+    for k in range(3):
+        pivot = _select_pivot(D, k)
+        if pivot is None:
+            break
+
+        swap_rows(k, pivot[0])
+        swap_cols(k, pivot[1])
+
+        while True:
+            changed = True
+            while changed:
+                changed = False
+
+                for i in range(3):
+                    if i == k or D[i, k] == 0:
+                        continue
+
+                    (
+                        primary_coeff,
+                        secondary_coeff,
+                        elim_primary_coeff,
+                        elim_secondary_coeff,
+                    ) = _elimination_transform(int(D[k, k]), int(D[i, k]))
+
+                    row_k = D[k, :].copy()
+                    row_i = D[i, :].copy()
+                    u_k = U[k, :].copy()
+                    u_i = U[i, :].copy()
+
+                    D[k, :] = primary_coeff * row_k + secondary_coeff * row_i
+                    D[i, :] = elim_primary_coeff * row_k + elim_secondary_coeff * row_i
+                    U[k, :] = primary_coeff * u_k + secondary_coeff * u_i
+                    U[i, :] = elim_primary_coeff * u_k + elim_secondary_coeff * u_i
+
+                    changed = True
+
+                for j in range(3):
+                    if j == k or D[k, j] == 0:
+                        continue
+
+                    (
+                        primary_coeff,
+                        secondary_coeff,
+                        elim_primary_coeff,
+                        elim_secondary_coeff,
+                    ) = _elimination_transform(int(D[k, k]), int(D[k, j]))
+
+                    col_k = D[:, k].copy()
+                    col_j = D[:, j].copy()
+                    v_k = V[:, k].copy()
+                    v_j = V[:, j].copy()
+
+                    D[:, k] = primary_coeff * col_k + secondary_coeff * col_j
+                    D[:, j] = elim_primary_coeff * col_k + elim_secondary_coeff * col_j
+                    V[:, k] = primary_coeff * v_k + secondary_coeff * v_j
+                    V[:, j] = elim_primary_coeff * v_k + elim_secondary_coeff * v_j
+
+                    changed = True
+
+            if D[k, k] < 0:
+                D[k, :] = -D[k, :]
+                U[k, :] = -U[k, :]
+
+            divisor = int(D[k, k])
+            nondivisible: tuple[int, int] | None = None
+
+            if divisor != 0:
+                for i in range(k + 1, 3):
+                    for j in range(k + 1, 3):
+                        if int(D[i, j]) % divisor != 0:
+                            nondivisible = (i, j)
+                            break
+                    if nondivisible is not None:
+                        break
+
+            if nondivisible is None:
+                break
+
+            j = nondivisible[1]
+            D[:, k] = D[:, k] + D[:, j]
+            V[:, k] = V[:, k] + V[:, j]
+
+    for i in range(3):
+        if D[i, i] < 0:
+            D[i, :] = -D[i, :]
+            U[i, :] = -U[i, :]
+
+    if not np.array_equal(U @ original @ V, D):
+        raise ExactNormalFormError("Internal SNF check failed: U @ A @ V != D.")
+
+    for i in range(3):
+        for j in range(3):
+            if i != j and D[i, j] != 0:
+                raise ExactNormalFormError(
+                    "Internal SNF check failed: D is not diagonal."
+                )
+
+    diagonal = [abs(int(D[i, i])) for i in range(3)]
+    for i in range(2):
+        if diagonal[i] != 0 and diagonal[i + 1] % diagonal[i] != 0:
+            raise ExactNormalFormError(
+                f"Internal SNF check failed: {diagonal[i]} does not divide "
+                f"{diagonal[i + 1]}."
+            )
+
+    return SmithNormalForm(U=U, D=D, V=V)
+
+
+def column_hnf_3x3(A: ArrayLike) -> np.ndarray:
+    """Return canonical lower column-HNF for a full-rank 3 by 3 lattice.
+
+    The result ``H`` is lower triangular with positive diagonal and satisfies ``0 <=
+    H[j, i] < H[j, j]`` for every entry below the diagonal.
+
+    :param A: Full-rank 3 by 3 integer matrix.
+    :return: Lower column-HNF matrix with Python-integer entries.
+    :raises ExactNormalFormError: If ``A`` is not full-rank, no pivot exists where
+        required, or a column-HNF postcondition check fails.
+    """
+    H = _as_normal_form_matrix(A, (3, 3), "A")
+    if det3_int_checked(H) == 0:
+        raise ExactNormalFormError("column_hnf_3x3 requires a full-rank matrix.")
+
+    # Triangularize: for each diagonal position i, eliminate H[i, j] for j > i.
+    for i in range(3):
+        nonzero = next((j for j in range(i, 3) if H[i, j] != 0), None)
+        if nonzero is None:
+            raise ExactNormalFormError("column_hnf_3x3 requires a full-rank matrix.")
+
+        if nonzero != i:
+            H[:, [i, nonzero]] = H[:, [nonzero, i]]
+
+        while True:
+            changed = False
+
+            for j in range(i + 1, 3):
+                if H[i, j] == 0:
+                    continue
+
+                (
+                    primary_coeff,
+                    secondary_coeff,
+                    elim_primary_coeff,
+                    elim_secondary_coeff,
+                ) = _elimination_transform(int(H[i, i]), int(H[i, j]))
+
+                col_i = H[:, i].copy()
+                col_j = H[:, j].copy()
+
+                H[:, i] = primary_coeff * col_i + secondary_coeff * col_j
+                H[:, j] = elim_primary_coeff * col_i + elim_secondary_coeff * col_j
+
+                changed = True
+
+            if not changed:
+                break
+
+        if H[i, i] < 0:
+            H[:, i] = -H[:, i]
+
+    # Reduce below-diagonal entries to canonical range [0, H[j, j]).
+    # Ascending j order is required so earlier reductions are not disturbed.
+    for i in range(3):
+        for j in range(i + 1, 3):
+            diagonal = int(H[j, j])
+            quotient = int(H[j, i]) // diagonal
+            H[:, i] = H[:, i] - quotient * H[:, j]
+
+    for j in range(3):
+        if H[j, j] <= 0:
+            raise ExactNormalFormError(
+                f"column_hnf_3x3 postcondition: diagonal H[{j},{j}]={H[j, j]} <= 0."
+            )
+
+        for i in range(j):
+            if H[j, i] < 0 or H[j, i] >= H[j, j]:
+                raise ExactNormalFormError(
+                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j, i]} "
+                    f"not in [0, {H[j, j]})."
+                )
+
+        for i in range(j + 1, 3):
+            if H[j, i] != 0:
+                raise ExactNormalFormError(
+                    f"column_hnf_3x3 postcondition: H[{j},{i}]={H[j, i]} != 0 "
+                    "(upper-triangle entry non-zero)."
+                )
+
+    return H
+
+
+__all__ = [
+    "ExactNormalFormError",
+    "SmithNormalForm",
+    "primitive_integer_null_basis_3d",
+    "smith_normal_form_3x3",
+    "column_hnf_3x3",
+]

@@ -22,7 +22,7 @@ designed to be used in one of two ways:
 | Directory | Description |
 |-----------|-------------|
 | [`gb_optimization/`](gb_optimization/) | GA and MC optimization of grain boundary energy across six boundaries and three materials (Fe, Ni, Si) |
-| [`density_optimization/`](density_optimization/) | GA optimization of GB core atom density for the Σ5[001]{310} boundary in Fe and Ni |
+| [`density_optimization/`](density_optimization/) | GA optimization of GB core atom density for the $\Sigma 5$[001]{310} boundary in Fe and Ni |
 
 ## Dependencies
 
@@ -43,7 +43,7 @@ pip install cmcrameri
 
 If `cmcrameri` is not available the scripts will fall back to matplotlib
 default colormaps. TOML config files are read with the standard library
-`tomllib` module (Python ≥ 3.11) or the
+`tomllib` module (Python $\geq$ 3.11) or the
 [tomli](https://github.com/hukkin/tomli) backport for earlier versions:
 
 ```bash

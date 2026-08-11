@@ -120,7 +120,7 @@ def _unwrap_candidate(cand) -> np.ndarray:
 def _count_gb_core_atoms(
     atom_positions: np.ndarray, box_dims: np.ndarray, gb_thickness: float
 ) -> int:
-    """Count atoms within the GB core slab (±gb_thickness/2 of the box x-centre)."""
+    """Count atoms within the GB core slab (+/- gb_thickness/2 of the box x-center)."""
     x_center = box_dims[0, 1] / 2
     half_t = gb_thickness / 2
     return int(np.sum(
