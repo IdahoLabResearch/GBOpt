@@ -20,181 +20,11 @@ from GBOpt.GBMinimizer import (
     GeneticAlgorithmMinimizer,
     Mutator,
 )
-
-
-class TestGeneticAlgorithmMinimizer(unittest.TestCase):
-
-    def setUp(self):
-        self.gb = GBMaker.from_boundary_spec(
-            3.52,
-            "fcc",
-            "Ni",
-            CSLExactSpec(
-                axis=(0, 0, 1),
-                plane=(3, 1, 0),
-                quat=(3, 0, 0, 1),
-                sigma=5,
-            ),
-            mode="exact",
-            gb_thickness=10.0,
-            repeat_factor=2,
-            x_dim_min=10.0,
-            vacuum=8.0,
-            interaction_distance=3.0,
-        )
-        self.tmpdir = tempfile.TemporaryDirectory()
-
-    def tearDown(self):
-        self.tmpdir.cleanup()
-
-    def test_run_ga_returns_best_energy_and_dump(self):
-        def fake_energy_func(GB, manipulator, atom_positions, unique_id):
-            dump_file = Path(self.tmpdir.name) / f"{unique_id}.data"
-            GB.write_lammps(
-                str(dump_file),
-                atom_positions,
-                manipulator.parents[0].box_dims,
-            )
-            energy = float(np.mean(atom_positions["x"]))
-            return energy, str(dump_file)
-
-        minimizer = GeneticAlgorithmMinimizer(
-            self.gb,
-            fake_energy_func,
-            ["insert_atoms", "remove_atoms", "translate_right_grain"],
-            seed=0,
-            population_size=4,
-            generations=2,
-            keep_top_pct=25,
-            intermediate_pct=75,
-        )
-        cp = Path(self.tmpdir.name) / "ga1.json"
-        best_energy, best_dump = minimizer.run_GA(
-            unique_id=1, checkpoint_file=cp)
-
-        self.assertIsInstance(best_energy, float)
-        self.assertTrue(Path(best_dump).exists())
-        self.assertEqual(len(minimizer.GBE_vals), minimizer.generations + 1)
-
-    def test_history_populated_after_run(self):
-        def fake_energy_func(GB, manipulator, atom_positions, unique_id):
-            dump_file = Path(self.tmpdir.name) / f"{unique_id}.data"
-            GB.write_lammps(
-                str(dump_file),
-                atom_positions,
-                manipulator.parents[0].box_dims,
-            )
-            return float(np.mean(atom_positions["x"])), str(dump_file)
-
-        minimizer = GeneticAlgorithmMinimizer(
-            self.gb,
-            fake_energy_func,
-            ["insert_atoms", "remove_atoms", "translate_right_grain"],
-            seed=0,
-            population_size=4,
-            generations=2,
-            keep_top_pct=25,
-            intermediate_pct=75,
-        )
-        cp = Path(self.tmpdir.name) / "ga2.json"
-        minimizer.run_GA(unique_id=2, checkpoint_file=cp)
-
-        # One entry per generation
-        self.assertEqual(len(minimizer.history), minimizer.generations)
-
-        for gen_idx, gen_history in enumerate(minimizer.history):
-            # Each generation records population_size (lineage, energy) pairs
-            self.assertEqual(len(gen_history), minimizer.population_size)
-
-            for lineage, energy in gen_history:
-                # Lineage is a non-empty list of strings
-                self.assertIsInstance(lineage, list)
-                self.assertGreater(len(lineage), 0)
-                self.assertIsInstance(lineage[0], str)
-                # First element is a known operation label
-                op = lineage[0]
-                self.assertTrue(
-                    op in {"slice_and_merge", "carryover", "START"}
-                    or op.startswith("shift") or op.startswith("add")
-                    or op.startswith("remove"),
-                    f"Unexpected operation label: {op!r}",
-                )
-
-            # Energies in history match the corresponding GBE_vals entry
-            # (GBE_vals[0] is the initial eval, so gen 0 -> GBE_vals[1])
-            self.assertEqual(
-                [e for _, e in gen_history],
-                minimizer.GBE_vals[gen_idx + 1],
-            )
-
-    def test_failed_generation_appends_to_history(self):
-        def fake_energy_func(GB, manipulator, atom_positions, unique_id):
-            # Force all generation-0 candidates to fail
-            if "_g0_c" in str(unique_id):
-                raise RuntimeError("Simulated failure")
-            dump_file = Path(self.tmpdir.name) / f"{unique_id}.data"
-            GB.write_lammps(
-                str(dump_file),
-                atom_positions,
-                manipulator.parents[0].box_dims,
-            )
-            return float(np.mean(atom_positions["x"])), str(dump_file)
-
-        minimizer = GeneticAlgorithmMinimizer(
-            self.gb,
-            fake_energy_func,
-            ["insert_atoms", "remove_atoms", "translate_right_grain"],
-            seed=0,
-            population_size=4,
-            generations=2,
-            keep_top_pct=25,
-            intermediate_pct=75,
-        )
-        cp = Path(self.tmpdir.name) / "ga3.json"
-        minimizer.run_GA(unique_id=3, checkpoint_file=cp)
-
-        # history still has one entry per generation despite the failure
-        self.assertEqual(len(minimizer.history), minimizer.generations)
-
-        # Generation 0 failed entirely — all energies should be PENALTY
-        PENALTY = 1.0e30
-        failed_gen = minimizer.history[0]
-        self.assertEqual(len(failed_gen), minimizer.population_size)
-        for lineage, energy in failed_gen:
-            self.assertEqual(energy, PENALTY)
-
-        # Generation 1 recovered and has real energies
-        recovered_gen = minimizer.history[1]
-        self.assertEqual(len(recovered_gen), minimizer.population_size)
-        for _, energy in recovered_gen:
-            self.assertLess(energy, PENALTY)
-
-    def test_ga_history_never_exceeds_generations(self):
-        def fake_energy_func(GB, manipulator, atom_positions, unique_id):
-            dump_file = Path(self.tmpdir.name) / f"{unique_id}.data"
-            GB.write_lammps(
-                str(dump_file),
-                atom_positions,
-                manipulator.parents[0].box_dims,
-            )
-            return float(np.mean(atom_positions["x"])), str(dump_file)
-
-        minimizer = GeneticAlgorithmMinimizer(
-            self.gb,
-            fake_energy_func,
-            ["insert_atoms", "remove_atoms", "translate_right_grain"],
-            seed=0,
-            population_size=4,
-            generations=2,
-            keep_top_pct=25,
-            intermediate_pct=75,
-        )
-        cp = Path(self.tmpdir.name) / "ga_never_exceed.json"
-        minimizer.run_GA(unique_id=2, checkpoint_file=cp)
-        self.assertEqual(len(minimizer.history), minimizer.generations)
-
-        minimizer.run_GA(unique_id=2, checkpoint_file=cp)
-        self.assertEqual(len(minimizer.history), minimizer.generations)
+from GBOpt.GrainOwnership import (
+    LEFT_GRAIN_LABEL,
+    RIGHT_GRAIN_LABEL,
+    GrainOwnership,
+)
 
 
 class TestGeneticAlgorithmMinimizerCheckpointing(unittest.TestCase):
@@ -749,15 +579,29 @@ class TestGAIntraGenerationCheckpointing(unittest.TestCase):
             m2.run_GA(unique_id=35, checkpoint_file=cp)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
-def _owned_ga_fixture(tmp_path):
-    labels_module = __import__(
-        "GBOpt.FileGrainOwnership",
-        fromlist=["GrainOwnership", "LEFT_GRAIN_LABEL", "RIGHT_GRAIN_LABEL"],
+@pytest.fixture
+def ga_gb():
+    return GBMaker.from_boundary_spec(
+        3.52,
+        "fcc",
+        "Ni",
+        CSLExactSpec(
+            axis=(0, 0, 1),
+            plane=(3, 1, 0),
+            quat=(3, 0, 0, 1),
+            sigma=5,
+        ),
+        mode="exact",
+        gb_thickness=10.0,
+        repeat_factor=2,
+        x_dim_min=10.0,
+        vacuum=8.0,
+        interaction_distance=3.0,
     )
+
+
+@pytest.fixture
+def owned_ga(tmp_path):
     gb = GBMaker.from_boundary_spec(
         3.52,
         "fcc",
@@ -856,7 +700,11 @@ def test_run_ga_returns_best_energy_and_dump(ga_gb, tmp_path):
         intermediate_pct=75,
     )
 
-    best_energy, best_dump = minimizer.run_GA(unique_id=1)
+    checkpoint = tmp_path / "ga1.json"
+    best_energy, best_dump = minimizer.run_GA(
+        unique_id=1,
+        checkpoint_file=checkpoint,
+    )
 
     assert isinstance(best_energy, float)
     assert Path(best_dump).is_file()
@@ -883,7 +731,8 @@ def test_history_populated_after_run(ga_gb, tmp_path):
         keep_top_pct=25,
         intermediate_pct=75,
     )
-    minimizer.run_GA(unique_id=2)
+    checkpoint = tmp_path / "ga2.json"
+    minimizer.run_GA(unique_id=2, checkpoint_file=checkpoint)
 
     assert len(minimizer.history) == minimizer.generations
 
@@ -933,7 +782,8 @@ def test_failed_generation_appends_to_history(ga_gb, tmp_path):
         keep_top_pct=25,
         intermediate_pct=75,
     )
-    minimizer.run_GA(unique_id=3)
+    checkpoint = tmp_path / "ga3.json"
+    minimizer.run_GA(unique_id=3, checkpoint_file=checkpoint)
 
     assert len(minimizer.history) == minimizer.generations
 
@@ -967,10 +817,11 @@ def test_ga_history_never_exceeds_generations(ga_gb, tmp_path):
         keep_top_pct=25,
         intermediate_pct=75,
     )
-    minimizer.run_GA(unique_id=2)
+    checkpoint = tmp_path / "ga_never_exceed.json"
+    minimizer.run_GA(unique_id=2, checkpoint_file=checkpoint)
     assert len(minimizer.history) == minimizer.generations
 
-    minimizer.run_GA(unique_id=2)
+    minimizer.run_GA(unique_id=2, checkpoint_file=checkpoint)
     assert len(minimizer.history) == minimizer.generations
 
 
@@ -1265,7 +1116,9 @@ def test_failed_owned_candidate_is_not_selected_as_parent(owned_ga, tmp_path):
         )
         return 5.0, str(output)
 
-    def batch_energy(GB, manipulators, structures, lineages, unique_ids):
+    def batch_energy(
+        GB, manipulators, structures, lineages, unique_ids, checkpoint=None
+    ):
         nonlocal batch_index
         results = []
         paths = []
@@ -1308,6 +1161,44 @@ def test_failed_owned_candidate_is_not_selected_as_parent(owned_ga, tmp_path):
     assert all(valid_path in lineage for lineage in second_generation_lineages)
 
 
+def test_owned_scalar_evaluator_species_swap_is_failed(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+    evaluation_index = 0
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        nonlocal evaluation_index
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+            change_species_row=0 if evaluation_index == 1 else None,
+        )
+        evaluation_index += 1
+        return 0.0, str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        ["translate_right_grain"],
+        seed=3,
+        initial_structure=str(seed_path),
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+        keep_top_pct=100,
+        intermediate_pct=100,
+    )
+    minimizer.run_GA(unique_id=8)
+
+    failed, valid = minimizer.last_generation_evaluations
+    assert not failed.success
+    assert failed.energy == pytest.approx(1.0e30)
+    assert failed.manipulator is None
+    assert "changed species" in failed.failure_reason
+    assert valid.success
+
+
 def test_owned_batch_evaluator_keeps_failure_alignment(owned_ga, tmp_path):
     gb, seed_path, ownership, _labels = owned_ga
 
@@ -1320,7 +1211,9 @@ def test_owned_batch_evaluator_keeps_failure_alignment(owned_ga, tmp_path):
         )
         return 5.0, str(output)
 
-    def batch_energy(GB, manipulators, structures, lineages, unique_ids):
+    def batch_energy(
+        GB, manipulators, structures, lineages, unique_ids, checkpoint=None
+    ):
         results = []
         for index, (manipulator, atoms, candidate_id) in enumerate(
             zip(manipulators, structures, unique_ids, strict=True)
@@ -1405,3 +1298,7 @@ def test_owned_ga_carryover_and_crossover_preserve_ownership(owned_ga, tmp_path)
         assert parent.gb_plane_x == pytest.approx(gb.gb_plane_x)
         assert parent.inplane_periodic == ownership.inplane_periodic
         assert parent.normal_topology is ownership.normal_topology
+
+
+if __name__ == "__main__":
+    unittest.main()

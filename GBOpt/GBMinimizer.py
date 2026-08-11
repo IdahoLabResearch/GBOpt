@@ -1,10 +1,5 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-from GBOpt._explicit_ownership_evaluation import (
-    CandidateEvaluation,
-    ExplicitOwnershipEvaluator,
-)
-from GBOpt.FileGrainOwnership import GrainOwnership
 import copy as copy_module
 import inspect
 import math
@@ -20,6 +15,10 @@ from typing import Any
 import numpy as np
 
 from GBOpt import GBMaker, GBManipulator
+from GBOpt._explicit_ownership_evaluation import (
+    CandidateEvaluation,
+    ExplicitOwnershipEvaluator,
+)
 from GBOpt.Checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     ENERGY_PENALTY,
@@ -28,6 +27,7 @@ from GBOpt.Checkpoint import (
     CheckpointStore,
     _wrap_batch_func_with_checkpoint,
 )
+from GBOpt.FileGrainOwnership import GrainOwnership
 
 
 class GBMinimizerError(Exception):
@@ -928,13 +928,13 @@ class GeneticAlgorithmMinimizer:
             population_structures = []
             population_lineages = []
 
-        if self.initial_structure is not None:
-            seed_manip = self._make_manipulator_from_file(base_parent)
-            population_manipulators.append(seed_manip)
-            population_structures.append(
-                np.array(seed_manip.parents[0].whole_system, copy=True)
-            )
-            population_lineages.append(["START", base_parent])
+            if self.initial_structure is not None:
+                seed_manip = self._make_manipulator_from_file(base_parent)
+                population_manipulators.append(seed_manip)
+                population_structures.append(
+                    np.array(seed_manip.parents[0].whole_system, copy=True)
+                )
+                population_lineages.append(["START", base_parent])
 
             n_to_generate = self.population_size - len(population_manipulators)
             for _ in range(n_to_generate):
@@ -949,7 +949,6 @@ class GeneticAlgorithmMinimizer:
                 population_lineages.append([mutation, base_parent])
 
             population_checkpoint_paths = [lin[1] for lin in population_lineages]
-
             _start_gen = 0
 
         def _build_ga_state(gen):
@@ -1006,14 +1005,15 @@ class GeneticAlgorithmMinimizer:
             self.history.append(list(zip(population_lineages, gen_energies)))
 
             if not valid_old_idxs:
-                # If nothing valid survived evaluation, re-seed from best
+                # If nothing valid survived evaluation, re-seed from best.
                 next_manipulators = []
                 next_structures = []
                 next_lineages = []
 
                 for _ in range(self.population_size):
                     candidate_manip = self._make_manipulator_from_file(
-                        best_dump)
+                        best_dump
+                    )
                     mutation, candidate_struct = self.mutator.mutate(
                         local_random=self.local_random,
                         GB=self.GB,
@@ -1034,20 +1034,19 @@ class GeneticAlgorithmMinimizer:
                         best_energy = gbe
                         best_dump = dump_file_name
 
-                # Build compressed arrays of only valid candidates for selection and breeding
+                # Build compressed arrays of only valid candidates for selection and breeding.
                 valid_energies = [gen_energies[i] for i in valid_old_idxs]
                 valid_files = [gen_files[i] for i in valid_old_idxs]
 
-            # Selection
-            lowest_valid_idxs, inter_valid_idxs = self._select_indices_by_energy(
-                valid_energies
-            )
+                lowest_valid_idxs, inter_valid_idxs = self._select_indices_by_energy(
+                    valid_energies
+                )
 
-            # Carry over lowest energies
-            next_manipulators = []
-             next_structures = []
-              next_lineages = []
-               for j in lowest_valid_idxs:
+                # Carry over lowest energies.
+                next_manipulators = []
+                next_structures = []
+                next_lineages = []
+                for j in lowest_valid_idxs:
                     old_idx = valid_old_idxs[j]
                     manip = evaluated_manipulators[old_idx]
                     dump = gen_files[old_idx]
@@ -1058,7 +1057,6 @@ class GeneticAlgorithmMinimizer:
                     next_lineages.append(["carryover", dump])
 
                 valid_files_str = [f for f in valid_files if f is not None]
-
                 new_manips, new_structs, new_lineages = self._make_next_generation(
                     valid_files_str,
                     inter_valid_idxs,

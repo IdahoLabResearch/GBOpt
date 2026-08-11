@@ -923,6 +923,20 @@ class TestParentGBRegion(unittest.TestCase):
         self.assertTrue(np.all(xs > x_gb - half))
         self.assertTrue(np.all(xs < x_gb + half))
 
+    def test_gb_indices_include_terminal_interface_layers(self):
+        xs = self.parent.whole_system["x"][self.parent.gb_indices]
+        left_terminal_x = float(np.max(self.parent.left_grain["x"]))
+        right_terminal_x = float(np.min(self.parent.right_grain["x"]))
+
+        self.assertTrue(
+            np.any(np.isclose(xs, left_terminal_x)),
+            msg="GB region must retain the terminal left-grain interface layer",
+        )
+        self.assertTrue(
+            np.any(np.isclose(xs, right_terminal_x)),
+            msg="GB region must retain the terminal right-grain interface layer",
+        )
+
     def test_gb_plane_x_from_gbmaker_matches_source(self):
         self.assertAlmostEqual(self.parent._Parent__gb_plane_x,
                                self.gbm.gb_plane_x, places=10)
