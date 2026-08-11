@@ -172,7 +172,7 @@ def from_orientation_matrices(
     :param P: 3x3 orientation matrix for grain 1 (left grain).
     :param Q: 3x3 orientation matrix for grain 2 (right grain).
     :param boundary_normal: Optional override for the boundary normal. When
-        provided it must match ``P[0]`` within 1°; a warning is printed
+        provided it must match ``P[0]`` within 1 deg; a warning is printed
         otherwise.
     :return: 5-element array ``[alpha, beta, gamma, theta, phi]`` in radians.
     """
@@ -191,7 +191,7 @@ def from_orientation_matrices(
         if angle_err > 1.0:
             print(
                 f"WARNING: supplied --normal deviates from P[0] by "
-                f"{angle_err:.2f}° — using P[0] for inclination.",
+                f"{angle_err:.2f} deg — using P[0] for inclination.",
                 file=sys.stderr,
             )
 
@@ -256,14 +256,14 @@ def validate(
         mark = "✓" if matrix_err < 1e-10 and delta_deg < 1e-8 else "✗"
         checks.append(
             f"{mark} ZXZ reconstruction matches source rotation  "
-            f"(max matrix err = {matrix_err:.3e}, angle err = {delta_deg:.4f}°)"
+            f"(max matrix err = {matrix_err:.3e}, angle err = {delta_deg:.4f} deg)"
         )
 
     beta_deg = float(np.degrees(beta))
     if abs(beta_deg) < 1.0 or abs(abs(beta_deg) - 180.0) < 1.0:
         checks.append(
-            f"  WARNING: β = {beta_deg:.2f}° is near 0° or 180° "
-            f"(ZXZ gimbal lock — α and γ are not uniquely determined)"
+            f"  WARNING: beta = {beta_deg:.2f} deg is near 0 deg or 180 deg "
+            f"(ZXZ gimbal lock — alpha and gamma are not uniquely determined)"
         )
 
     if P_norm is not None and Q_norm is not None:
@@ -273,7 +273,7 @@ def validate(
         mark = "✓" if normal_angle < 1e-6 else "~"
         checks.append(
             f"{mark} GB boundary plane type: {gb_type}  "
-            f"(P[0] vs Q[0] angular diff = {normal_angle:.4f}°)"
+            f"(P[0] vs Q[0] angular diff = {normal_angle:.4f} deg)"
         )
 
         for name, mat in [("P", P_norm), ("Q", Q_norm)]:
@@ -293,7 +293,7 @@ def validate(
 
 def _symbolic(rad: float, tol: float = 1e-6) -> str:
     """Return a symbolic name for *rad* if it can be expressed as a rational
-    multiple of π (denominator ≤ 24) or as arctan/arccos/arcsin of a simple
+    multiple of pi (denominator <= 24) or as arctan/arccos/arcsin of a simple
     rational or square-root argument."""
 
     frac = Fraction(rad / np.pi).limit_denominator(24)
@@ -304,7 +304,7 @@ def _symbolic(rad: float, tol: float = 1e-6) -> str:
         sign = "-" if n < 0 else ""
         a = abs(n)
         coeff = "" if a == 1 else str(a)
-        return f"{sign}{coeff}π/{d}" if d != 1 else f"{sign}{coeff}π"
+        return f"{sign}{coeff}pi/{d}" if d != 1 else f"{sign}{coeff}pi"
 
     pos_args: list[tuple[float, str]] = []
     for d in range(1, 9):
@@ -339,7 +339,7 @@ def _symbolic(rad: float, tol: float = 1e-6) -> str:
 def _fmt_angle(rad: float) -> str:
     sym = _symbolic(rad)
     sym_str = f"  [{sym}]" if sym else ""
-    return f"{rad:+.6f} rad  ({np.degrees(rad):+8.2f}°){sym_str}"
+    return f"{rad:+.6f} rad  ({np.degrees(rad):+8.2f} deg){sym_str}"
 
 
 def format_output(
@@ -365,13 +365,13 @@ def format_output(
         f"Input:  {input_summary}",
         "",
         "Misorientation (ZXZ, crystal frame):",
-        f"  α = {_fmt_angle(alpha)}",
-        f"  β = {_fmt_angle(beta)}",
-        f"  γ = {_fmt_angle(gamma)}",
+        f"  alpha = {_fmt_angle(alpha)}",
+        f"  beta = {_fmt_angle(beta)}",
+        f"  gamma = {_fmt_angle(gamma)}",
         "",
         "Inclination:",
-        f"  θ = {_fmt_angle(theta)}",
-        f"  φ = {_fmt_angle(phi)}",
+        f"  theta = {_fmt_angle(theta)}",
+        f"  phi = {_fmt_angle(phi)}",
         "",
         "Validation:",
     ]
@@ -580,7 +580,7 @@ def main() -> None:
             axis / np.linalg.norm(axis) * np.radians(args.angle)
         ).as_matrix()
         input_summary = (
-            f"axis={axis.tolist()}  angle={args.angle}°  normal={normal.tolist()}"
+            f"axis={axis.tolist()}  angle={args.angle} deg  normal={normal.tolist()}"
         )
         P_norm = Q_norm = None
 

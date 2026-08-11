@@ -121,7 +121,7 @@ all_special = np.unique(np.append(min_idx, global_min))
 print(
     f"\nFound {len(min_idx)} local minima + global minimum ({len(all_special)} unique):\n"
 )
-print(f"{'[n]':>8}  {'GBE (J/m²)':>12}  {'Gen':>6}  {'Dump file'}")
+print(f"{'[n]':>8}  {'GBE (J/m^2)':>12}  {'Gen':>6}  {'Dump file'}")
 print("-" * 80)
 
 for idx in sorted(all_special, key=lambda i: lx[i]):

@@ -192,7 +192,7 @@ def main():
             sys.exit(f"Run directory not found: {run_dir}")
 
         gbe, gen, cand, dump = find_min_ga(run_dir, digits=args.digits, n_workers=args.workers)
-        print(f"Minimum GBE : {gbe:.6f} J/m²"
+        print(f"Minimum GBE : {gbe:.6f} J/m^2"
               + (f"  (compared at {args.digits} d.p.)" if args.digits is not None else ""))
         print(f"Found at    : generation {gen}, candidate {cand}")
         print(f"Structure   : {dump}")
@@ -209,7 +209,7 @@ def main():
             sys.exit(f"Run directory not found: {run_dir}")
 
         gbe, step, dump = find_min_mc(run_dir, digits=args.digits)
-        print(f"Minimum GBE : {gbe:.6f} J/m²"
+        print(f"Minimum GBE : {gbe:.6f} J/m^2"
               + (f"  (compared at {args.digits} d.p.)" if args.digits is not None else ""))
         print(f"Found at    : step {step}")
         print(f"Structure   : {dump}")

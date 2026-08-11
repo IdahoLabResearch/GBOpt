@@ -4,7 +4,7 @@ import warnings
 
 
 def pytest_runtest_makereport(item, call):
-    if "known_bug" in item.keywords:
+    if "known_bug" in item.keywords and call.when == "call":
         if call.excinfo is None:
             warnings.warn(
                 f"Test {item.name} passed but is marked as a known bug", UserWarning)

@@ -10,6 +10,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 
 from GBOpt.UnitCell import UnitCell
+from GBOpt.BoundarySpec import PQSpec
+from GBOpt.Utils.gb_exact import pq_spec_to_embedding
 
 
 class GBMakerError(Exception):
@@ -77,6 +79,7 @@ class GBMaker:
 
     def __init__(self, a0: float, structure: str, gb_thickness: float,
                  misorientation: np.ndarray, atom_types: str | Tuple[str, ...], *,
+                 _embedding=None,
                  repeat_factor: Union[int, Sequence[int]] = 2, x_dim_min: float = 50,
                  vacuum: float = 10, interaction_distance: float = 15.0,
                  gb_id: int = 1, epsilon: float = 1e-10):
@@ -112,6 +115,7 @@ class GBMaker:
         )
         self.__id = self.__validate(gb_id, int, "id", positive=True)
         self.__inplane_periodic = (True, True)
+        self.__embedding = _embedding
 
         self.__unit_cell = self.__init_unit_cell(atom_types)
         self.__spacing = self.__calculate_periodic_spacing()  # periodic distances dict
@@ -119,6 +123,112 @@ class GBMaker:
 
         self.__radius = a0 * self.__unit_cell.radius  # atom radius
         self.__box_dims = self.__calculate_box_dimensions()
+
+    @classmethod
+    def _from_boundary_embedding(
+        cls,
+        embedding,
+        *,
+        a0: float,
+        structure: str,
+        atom_types,
+        gb_thickness: float = 0.0,
+        repeat_factor=2,
+        x_dim_min: float = 50,
+        vacuum: float = 10,
+        interaction_distance: float = 15.0,
+        gb_id: int = 1,
+    ) -> "GBMaker":
+        """Build a GBMaker from a BoundaryEmbedding.
+
+        :param embedding: A BoundaryEmbedding produced by an input adapter. When
+            ``embedding.exact`` is True and P/Q are present, the integer matrices are
+            used directly as the approx rotation matrices, bypassing
+            ``__approximate_rotation_matrix_as_int``. When ``embedding.exact`` is False,
+            R_left/R_right are used on the existing floating-point approximation path.
+            ``embedding.coherent`` sets ``inplane_periodic``.
+        :param a0: Crystal lattice parameter (Angstroms).
+        :param structure: Crystal structure string.
+        :param atom_types: Atom type string or tuple of strings.
+        :param gb_thickness: Width of the GB region (Angstroms), default 0.
+        :param repeat_factor: In-plane repeat factor(s), default 2.
+        :param x_dim_min: Minimum grain thickness in x (Angstroms), default 50.
+        :param vacuum: Vacuum thickness (Angstroms), default 10.
+        :param interaction_distance: Maximum atom interaction distance, default 15.
+        :param gb_id: Grain boundary identifier, default 1.
+        :return: Fully initialized GBMaker instance.
+        """
+        return cls(
+            a0, structure, gb_thickness, np.zeros(5), atom_types,
+            _embedding=embedding,
+            repeat_factor=repeat_factor,
+            x_dim_min=x_dim_min,
+            vacuum=vacuum,
+            interaction_distance=interaction_distance,
+            gb_id=gb_id,
+        )
+
+    @classmethod
+    def from_boundary_spec(
+        cls,
+        a0: float,
+        structure: str,
+        atom_types,
+        boundary,
+        mode: str = "exact",
+        *,
+        gb_thickness: float = 0.0,
+        repeat_factor=2,
+        x_dim_min: float = 50,
+        vacuum: float = 10,
+        interaction_distance: float = 15.0,
+        gb_id: int = 1,
+    ) -> "GBMaker":
+        """Public factory that builds a GBMaker from a boundary-spec dataclass.
+
+        :param a0: Crystal lattice parameter (Angstroms).
+        :param structure: Crystal structure string.
+        :param atom_types: Atom type string or tuple of strings.
+        :param boundary: A boundary-spec dataclass. Only ``PQSpec`` is supported;
+            all other types raise ``NotImplementedError``.
+        :param mode: Construction mode — one of ``"exact"``, ``"prefer_exact"``, or
+            ``"approximate"``. Only ``"exact"`` is supported for ``PQSpec``; the others
+            raise ``NotImplementedError``.
+        :param gb_thickness: Width of the GB region (Angstroms), default 0.
+        :param repeat_factor: In-plane repeat factor(s), default 2.
+        :param x_dim_min: Minimum grain thickness in x (Angstroms), default 50.
+        :param vacuum: Vacuum thickness (Angstroms), default 10.
+        :param interaction_distance: Maximum atom interaction distance, default 15.
+        :param gb_id: Grain boundary identifier, default 1.
+        :return: Fully initialized GBMaker instance.
+        :raises NotImplementedError: For any boundary spec type other than ``PQSpec``,
+            or for modes other than ``"exact"`` with ``PQSpec``.
+        """
+        if not isinstance(boundary, PQSpec):
+            raise NotImplementedError(
+                f"from_boundary_spec does not yet support {type(boundary).__name__}; "
+                f"only PQSpec is currently implemented."
+            )
+
+        if mode != "exact":
+            raise NotImplementedError(
+                f"Construction mode '{mode}' is not yet supported for PQSpec; "
+                f"only mode='exact' is currently implemented."
+            )
+
+        embedding = pq_spec_to_embedding(boundary)
+        return cls._from_boundary_embedding(
+            embedding,
+            a0=a0,
+            structure=structure,
+            atom_types=atom_types,
+            gb_thickness=gb_thickness,
+            repeat_factor=repeat_factor,
+            x_dim_min=x_dim_min,
+            vacuum=vacuum,
+            interaction_distance=interaction_distance,
+            gb_id=gb_id,
+        )
 
     @staticmethod
     def __reduce_integer_row(row: np.ndarray) -> np.ndarray:
@@ -160,7 +270,7 @@ class GBMaker:
         """
         Find the smallest-norm integer vector that points within *angle_tol_deg* of
         *row*. LLL lattice reduction was considered but not adopted: for CSL boundaries
-        the correct scale factor k equals ‖g‖ ≤ √Σ (typically < 10), so the loop exits
+        the correct scale factor k equals ||g|| <= √Sigma (typically < 10), so the loop exits
         in a handful of iterations. The LLL selection step also requires enumerating
         signed combinations of reduced basis rows — adding ~60 lines for no practical
         gain.
@@ -309,14 +419,33 @@ class GBMaker:
         if threshold is None:
             threshold = self.__a0 * 15
 
-        # approximate the rotation matrix as integers
-        self.__R_left = self.__Rincl
-        self.__R_right = np.dot(self.__Rincl, self.__Rmis)
-        # # We store the approximate matrices as objects to allow for large numbers
-        self.__R_left_approx = self.__approximate_rotation_matrix_as_int(
-            self.__R_left).astype(object)
-        self.__R_right_approx = self.__approximate_rotation_matrix_as_int(
-            self.__R_right).astype(object)
+        if self.__embedding is not None:
+            # Exact or approximate path driven by a BoundaryEmbedding.
+            self.__R_left = self.__embedding.R_left
+            self.__R_right = self.__embedding.R_right
+            if self.__embedding.exact and self.__embedding.P is not None:
+                # Use exact integer matrices directly; bypass approximation.
+                # Round first so float-valued canonical arrays (e.g. 4.0)
+                # become Python ints, then cast to object dtype so that large
+                # Miller indices don't overflow int64 in norm calculations.
+                self.__R_left_approx = np.round(
+                    self.__embedding.P).astype(int).astype(object)
+                self.__R_right_approx = np.round(
+                    self.__embedding.Q).astype(int).astype(object)
+            else:
+                self.__R_left_approx = self.__approximate_rotation_matrix_as_int(
+                    self.__R_left).astype(object)
+                self.__R_right_approx = self.__approximate_rotation_matrix_as_int(
+                    self.__R_right).astype(object)
+        else:
+            # Legacy path: derive rotation matrices from Euler angles.
+            self.__R_left = self.__Rincl
+            self.__R_right = np.dot(self.__Rincl, self.__Rmis)
+            # We store the approximate matrices as objects to allow for large numbers
+            self.__R_left_approx = self.__approximate_rotation_matrix_as_int(
+                self.__R_left).astype(object)
+            self.__R_right_approx = self.__approximate_rotation_matrix_as_int(
+                self.__R_right).astype(object)
 
         # The periodic distance in each direction is the lattice parameter multiplied by
         # norm of the Miller indices in that direction. This is determined using the
@@ -353,19 +482,25 @@ class GBMaker:
             }
         )
 
-        inplane_periodic = []
-        for key, val in spacing.items():
-            if key == 'x':
-                continue
-            is_periodic = val <= threshold
-            inplane_periodic.append(is_periodic)
-            if not is_periodic:
-                spacing[key] = threshold
-                warnings.warn(
-                    f"Required {key}-spacing {val:.4f} Å exceeds threshold "
-                    f"{threshold:.4f} Å; boundary is non-periodic along {key}."
-                )
-        self.__inplane_periodic = tuple(inplane_periodic)
+        if self.__embedding is not None:
+            # Trust the embedding's coherence flag directly; it is set by
+            # the input adapter and reflects the exact construction intent.
+            coherent = self.__embedding.coherent
+            self.__inplane_periodic = (coherent, coherent)
+        else:
+            inplane_periodic = []
+            for key, val in spacing.items():
+                if key == 'x':
+                    continue
+                is_periodic = val <= threshold
+                inplane_periodic.append(is_periodic)
+                if not is_periodic:
+                    spacing[key] = threshold
+                    warnings.warn(
+                        f"Required {key}-spacing {val:.4f} A exceeds threshold "
+                        f"{threshold:.4f} A; boundary is non-periodic along {key}."
+                    )
+            self.__inplane_periodic = tuple(inplane_periodic)
 
         return spacing
 
@@ -1295,6 +1430,9 @@ class GBMaker:
             Rotation.from_euler("z", misorientation[4])
             * Rotation.from_euler("y", misorientation[3])
         ).as_matrix()
+        # Discard any active embedding so update_spacing uses the new Euler
+        # angles rather than the stale embedding-derived rotation matrices.
+        self.__embedding = None
         self.update_spacing()
 
     @property
@@ -1354,6 +1492,11 @@ class GBMaker:
         self.__box_dims = self.__calculate_box_dimensions()
 
     # Additional getters for other class properties
+    @property
+    def inplane_periodic(self) -> tuple:
+        """Read-only view of the in-plane periodicity flags (y, z)."""
+        return tuple(bool(v) for v in self.__inplane_periodic)
+
     @property
     def box_dims(self) -> np.ndarray:
         return self.__box_dims
