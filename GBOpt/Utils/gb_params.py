@@ -11,6 +11,7 @@ Usage
 """
 
 import argparse
+import math
 import sys
 from fractions import Fraction
 from typing import Optional
@@ -199,6 +200,304 @@ def from_orientation_matrices(
     return np.array([alpha, beta, gamma, theta, phi])
 
 
+def _normalize_direction(v: np.ndarray, name: str) -> np.ndarray:
+    """Return a normalized copy of *v* or raise if it is degenerate."""
+    v = np.asarray(v, dtype=float)
+    norm = np.linalg.norm(v)
+    if norm < 1e-14:
+        raise ValueError(f"{name} must be a non-zero vector.")
+    return v / norm
+
+
+def _rotation_from_axis_angle(axis: np.ndarray, angle_deg: float) -> np.ndarray:
+    """Return the crystal-frame misorientation matrix for an axis-angle pair."""
+    return Rotation.from_rotvec(axis * np.radians(angle_deg)).as_matrix()
+
+
+def _project_into_boundary_plane(
+    direction: np.ndarray,
+    boundary_normal: np.ndarray,
+    *,
+    name: str,
+) -> np.ndarray:
+    """Project *direction* into the plane normal to *boundary_normal*."""
+    projected = direction - np.dot(direction, boundary_normal) * boundary_normal
+    norm = np.linalg.norm(projected)
+    if norm < 1e-14:
+        raise ValueError(
+            f"{name} is parallel to the boundary normal, so its in-plane projection "
+            "is undefined."
+        )
+    return projected / norm
+
+
+def _default_in_plane_reference(boundary_normal: np.ndarray) -> np.ndarray:
+    """Pick a stable seed direction and project it into the boundary plane."""
+    candidates = [
+        np.array([1.0, 0.0, 0.0]),
+        np.array([0.0, 1.0, 0.0]),
+        np.array([0.0, 0.0, 1.0]),
+    ]
+    for candidate in candidates:
+        projected = candidate - np.dot(candidate, boundary_normal) * boundary_normal
+        if np.linalg.norm(projected) > 1e-10:
+            return projected / np.linalg.norm(projected)
+    raise ValueError("Could not determine an in-plane reference direction.")
+
+
+def _orientation_from_normal_and_in_plane(
+    boundary_normal: np.ndarray,
+    in_plane_direction: np.ndarray,
+) -> np.ndarray:
+    """Build a right-handed row-wise orientation matrix."""
+    third = np.cross(boundary_normal, in_plane_direction)
+    third_norm = np.linalg.norm(third)
+    if third_norm < 1e-14:
+        raise ValueError("Boundary normal and in-plane direction are degenerate.")
+    return validate_orientation_matrix(
+        np.vstack((boundary_normal, in_plane_direction, third / third_norm)),
+        "orientation matrix",
+    )
+
+
+def asymmetric_tilt_PQ(
+    boundary_normal: np.ndarray,
+    tilt_axis: np.ndarray,
+    angle_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build GBOpt-compatible P and Q orientation matrices for an asymmetric tilt GB.
+
+    The tilt axis must lie in the boundary plane. ``P[0]`` is the grain-1
+    boundary normal, ``P[1]`` is the tilt axis, and ``Q`` is obtained by
+    rotating grain 1 by the requested misorientation about that axis.
+
+    :param boundary_normal: Grain-1 boundary normal [h, k, l].
+    :param tilt_axis: Tilt axis [u, v, w], lying in the boundary plane.
+    :param angle_deg: Misorientation angle in degrees.
+    :return: ``(P, Q)`` row-wise orientation matrices for grains 1 and 2.
+    """
+    n_hat = _normalize_direction(boundary_normal, "Boundary normal")
+    a_hat = _normalize_direction(tilt_axis, "Tilt axis")
+    dot = float(np.dot(n_hat, a_hat))
+    if abs(dot) > 1e-10:
+        raise ValueError(
+            "Tilt axis must lie in the boundary plane, so normal · axis must be 0 "
+            f"(got {dot:.3e})."
+        )
+
+    P = _orientation_from_normal_and_in_plane(n_hat, a_hat)
+    Q = P @ _rotation_from_axis_angle(a_hat, angle_deg)
+    return P, validate_orientation_matrix(Q, "Q")
+
+
+def symmetric_tilt_PQ(
+    boundary_normal: np.ndarray,
+    tilt_axis: np.ndarray,
+    angle_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build GBOpt-compatible P and Q orientation matrices for a symmetric tilt GB.
+
+    Conventions:
+    - rows are crystal directions aligned with lab x, y, z
+    - row 0 is the grain-boundary normal
+    - row 1 is the tilt axis and must lie in the boundary plane
+    - row 2 completes a right-handed basis via ``row0 x row1``
+
+    The output matrices are row-normalized float orientation matrices suitable
+    for :func:`from_orientation_matrices`.
+
+    :param boundary_normal: Grain-1 boundary normal [h, k, l].
+    :param tilt_axis: Tilt axis [u, v, w], lying in the boundary plane.
+    :param angle_deg: Misorientation angle in degrees.
+    :return: ``(P, Q)`` row-wise orientation matrices for grains 1 and 2.
+    :raises ValueError: If the inputs are zero, non-orthogonal, or degenerate.
+    """
+    return asymmetric_tilt_PQ(boundary_normal, tilt_axis, angle_deg)
+
+
+def twist_boundary_PQ(
+    boundary_normal: np.ndarray,
+    angle_deg: float,
+    in_plane_reference: Optional[np.ndarray] = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build GBOpt-compatible P and Q orientation matrices for a twist boundary.
+
+    For a twist boundary the rotation axis is parallel to the boundary normal.
+    ``in_plane_reference`` sets the grain-1 lab-y direction before twist; when
+    omitted, a stable in-plane direction is chosen automatically.
+
+    :param boundary_normal: Boundary normal / twist axis [h, k, l].
+    :param angle_deg: Misorientation angle in degrees.
+    :param in_plane_reference: Optional seed direction used to define row 1.
+    :return: ``(P, Q)`` row-wise orientation matrices for grains 1 and 2.
+    """
+    n_hat = _normalize_direction(boundary_normal, "Boundary normal")
+    if in_plane_reference is None:
+        y_hat = _default_in_plane_reference(n_hat)
+    else:
+        y_hat = _project_into_boundary_plane(
+            _normalize_direction(in_plane_reference, "In-plane reference"),
+            n_hat,
+            name="In-plane reference",
+        )
+
+    P = _orientation_from_normal_and_in_plane(n_hat, y_hat)
+    Q = P @ _rotation_from_axis_angle(n_hat, angle_deg)
+    return P, validate_orientation_matrix(Q, "Q")
+
+
+def mixed_boundary_PQ(
+    boundary_normal: np.ndarray,
+    rotation_axis: np.ndarray,
+    angle_deg: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build GBOpt-compatible P and Q orientation matrices for a mixed boundary.
+
+    A mixed boundary has both tilt and twist character, so the rotation axis is
+    neither parallel nor perpendicular to the boundary normal. The helper uses
+    the in-plane projection of ``rotation_axis`` as ``P[1]`` to keep the axis
+    geometrically explicit in the constructed basis.
+
+    :param boundary_normal: Boundary normal [h, k, l].
+    :param rotation_axis: Misorientation axis [u, v, w].
+    :param angle_deg: Misorientation angle in degrees.
+    :return: ``(P, Q)`` row-wise orientation matrices for grains 1 and 2.
+    """
+    n_hat = _normalize_direction(boundary_normal, "Boundary normal")
+    a_hat = _normalize_direction(rotation_axis, "Rotation axis")
+    dot = float(np.dot(n_hat, a_hat))
+    if abs(dot) < 1e-10:
+        raise ValueError(
+            "Mixed boundary requires a nonzero twist component; normal · axis is 0."
+        )
+    if abs(abs(dot) - 1.0) < 1e-10:
+        raise ValueError(
+            "Mixed boundary requires a nonzero tilt component; normal is parallel "
+            "to the rotation axis."
+        )
+
+    y_hat = _project_into_boundary_plane(a_hat, n_hat, name="Rotation axis")
+    P = _orientation_from_normal_and_in_plane(n_hat, y_hat)
+    Q = P @ _rotation_from_axis_angle(a_hat, angle_deg)
+    return P, validate_orientation_matrix(Q, "Q")
+
+
+def describe_orientation_matrix(M: np.ndarray, name: str = "M") -> str:
+    """
+    Return a compact human-readable description of a GBOpt orientation matrix.
+
+    :param M: Candidate 3x3 row-wise orientation matrix.
+    :param name: Matrix label to show in the output.
+    :return: Multi-line description of the lab-axis alignment.
+    """
+    M_norm = validate_orientation_matrix(M, name)
+    lines = [
+        f"{name} orientation matrix:",
+        "  row 0 / lab x / GB normal : "
+        f"{np.array2string(M_norm[0], precision=6, suppress_small=True)}",
+        "  row 1 / lab y / in-plane  : "
+        f"{np.array2string(M_norm[1], precision=6, suppress_small=True)}",
+        "  row 2 / lab z            : "
+        f"{np.array2string(M_norm[2], precision=6, suppress_small=True)}",
+    ]
+    return "\n".join(lines)
+
+
+def _primitive_integer_direction(v: np.ndarray, max_index: int = 12) -> np.ndarray:
+    """
+    Approximate a direction with a small primitive integer Miller-style vector.
+
+    :param v: 3-element direction vector.
+    :param max_index: Maximum absolute Miller index to consider.
+    :return: Integer vector with gcd 1 and a positive first nonzero entry.
+    """
+    v_hat = _normalize_direction(v, "Direction")
+    best = None
+    best_angle = math.inf
+
+    for h in range(-max_index, max_index + 1):
+        for k in range(-max_index, max_index + 1):
+            for l in range(-max_index, max_index + 1):
+                if h == 0 and k == 0 and l == 0:
+                    continue
+                gcd = math.gcd(math.gcd(abs(h), abs(k)), abs(l))
+                if gcd != 1:
+                    continue
+                cand = np.array([h, k, l], dtype=float)
+                cand_hat = cand / np.linalg.norm(cand)
+                cosang = float(np.clip(np.dot(v_hat, cand_hat), -1.0, 1.0))
+                angle = float(np.arccos(cosang))
+                if angle < best_angle - 1e-12:
+                    best = np.array([h, k, l], dtype=int)
+                    best_angle = angle
+
+    if best is None:
+        raise ValueError("Could not approximate direction with an integer vector.")
+
+    for idx in range(3):
+        if best[idx] != 0:
+            if best[idx] < 0:
+                best = -best
+            break
+    return best
+
+
+def approximate_integer_orientation_matrix(
+    M: np.ndarray,
+    name: str = "M",
+    max_index: int = 12,
+) -> np.ndarray:
+    """
+    Approximate a row-wise orientation matrix with primitive integer directions.
+
+    Each row is approximated independently, then the sign of row 2 is flipped if
+    needed to preserve right-handedness.
+
+    :param M: Candidate 3x3 row-wise orientation matrix.
+    :param name: Matrix label used for validation.
+    :param max_index: Maximum absolute Miller index to consider per row.
+    :return: 3x3 integer matrix with primitive Miller-style row directions.
+    """
+    M_norm = validate_orientation_matrix(M, name)
+    approx = np.vstack(
+        [_primitive_integer_direction(row, max_index=max_index) for row in M_norm]
+    ).astype(int)
+
+    if np.linalg.det(normalize_rows(approx)) < 0:
+        approx[2] = -approx[2]
+
+    return approx
+
+
+def format_integer_orientation_matrices(
+    P: np.ndarray,
+    Q: np.ndarray,
+    *,
+    max_index: int = 12,
+) -> str:
+    """
+    Build a printable integer Miller-style approximation block for P and Q.
+
+    :param P: Grain-1 orientation matrix.
+    :param Q: Grain-2 orientation matrix.
+    :param max_index: Maximum absolute Miller index to consider per row.
+    :return: Multi-line formatted string.
+    """
+    P_int = approximate_integer_orientation_matrix(P, "P", max_index=max_index)
+    Q_int = approximate_integer_orientation_matrix(Q, "Q", max_index=max_index)
+    return "\n".join(
+        [
+            "Integer Miller-Style Approximation:",
+            f"  P ≈ {P_int.tolist()}",
+            f"  Q ≈ {Q_int.tolist()}",
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -319,10 +618,12 @@ def _symbolic(rad: float, tol: float = 1e-6) -> str:
 
     for arg, label in pos_args:
         v = float(np.arctan(arg))
-        if abs(rad - v) < tol:
-            return f"arctan({label})"
-        if abs(rad + v) < tol:
-            return f"-arctan({label})"
+        for mult in range(1, 5):
+            expr = f"arctan({label})" if mult == 1 else f"{mult}*arctan({label})"
+            if abs(rad - mult * v) < tol:
+                return expr
+            if abs(rad + mult * v) < tol:
+                return f"-{expr}"
 
     for sign, s_lbl in [(1, ""), (-1, "-")]:
         for arg, label in pos_args:
@@ -330,8 +631,15 @@ def _symbolic(rad: float, tol: float = 1e-6) -> str:
             if abs(sarg) > 1.0:
                 continue
             for fn, fn_name in [(np.arccos, "arccos"), (np.arcsin, "arcsin")]:
-                if abs(rad - float(fn(sarg))) < tol:
-                    return f"{fn_name}({s_lbl}{label})"
+                v = float(fn(sarg))
+                for mult in range(1, 5):
+                    expr = (
+                        f"{fn_name}({s_lbl}{label})"
+                        if mult == 1
+                        else f"{mult}*{fn_name}({s_lbl}{label})"
+                    )
+                    if abs(rad - mult * v) < tol:
+                        return expr
 
     return ""
 
@@ -346,6 +654,7 @@ def format_output(
     params: np.ndarray,
     input_summary: str,
     checks: list[str],
+    extra_sections: Optional[list[str]] = None,
 ) -> str:
     """
     Build the human-readable output string.
@@ -353,6 +662,7 @@ def format_output(
     :param params: 5-element misorientation array.
     :param input_summary: One-line description of the inputs used.
     :param checks: Validation result strings from :func:`validate`.
+    :param extra_sections: Optional extra sections to append after validation.
     :return: Formatted output string ready for printing.
     """
     alpha, beta, gamma, theta, phi = params
@@ -381,6 +691,9 @@ def format_output(
         f"misorientation = np.array([{array_str}])",
         "",
     ]
+    if extra_sections:
+        for section in extra_sections:
+            lines.extend([section, ""])
     return "\n".join(lines)
 
 
@@ -430,11 +743,10 @@ def run_self_test() -> None:
     np.testing.assert_allclose(Rincl[0, :], normal / np.linalg.norm(normal), atol=1e-10)
     cases.append("Sigma5 symmetric tilt")
 
-    P = _orientation_matrix([2.0, 1.0, 0.0], [0.0, 0.0, 1.0])
+    P, Q = asymmetric_tilt_PQ([2.0, 1.0, 0.0], [0.0, 0.0, 1.0], angle_deg)
     Rmis_expected = Rotation.from_rotvec(
         np.array([0.0, 0.0, np.radians(angle_deg)])
     ).as_matrix()
-    Q = P @ Rmis_expected
     params = from_orientation_matrices(P, Q)
     Rmis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
     Rincl = (
@@ -444,10 +756,23 @@ def run_self_test() -> None:
     np.testing.assert_allclose(Rincl[0, :], P[0], atol=1e-10)
     cases.append("Asymmetric tilt")
 
+    angle_deg = 2.0 * np.degrees(np.arctan(1.0 / 5.0))
+    P, Q = symmetric_tilt_PQ([5.0, 1.0, 0.0], [0.0, 0.0, 1.0], angle_deg)
+    params = from_orientation_matrices(P, Q)
+    Rmis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
+    Rmis_expected = Rotation.from_rotvec(
+        np.array([0.0, 0.0, np.radians(angle_deg)])
+    ).as_matrix()
+    _assert_rotation_close(Rmis, Rmis_expected)
+    np.testing.assert_allclose(P[0, :], [5.0, 1.0, 0.0] / np.sqrt(26.0), atol=1e-10)
+    np.testing.assert_allclose(Q[1, :], [0.0, 0.0, 1.0], atol=1e-10)
+    cases.append("Sigma13 [001] (510) symmetric tilt")
+
     angle_deg = 45.0
     axis = np.array([0.0, 0.0, 1.0])
     normal = np.array([0.0, 0.0, 1.0])
-    params = from_axis_angle(axis, angle_deg, normal)
+    P, Q = twist_boundary_PQ(normal, angle_deg)
+    params = from_orientation_matrices(P, Q)
     Rmis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
     Rmis_expected = Rotation.from_rotvec(axis * np.radians(angle_deg)).as_matrix()
     Rincl = (
@@ -455,7 +780,25 @@ def run_self_test() -> None:
     ).as_matrix()
     _assert_rotation_close(Rmis, Rmis_expected)
     np.testing.assert_allclose(Rincl[0, :], normal, atol=1e-10)
+    np.testing.assert_allclose(P[0, :], Q[0, :], atol=1e-10)
     cases.append("Twist")
+
+    angle_deg = 36.869898
+    axis = np.array([0.0, 0.0, 1.0])
+    normal = np.array([3.0, 1.0, 1.0])
+    P, Q = mixed_boundary_PQ(normal, axis, angle_deg)
+    params = from_orientation_matrices(P, Q)
+    Rmis = Rotation.from_euler("ZXZ", params[:3]).as_matrix()
+    Rmis_expected = Rotation.from_rotvec(axis * np.radians(angle_deg)).as_matrix()
+    _assert_rotation_close(Rmis, Rmis_expected)
+    np.testing.assert_allclose(P[0, :], normal / np.linalg.norm(normal), atol=1e-10)
+    np.testing.assert_allclose(np.dot(P[1, :], P[0, :]), 0.0, atol=1e-10)
+    np.testing.assert_allclose(
+        np.dot(P[1, :], axis / np.linalg.norm(axis)),
+        np.linalg.norm(axis - np.dot(axis, P[0, :]) * P[0, :]),
+        atol=1e-10,
+    )
+    cases.append("Mixed boundary")
 
     angle_deg = 60.0
     axis = np.array([1.0, 1.0, 1.0])
@@ -554,6 +897,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "If omitted, P[0] is used."
         ),
     )
+    ori.add_argument(
+        "--print-integer-pq",
+        action="store_true",
+        help=(
+            "Print a small-integer Miller-style approximation of the normalized "
+            "P and Q row directions."
+        ),
+    )
 
     sub.add_parser(
         "self_test",
@@ -596,9 +947,17 @@ def main() -> None:
         reference_Rmis = P_norm.T @ Q_norm
         normal = P_norm[0]
         input_summary = f"P={P.tolist()}  Q={Q.tolist()}"
+        extra_sections = (
+            [format_integer_orientation_matrices(P, Q)]
+            if args.print_integer_pq
+            else None
+        )
+
+    if args.mode == "axis_angle":
+        extra_sections = None
 
     checks = validate(params, normal, P_norm, Q_norm, reference_Rmis)
-    print(format_output(params, input_summary, checks))
+    print(format_output(params, input_summary, checks, extra_sections))
 
 
 if __name__ == "__main__":
