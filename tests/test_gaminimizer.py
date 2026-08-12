@@ -14,6 +14,7 @@ import pytest
 from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
+from GBOpt.GBManipulator import GBManipulatorValueError
 from GBOpt.GBMinimizer import (
     GBMinimizerError,
     GBMinimizerValueError,
@@ -877,8 +878,9 @@ def test_variable_cell_requires_explicit_ownership_and_boolean(owned_ga):
 
 def test_translation_mutation_uses_current_parent_dimensions():
     class FixedRandom:
-        def choice(self, _choices):
-            return "translate_right_grain"
+        def permutation(self, size):
+            assert size == 1
+            return np.array([0])
 
         def uniform(self, _lower, _upper):
             return 0.5
@@ -1800,6 +1802,178 @@ def test_owned_checkpoint_pickle_resume(owned_ga, tmp_path):
 
     assert len(resumed.GBE_vals) == 3
     assert len(resumed.history) == 2
+
+
+def test_mutator_retries_after_infeasible_mutation():
+    """An infeasible mutation should fall through to another configured choice."""
+
+    class FakeRandom:
+        def permutation(self, size):
+            assert size == 2
+            return np.array([0, 1])
+
+        def uniform(self, low, high):
+            assert low == 0
+            assert high == 1
+            return 0.5
+
+    class Parent:
+        box_dims = np.array(
+            [
+                [0.0, 10.0],
+                [0.0, 20.0],
+                [0.0, 30.0],
+            ]
+        )
+
+    class Manipulator:
+        parents = [Parent()]
+
+        def __init__(self):
+            self.calls = []
+
+        def remove_atoms(self, *, num_to_remove):
+            self.calls.append("remove_atoms")
+            assert num_to_remove == 1
+            raise GBManipulatorValueError(
+                "Not enough neighbor atoms of type 2 to remove."
+            )
+
+        def translate_right_grain(self, *, dy, dz):
+            self.calls.append("translate_right_grain")
+            np.testing.assert_allclose(dy, 10.0)
+            np.testing.assert_allclose(dz, 15.0)
+            return "translated-system"
+
+    class GB:
+        repeat_factor = (1, 1)
+
+    manipulator = Manipulator()
+    mutator = Mutator(
+        ["remove_atoms", "translate_right_grain"],
+        manipulator,
+    )
+
+    mutation, new_system = mutator.mutate(
+        local_random=FakeRandom(),
+        GB=GB(),
+        manipulator=manipulator,
+    )
+
+    assert manipulator.calls == [
+        "remove_atoms",
+        "translate_right_grain",
+    ]
+    assert mutation == "shift10.00000000dy15.00000000dz"
+    assert new_system == "translated-system"
+
+
+def test_mutator_does_not_hide_unexpected_mutation_error():
+    """Only expected mutation-infeasibility errors should trigger a retry."""
+
+    class FakeRandom:
+        def permutation(self, size):
+            assert size == 2
+            return np.array([0, 1])
+
+    class Manipulator:
+        def __init__(self):
+            self.calls = []
+
+        def remove_atoms(self, *, num_to_remove):
+            self.calls.append("remove_atoms")
+            assert num_to_remove == 1
+            raise RuntimeError("unexpected mutation failure")
+
+        def translate_right_grain(self, *, dy, dz):
+            self.calls.append("translate_right_grain")
+            return "translated-system"
+
+    class GB:
+        repeat_factor = (1, 1)
+
+    manipulator = Manipulator()
+    mutator = Mutator(
+        ["remove_atoms", "translate_right_grain"],
+        manipulator,
+    )
+
+    with pytest.raises(RuntimeError, match="unexpected mutation failure"):
+        mutator.mutate(
+            local_random=FakeRandom(),
+            GB=GB(),
+            manipulator=manipulator,
+        )
+
+    assert manipulator.calls == ["remove_atoms"]
+
+
+def test_mutator_fails_when_all_mutations_are_infeasible():
+    """The optimizer should fail clearly when every configured mutation is infeasible."""
+
+    class FakeRandom:
+        def permutation(self, size):
+            assert size == 2
+            return np.array([0, 1])
+
+        def uniform(self, low, high):
+            assert low == 0
+            assert high == 1
+            return 0.5
+
+    class Parent:
+        box_dims = np.array(
+            [
+                [0.0, 10.0],
+                [0.0, 20.0],
+                [0.0, 30.0],
+            ]
+        )
+
+    class Manipulator:
+        parents = [Parent()]
+
+        def __init__(self):
+            self.calls = []
+
+        def remove_atoms(self, *, num_to_remove):
+            self.calls.append("remove_atoms")
+            assert num_to_remove == 1
+            raise GBManipulatorValueError("removal is infeasible")
+
+        def translate_right_grain(self, *, dy, dz):
+            self.calls.append("translate_right_grain")
+            raise GBManipulatorValueError("translation is infeasible")
+
+    class GB:
+        repeat_factor = (1, 1)
+
+    manipulator = Manipulator()
+    mutator = Mutator(
+        ["remove_atoms", "translate_right_grain"],
+        manipulator,
+    )
+
+    with pytest.raises(
+        GBMinimizerError,
+        match="No configured mutation could produce a valid candidate",
+    ) as exc_info:
+        mutator.mutate(
+            local_random=FakeRandom(),
+            GB=GB(),
+            manipulator=manipulator,
+        )
+
+    message = str(exc_info.value)
+    assert "remove_atoms" in message
+    assert "removal is infeasible" in message
+    assert "translate_right_grain" in message
+    assert "translation is infeasible" in message
+    assert manipulator.calls == [
+        "remove_atoms",
+        "translate_right_grain",
+    ]
+    assert isinstance(exc_info.value.__cause__, GBManipulatorValueError)
 
 
 if __name__ == "__main__":

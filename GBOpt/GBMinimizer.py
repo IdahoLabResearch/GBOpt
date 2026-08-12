@@ -34,8 +34,7 @@ from GBOpt.FileGrainOwnership import (
     LammpsDataError,
 )
 from GBOpt.GBMaker import GBMakerError
-from GBOpt.GBManipulator import GBManipulatorError, ParentError
-
+from GBOpt.GBManipulator import GBManipulatorError, GBManipulatorValueError, ParentError
 
 _OWNED_GA_CHECKPOINT_VERSION = 1
 
@@ -105,39 +104,57 @@ class GBMinimizerValueError(GBMinimizerError, ValueError):
 
 
 class Mutator:
+    """Perform randomly selected manipulations on a GB candidate.
+
+    :param choices: Mutation operation names to make available.
+    :param manipulator: GBManipulator used to validate the requested operations.
     """
-    Mutator class for performing random manipulations on the passed manipulator.
-    :param choices: A list of strings corresponding to GBManipulator operations.
-    :param manipulator: A GBManipulator instance for mapping the choices list to GBmethod calls.
-    """
 
-    # TODO: Add more manipulator options to this class as we make more manipulators faster.
+    # TODO: Add more manipulator options to this class as we make more
+    # manipulators faster.
 
-    def __init__(self, choices: list, manipulator: GBManipulator):
-        self.choices = {
-            method: getattr(manipulator, method)
-            for method in choices
-            if hasattr(manipulator, method)
-        }
-        self.choices_keys = list(self.choices.keys())
+    def __init__(self, choices: list[str], manipulator: GBManipulator):
+        invalid_choices = [
+            method for method in choices if not hasattr(manipulator, method)
+        ]
+        if invalid_choices:
+            raise GBMinimizerValueError(
+                "Unknown GBManipulator mutation choice(s): "
+                + ", ".join(repr(choice) for choice in invalid_choices)
+            )
 
-    def mutate(
+        # Preserve the existing behavior where duplicate names do not weight
+        # a mutation more heavily.
+        self.choices_keys = list(dict.fromkeys(choices))
+        if not self.choices_keys:
+            raise GBMinimizerValueError(
+                "At least one mutation choice must be provided."
+            )
+
+    def _apply_mutation(
         self,
-        local_random: np.random.default_rng,
+        choice_key: str,
+        *,
+        local_random: np.random.Generator,
         GB: GBMaker,
         manipulator: GBManipulator,
     ):
-        """Performs a random mutation from the choices.
-        :param local_random: A numpy.random.default_rng object for generating the random
-            choices. "param GB: GBMaker object to get GB parameters for the mutation.
-        :param GBManipulator: GBManipulator object to perform the mutation on.
-        :return: Atom positions after the mutation."""
-        choice_key = local_random.choice(self.choices_keys)
-        mutation = None
-        new_system = None
+        """Apply one explicitly selected mutation.
+
+        :param choice_key: Mutation operation to apply.
+        :param local_random: Optimizer-owned random-number generator.
+        :param GB: GBMaker providing boundary dimensions and repeat factors.
+        :param manipulator: GBManipulator on which to perform the mutation.
+        :return: Mutation description and resulting atom positions.
+        :raises GBManipulatorValueError: If the selected mutation is infeasible.
+        :raises GBMinimizerValueError: If ``choice_key`` is unsupported.
+        """
         match choice_key:
             case "insert_atoms":
-                new_system = manipulator.insert_atoms(method="grid", num_to_insert=1)
+                new_system = manipulator.insert_atoms(
+                    method="grid",
+                    num_to_insert=1,
+                )
                 mutation = "add1"
 
             case "remove_atoms":
@@ -148,13 +165,68 @@ class Mutator:
                 parent = manipulator.parents[0]
                 y_dim = parent.box_dims[1, 1] - parent.box_dims[1, 0]
                 z_dim = parent.box_dims[2, 1] - parent.box_dims[2, 0]
-                dz = (z_dim / GB.repeat_factor[1]) * local_random.uniform(0, 1)
-                dy = (y_dim / GB.repeat_factor[0]) * local_random.uniform(0, 1)
-                new_system = manipulator.translate_right_grain(dy=dy, dz=dz)
+
+                dy = (
+                    y_dim / GB.repeat_factor[0]
+                ) * local_random.uniform(0, 1)
+                dz = (
+                    z_dim / GB.repeat_factor[1]
+                ) * local_random.uniform(0, 1)
+
+                new_system = manipulator.translate_right_grain(
+                    dy=dy,
+                    dz=dz,
+                )
                 mutation = f"shift{dy:.8f}dy{dz:.8f}dz"
+
             case _:
-                raise ValueError(f"Unhandled mutation choice: {choice_key!r}")
+                raise GBMinimizerValueError(
+                    f"Unhandled mutation choice: {choice_key!r}"
+                )
+
         return mutation, new_system
+
+    def mutate(
+        self,
+        local_random: np.random.Generator,
+        GB: GBMaker,
+        manipulator: GBManipulator,
+    ):
+        """Perform a randomly selected feasible mutation.
+
+        Each configured mutation is attempted at most once. If an operation is
+        physically infeasible for the current candidate, another configured
+        operation is tried. Failure of every configured operation is fatal.
+
+        :param local_random: Optimizer-owned random-number generator.
+        :param GB: GBMaker providing boundary dimensions and repeat factors.
+        :param manipulator: GBManipulator on which to perform the mutation.
+        :return: Mutation description and resulting atom positions.
+        :raises GBMinimizerError: If no configured mutation can produce a candidate.
+        """
+        choice_order = local_random.permutation(len(self.choices_keys))
+        failures: list[tuple[str, GBManipulatorValueError]] = []
+
+        for choice_index in choice_order:
+            choice_key = self.choices_keys[int(choice_index)]
+            try:
+                return self._apply_mutation(
+                    choice_key,
+                    local_random=local_random,
+                    GB=GB,
+                    manipulator=manipulator,
+                )
+            except GBManipulatorValueError as exc:
+                failures.append((choice_key, exc))
+
+        failure_details = "; ".join(
+            f"{choice}: {exc}" for choice, exc in failures
+        )
+        error = GBMinimizerError(
+            "No configured mutation could produce a valid candidate. "
+            f"Attempted mutations: {failure_details}"
+        )
+        raise error from failures[-1][1]
 
 
 class MonteCarloMinimizer:
