@@ -1300,5 +1300,507 @@ def test_owned_ga_carryover_and_crossover_preserve_ownership(owned_ga, tmp_path)
         assert parent.normal_topology is ownership.normal_topology
 
 
+def _owned_checkpoint_energy(tmp_path, *, relaxed_initial_box=None):
+    """Return a deterministic owned evaluator writing ID-reordered artifacts."""
+
+    def energy(GB, manipulator, atom_positions, unique_id):
+        source_box = np.asarray(manipulator.parents[0].box_dims, dtype=float)
+        target_box = source_box
+        returned_atoms = np.array(atom_positions, copy=True)
+        if relaxed_initial_box is not None and str(unique_id).startswith("GA_initial"):
+            target_box = np.asarray(relaxed_initial_box, dtype=float)
+            for axis_name, axis_index in zip("xyz", range(3), strict=True):
+                source_lo, source_hi = source_box[axis_index]
+                target_lo, target_hi = target_box[axis_index]
+                reduced = (
+                    returned_atoms[axis_name] - source_lo
+                ) / (source_hi - source_lo)
+                returned_atoms[axis_name] = target_lo + reduced * (
+                    target_hi - target_lo
+                )
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(output, returned_atoms, target_box)
+        value = float(
+            np.mean(returned_atoms["x"])
+            + 0.01 * np.mean(returned_atoms["y"])
+            + 0.001 * len(returned_atoms)
+        )
+        return value, str(output)
+
+    return energy
+
+
+def _make_owned_checkpoint_minimizer(
+    owned_ga,
+    energy,
+    *,
+    generations,
+    seed=101,
+    choices=None,
+    population_size=4,
+    keep_top_pct=25,
+    allow_variable_cell=False,
+    batch_energy=None,
+):
+    gb, seed_path, ownership, _labels = owned_ga
+    return GeneticAlgorithmMinimizer(
+        gb,
+        energy,
+        ["translate_right_grain"] if choices is None else choices,
+        seed=seed,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        allow_variable_cell=allow_variable_cell,
+        population_size=population_size,
+        generations=generations,
+        keep_top_pct=keep_top_pct,
+        intermediate_pct=100,
+        gb_batch_energy_func=batch_energy,
+    )
+
+
+def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_path):
+    checkpoint = tmp_path / "owned.json"
+    energy = _owned_checkpoint_energy(tmp_path)
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+    )
+
+    minimizer.run_GA(unique_id=201, checkpoint_file=checkpoint)
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["state"]["ga_mode"] == "explicit_ownership"
+    assert state["state"]["owned_checkpoint_version"] == 1
+    assert state["progress_index"] == 0
+    assert len(state["state"]["population_candidates"]) == 4
+    candidate = state["state"]["population_candidates"][0]
+    assert Path(candidate["structure_path"]).is_file()
+    mapping = candidate["mapping"]
+    assert mapping["labels"]
+    assert mapping["atom_ids"] == list(range(1, len(mapping["labels"]) + 1))
+    assert np.asarray(mapping["box_dims"]).shape == (3, 2)
+    assert isinstance(mapping["gb_plane_x"], float)
+    assert mapping["left_grain_x_bounds"]
+    assert mapping["right_grain_x_bounds"]
+    assert state["state"]["best_evaluation"]["mapping"] is not None
+    assert len(state["state"]["last_generation_evaluations"]) == 4
+
+
+def test_owned_ga_resume_matches_continuous_variable_cell_run(owned_ga, tmp_path):
+    gb, _seed_path, ownership, labels = owned_ga
+    initial_box = np.asarray(gb.box_dims, dtype=float)
+    relaxed_box = initial_box.copy()
+    relaxed_box[0] += (-0.4, 0.8)
+    relaxed_box[1] += (-0.2, 0.3)
+    relaxed_box[2] += (-0.1, 0.2)
+    energy = _owned_checkpoint_energy(
+        tmp_path,
+        relaxed_initial_box=relaxed_box,
+    )
+
+    continuous = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=3,
+        allow_variable_cell=True,
+    )
+    continuous.run_GA(unique_id=202, checkpoint_file=tmp_path / "continuous.json")
+
+    checkpoint = tmp_path / "resumed.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        allow_variable_cell=True,
+    )
+    partial.run_GA(unique_id=203, checkpoint_file=checkpoint)
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=3,
+        allow_variable_cell=True,
+    )
+    resumed.run_GA(unique_id=203, checkpoint_file=checkpoint)
+
+    assert len(resumed.GBE_vals) == 4
+    assert len(resumed.history) == 3
+    for continuous_generation, resumed_generation in zip(
+        continuous.GBE_vals,
+        resumed.GBE_vals,
+        strict=True,
+    ):
+        np.testing.assert_allclose(continuous_generation, resumed_generation)
+
+    old_lo, old_hi = initial_box[0]
+    new_lo, new_hi = relaxed_box[0]
+    expected_plane = new_lo + (
+        (ownership.gb_plane_x - old_lo) / (old_hi - old_lo)
+    ) * (new_hi - new_lo)
+    for record in resumed.last_generation_evaluations:
+        assert record.success
+        assert record.manipulator is not None
+        parent = record.manipulator.parents[0]
+        np.testing.assert_allclose(parent.box_dims, relaxed_box)
+        np.testing.assert_array_equal(parent.grain_labels, labels)
+        assert parent.gb_plane_x == pytest.approx(expected_plane)
+
+
+def test_failed_owned_evaluation_stays_excluded_after_resume(owned_ga, tmp_path):
+    def energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+            change_species_row=0 if str(unique_id).endswith("_g0_c0") else None,
+        )
+        return 0.0, str(output)
+
+    checkpoint = tmp_path / "failed.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+    )
+    partial.run_GA(unique_id=204, checkpoint_file=checkpoint)
+    saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+    failed_state = saved["state"]["last_generation_evaluations"][0]
+    assert failed_state["success"] is False
+    assert "changed species" in failed_state["failure_reason"]
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+        population_size=2,
+        keep_top_pct=50,
+    )
+    resumed.run_GA(unique_id=204, checkpoint_file=checkpoint)
+    failed_path = str((tmp_path / "GA_204_g0_c0.data").resolve())
+    assert all(
+        failed_path not in lineage
+        for lineage, _energy in resumed.history[1]
+    )
+
+
+@pytest.mark.parametrize("mutation", ["insert_atoms", "remove_atoms"])
+def test_owned_count_change_uses_fresh_mapping_after_resume(
+    owned_ga,
+    tmp_path,
+    mutation,
+):
+    gb, _seed_path, _ownership, _labels = owned_ga
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / f"{mutation}.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        choices=[mutation],
+        population_size=2,
+        keep_top_pct=0,
+    )
+    partial.run_GA(unique_id=205, checkpoint_file=checkpoint)
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+        choices=[mutation],
+        population_size=2,
+        keep_top_pct=0,
+    )
+    resumed.run_GA(unique_id=205, checkpoint_file=checkpoint)
+
+    counts = []
+    for record in resumed.last_generation_evaluations:
+        assert record.success
+        assert record.mapping is not None
+        count = record.mapping.expected_count
+        counts.append(count)
+        np.testing.assert_array_equal(
+            record.mapping.atom_ids,
+            np.arange(1, count + 1),
+        )
+        assert len(record.mapping.labels) == count
+    assert any(count != len(gb.whole_system) for count in counts)
+
+
+def test_owned_breeding_operations_preserve_ownership_after_resume(
+    owned_ga,
+    tmp_path,
+):
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "breeding.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        population_size=4,
+        keep_top_pct=25,
+    )
+    partial.run_GA(unique_id=206, checkpoint_file=checkpoint)
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+    )
+    resumed.run_GA(unique_id=206, checkpoint_file=checkpoint)
+
+    operations = [lineage[0] for lineage, _energy in resumed.history[1]]
+    assert "carryover" in operations
+    assert "slice_and_merge" in operations
+    assert any(operation.startswith("shift") for operation in operations)
+    for record in resumed.last_generation_evaluations:
+        assert record.success
+        assert record.manipulator is not None
+        parent = record.manipulator.parents[0]
+        assert parent.grain_labels is not None
+        assert len(parent.grain_labels) == len(parent.whole_system)
+
+
+def test_owned_resume_fails_on_missing_population_artifact(owned_ga, tmp_path):
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "missing.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+    )
+    partial.run_GA(unique_id=207, checkpoint_file=checkpoint)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    Path(state["state"]["population_candidates"][0]["structure_path"]).unlink()
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+    )
+    with pytest.raises(GBMinimizerError, match="owned population path"):
+        resumed.run_GA(unique_id=207, checkpoint_file=checkpoint)
+
+
+def test_owned_resume_rejects_invalid_checkpoint_state(owned_ga, tmp_path):
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "invalid.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+    )
+    partial.run_GA(unique_id=208, checkpoint_file=checkpoint)
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    state["state"]["owned_checkpoint_version"] = 999
+    checkpoint.write_text(json.dumps(state), encoding="utf-8")
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+    )
+    with pytest.raises(GBMinimizerError, match="supported explicit-ownership"):
+        resumed.run_GA(unique_id=208, checkpoint_file=checkpoint)
+
+
+def test_owned_checkpointing_is_optional(owned_ga, tmp_path):
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "not-created.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+    )
+
+    minimizer.run_GA(unique_id=209)
+
+    assert not checkpoint.exists()
+    assert not list(tmp_path.glob("*.owned.pending"))
+
+
+def test_owned_scalar_intra_generation_resume_skips_completed_candidates(
+    owned_ga,
+    tmp_path,
+):
+    from GBOpt.Checkpoint import CandidateCheckpoint
+
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "intra.json"
+    original_record = CandidateCheckpoint.record
+    record_count = 0
+
+    def crashing_record(self_checkpoint, unique_id, value, dump, **kwargs):
+        nonlocal record_count
+        original_record(
+            self_checkpoint,
+            unique_id,
+            value,
+            dump,
+            **kwargs,
+        )
+        record_count += 1
+        if record_count == 2:
+            raise RuntimeError("simulated owned mid-generation interruption")
+
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        population_size=4,
+    )
+    with patch.object(CandidateCheckpoint, "record", crashing_record):
+        with pytest.raises(RuntimeError, match="mid-generation"):
+            partial.run_GA(unique_id=210, checkpoint_file=checkpoint)
+
+    resumed_calls = 0
+
+    def tracking_energy(GB, manipulator, atom_positions, unique_id):
+        nonlocal resumed_calls
+        if "_g0_c" in str(unique_id):
+            resumed_calls += 1
+        return energy(GB, manipulator, atom_positions, unique_id)
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        tracking_energy,
+        generations=1,
+        population_size=4,
+    )
+    resumed.run_GA(unique_id=210, checkpoint_file=checkpoint)
+
+    assert resumed_calls == 2
+    assert len(resumed.GBE_vals) == 2
+    assert len(resumed.history) == 1
+
+
+def test_owned_batch_intra_generation_resume_uses_recorded_raw_result(
+    owned_ga,
+    tmp_path,
+):
+    class SimulatedBatchInterruption(BaseException):
+        pass
+
+    scalar_energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "batch-intra.json"
+    interrupted = False
+
+    def interrupting_batch(
+        GB,
+        manipulators,
+        structures,
+        lineages,
+        unique_ids,
+        checkpoint=None,
+    ):
+        nonlocal interrupted
+        results = []
+        for manipulator, atoms, candidate_id in zip(
+            manipulators,
+            structures,
+            unique_ids,
+            strict=True,
+        ):
+            energy, output = scalar_energy(
+                GB,
+                manipulator,
+                atoms,
+                candidate_id,
+            )
+            result = {"energy": energy, "final_dump": output}
+            results.append(result)
+            if not interrupted:
+                checkpoint.record(candidate_id, energy, output)
+                interrupted = True
+                raise SimulatedBatchInterruption()
+        return results
+
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        scalar_energy,
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        batch_energy=interrupting_batch,
+    )
+    with pytest.raises(SimulatedBatchInterruption):
+        partial.run_GA(unique_id=212, checkpoint_file=checkpoint)
+
+    resumed_uids = []
+
+    def resumed_batch(
+        GB,
+        manipulators,
+        structures,
+        lineages,
+        unique_ids,
+        checkpoint=None,
+    ):
+        resumed_uids.extend(unique_ids)
+        results = []
+        for manipulator, atoms, candidate_id in zip(
+            manipulators,
+            structures,
+            unique_ids,
+            strict=True,
+        ):
+            energy, output = scalar_energy(
+                GB,
+                manipulator,
+                atoms,
+                candidate_id,
+            )
+            results.append({"energy": energy, "final_dump": output})
+        return results
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        scalar_energy,
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        batch_energy=resumed_batch,
+    )
+    resumed.run_GA(unique_id=212, checkpoint_file=checkpoint)
+
+    assert resumed_uids == ["GA_212_g0_c1"]
+    assert all(record.success for record in resumed.last_generation_evaluations)
+
+
+def test_owned_checkpoint_pickle_resume(owned_ga, tmp_path):
+    energy = _owned_checkpoint_energy(tmp_path)
+    checkpoint = tmp_path / "owned.pkl"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+    )
+    partial.run_GA(
+        unique_id=211,
+        checkpoint_file=checkpoint,
+        checkpoint_format="pickle",
+    )
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=2,
+        population_size=2,
+        keep_top_pct=50,
+    )
+    resumed.run_GA(
+        unique_id=211,
+        checkpoint_file=checkpoint,
+        checkpoint_format="pickle",
+    )
+
+    assert len(resumed.GBE_vals) == 3
+    assert len(resumed.history) == 2
+
+
 if __name__ == "__main__":
     unittest.main()

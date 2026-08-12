@@ -20,6 +20,7 @@ from GBOpt.FileGrainOwnership import (
     LammpsDataError,
     reload_explicit_manipulator,
 )
+from GBOpt.Checkpoint import CandidateCheckpoint, CheckpointError
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import GBManipulator, GBManipulatorError, ParentError
 
@@ -98,6 +99,28 @@ class ExplicitOwnershipEvaluator:
     def begin_run(self) -> None:
         """Reset run-local evaluator artifact identity tracking."""
         self._claimed_paths.clear()
+
+    def claimed_paths_state(self) -> list[str]:
+        """Return deterministic checkpoint state for claimed evaluator artifacts.
+
+        :return: Canonical claimed paths in lexical order.
+        """
+        return sorted(str(path) for path in self._claimed_paths)
+
+    def restore_claimed_paths(self, paths: object) -> None:
+        """Restore run-local evaluator artifact identity from a checkpoint.
+
+        Historical claimed artifacts need not still exist, but every entry must remain a
+        canonical path-like string so later path-reuse checks are deterministic.
+
+        :param paths: Serialized sequence of previously claimed artifact paths.
+        :raises TypeError: If the state is not a sequence of path strings.
+        """
+        if not isinstance(paths, list) or not all(
+            isinstance(path, str) for path in paths
+        ):
+            raise TypeError("claimed evaluator paths must be a list of strings")
+        self._claimed_paths = {Path(path).resolve() for path in paths}
 
     def _candidate_file_mapping(
         self,
@@ -250,7 +273,7 @@ class ExplicitOwnershipEvaluator:
 
         try:
             numeric_energy = self._normalize_energy(energy)
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             return self._failed_evaluation(
                 input_index,
                 f"invalid energy: {exc}",
@@ -307,6 +330,84 @@ class ExplicitOwnershipEvaluator:
             success=True,
         )
 
+    @staticmethod
+    def _checkpoint_metadata(record: CandidateEvaluation) -> dict:
+        """Return JSON-safe typed state for one owned candidate result.
+
+        :param record: Validated explicit-ownership evaluation.
+        :return: Versioned success/failure metadata for a candidate sidecar.
+        """
+        return {
+            "owned_evaluation_version": 1,
+            "success": record.success,
+            "failure_reason": record.failure_reason,
+        }
+
+    def _restore_checkpointed_result(
+        self,
+        checkpoint: CandidateCheckpoint,
+        unique_id: str,
+        input_index: int,
+        mapping: CandidateFileMapping,
+    ) -> CandidateEvaluation:
+        """Reconstruct one completed owned evaluation from a candidate sidecar.
+
+        Successful artifacts are revalidated through the authoritative reload path.
+        Typed failures remain failures and are never reconsidered as parents. Legacy or
+        batch-written raw results without owned metadata are normalized normally.
+
+        :param checkpoint: Candidate checkpoint containing the completed result.
+        :param unique_id: Candidate identifier in the checkpoint.
+        :param input_index: Candidate position in population order.
+        :param mapping: Fresh candidate-local ownership mapping.
+        :return: Restored aligned candidate evaluation.
+        :raises CheckpointError: If the recorded candidate result is unavailable.
+        """
+        energy, structure_path = checkpoint.get_result(unique_id)
+        metadata = checkpoint.get_metadata(unique_id)
+        if (
+            metadata is not None
+            and metadata.get("owned_evaluation_version") == 1
+            and metadata.get("success") is False
+        ):
+            reason = metadata.get("failure_reason")
+            if not isinstance(reason, str) or not reason:
+                reason = "checkpointed explicit-ownership evaluation failed"
+            return self._failed_evaluation(
+                input_index,
+                reason,
+                mapping,
+                self._diagnostic_path(structure_path),
+            )
+        return self._record_result(
+            input_index=input_index,
+            mapping=mapping,
+            energy=energy,
+            structure_path=structure_path,
+        )
+
+    @staticmethod
+    def _checkpoint_record(
+        checkpoint: CandidateCheckpoint | None,
+        unique_id: str,
+        record: CandidateEvaluation,
+    ) -> None:
+        """Persist one validated owned evaluation when checkpointing is enabled.
+
+        :param checkpoint: Candidate sidecar, or ``None`` when checkpointing is disabled.
+        :param unique_id: Candidate identifier in the checkpoint.
+        :param record: Validated explicit-ownership evaluation.
+        :raises CheckpointError: If the sidecar cannot be persisted.
+        """
+        if checkpoint is None:
+            return
+        checkpoint.record(
+            unique_id,
+            record.energy,
+            record.structure_path,
+            metadata=ExplicitOwnershipEvaluator._checkpoint_metadata(record),
+        )
+
     def evaluate_candidate(
         self,
         manipulator: GBManipulator,
@@ -357,6 +458,8 @@ class ExplicitOwnershipEvaluator:
         population_lineages: list[list[str]],
         gen: int,
         unique_id: int | UUID,
+        *,
+        gen_checkpoint: CandidateCheckpoint | None = None,
     ) -> list[CandidateEvaluation]:
         """Evaluate one index-aligned explicit-ownership population.
 
@@ -365,10 +468,13 @@ class ExplicitOwnershipEvaluator:
         :param population_lineages: Candidate lineages in population order.
         :param gen: Generation index.
         :param unique_id: Run identifier used to construct callback IDs.
+        :param gen_checkpoint: Keyword argument, optional, defaults to ``None``.
+            Per-candidate recovery sidecar for this generation.
         :return: One aligned typed evaluation per input candidate.
         :raises ValueError: If population arrays or batch results are not aligned, or
             if a batch result is not a dictionary.
         :raises RuntimeError: If an internal alignment invariant is lost.
+        :raises CheckpointError: If candidate checkpoint state cannot be read or written.
         """
         population_length = len(population_structures)
         if not (
@@ -385,12 +491,35 @@ class ExplicitOwnershipEvaluator:
             f"GA_{unique_id}_g{gen}_c{i}" for i in range(population_length)
         ]
         if self.batch_energy_func is None:
-            return [
-                self.evaluate_candidate(manipulator, atoms, candidate_id, index)
-                for index, (manipulator, atoms, candidate_id) in enumerate(
-                    zip(population_manipulators, population_structures, unique_ids)
-                )
-            ]
+            records = []
+            for index, (manipulator, atoms, candidate_id) in enumerate(
+                zip(population_manipulators, population_structures, unique_ids)
+            ):
+                try:
+                    mapping = self._candidate_file_mapping(manipulator, atoms)
+                except GrainOwnershipError as exc:
+                    record = self._failed_evaluation(index, str(exc))
+                else:
+                    if (
+                        gen_checkpoint is not None
+                        and gen_checkpoint.is_done(candidate_id)
+                    ):
+                        record = self._restore_checkpointed_result(
+                            gen_checkpoint,
+                            candidate_id,
+                            index,
+                            mapping,
+                        )
+                    else:
+                        record = self.evaluate_candidate(
+                            manipulator,
+                            atoms,
+                            candidate_id,
+                            index,
+                        )
+                self._checkpoint_record(gen_checkpoint, candidate_id, record)
+                records.append(record)
+            return records
 
         records: list[CandidateEvaluation | None] = [None] * population_length
         valid_indices: list[int] = []
@@ -407,25 +536,45 @@ class ExplicitOwnershipEvaluator:
             valid_mappings.append(mapping)
 
         if valid_indices:
+            pending_positions = [
+                position
+                for position, input_index in enumerate(valid_indices)
+                if gen_checkpoint is None
+                or not gen_checkpoint.is_done(unique_ids[input_index])
+            ]
+            pending_indices = [valid_indices[position] for position in pending_positions]
+            pending_mappings = [
+                valid_mappings[position] for position in pending_positions
+            ]
             try:
-                raw_results = self.batch_energy_func(
-                    self.GB,
-                    [population_manipulators[index] for index in valid_indices],
-                    [population_structures[index] for index in valid_indices],
-                    [population_lineages[index] for index in valid_indices],
-                    [unique_ids[index] for index in valid_indices],
-                )
+                if pending_indices:
+                    raw_results = self.batch_energy_func(
+                        self.GB,
+                        [population_manipulators[index] for index in pending_indices],
+                        [population_structures[index] for index in pending_indices],
+                        [population_lineages[index] for index in pending_indices],
+                        [unique_ids[index] for index in pending_indices],
+                        checkpoint=gen_checkpoint,
+                    )
+                else:
+                    raw_results = []
             except Exception as exc:
                 # The external evaluator callback is a deliberate recovery boundary.
-                for input_index, mapping in zip(valid_indices, valid_mappings):
-                    records[input_index] = self._failed_evaluation(
+                for input_index, mapping in zip(pending_indices, pending_mappings):
+                    record = self._failed_evaluation(
                         input_index,
                         f"{type(exc).__name__}: {exc}",
                         mapping,
                     )
+                    records[input_index] = record
+                    self._checkpoint_record(
+                        gen_checkpoint,
+                        unique_ids[input_index],
+                        record,
+                    )
             else:
                 if not isinstance(raw_results, list) or len(raw_results) != len(
-                    valid_mappings
+                    pending_mappings
                 ):
                     raise ValueError(
                         "explicit-ownership batch evaluation requires one ordered "
@@ -438,16 +587,36 @@ class ExplicitOwnershipEvaluator:
                             "dictionary"
                         )
                 for input_index, mapping, result in zip(
-                    valid_indices,
-                    valid_mappings,
+                    pending_indices,
+                    pending_mappings,
                     raw_results,
                 ):
-                    records[input_index] = self._record_result(
+                    record = self._record_result(
                         input_index=input_index,
                         mapping=mapping,
                         energy=result.get("energy", _MISSING),
                         structure_path=result.get("final_dump", _MISSING),
                     )
+                    records[input_index] = record
+                    self._checkpoint_record(
+                        gen_checkpoint,
+                        unique_ids[input_index],
+                        record,
+                    )
+
+            if gen_checkpoint is not None:
+                for input_index, mapping in zip(valid_indices, valid_mappings):
+                    if records[input_index] is not None:
+                        continue
+                    candidate_id = unique_ids[input_index]
+                    record = self._restore_checkpointed_result(
+                        gen_checkpoint,
+                        candidate_id,
+                        input_index,
+                        mapping,
+                    )
+                    records[input_index] = record
+                    self._checkpoint_record(gen_checkpoint, candidate_id, record)
 
         if any(record is None for record in records):
             raise RuntimeError("explicit-ownership evaluation lost candidate alignment")

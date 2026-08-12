@@ -27,7 +27,69 @@ from GBOpt.Checkpoint import (
     CheckpointStore,
     _wrap_batch_func_with_checkpoint,
 )
-from GBOpt.FileGrainOwnership import GrainOwnership
+from GBOpt.FileGrainOwnership import (
+    CandidateFileMapping,
+    GrainOwnership,
+    GrainOwnershipError,
+    LammpsDataError,
+)
+from GBOpt.GBMaker import GBMakerError
+from GBOpt.GBManipulator import GBManipulatorError, ParentError
+
+
+_OWNED_GA_CHECKPOINT_VERSION = 1
+
+
+def _candidate_mapping_to_state(mapping: CandidateFileMapping) -> dict:
+    """Serialize a candidate-local ownership mapping for checkpoint persistence.
+
+    :param mapping: Validated candidate/file mapping.
+    :return: JSON-safe mapping state without live optimizer objects.
+    """
+    return {
+        "atom_ids": mapping.atom_ids,
+        "labels": mapping.labels,
+        "species": mapping.species.tolist(),
+        "box_dims": mapping.box_dims,
+        "gb_plane_x": mapping.gb_plane_x,
+        "inplane_periodic": mapping.inplane_periodic,
+        "left_grain_x_bounds": mapping.left_grain_x_bounds,
+        "right_grain_x_bounds": mapping.right_grain_x_bounds,
+        "coordinate_tolerance": mapping.coordinate_tolerance,
+        "normal_topology": mapping.normal_topology.value,
+    }
+
+
+def _candidate_mapping_from_state(state: object) -> CandidateFileMapping:
+    """Reconstruct and validate a checkpointed candidate/file mapping.
+
+    :param state: Deserialized mapping state.
+    :return: Validated candidate-local ownership mapping.
+    :raises GrainOwnershipError: If the checkpointed mapping is malformed.
+    """
+    if not isinstance(state, dict):
+        raise GrainOwnershipError("candidate mapping state must be a dictionary")
+    try:
+        return CandidateFileMapping(
+            atom_ids=np.asarray(state["atom_ids"], dtype=object),
+            labels=np.asarray(state["labels"], dtype=object),
+            species=np.asarray(state["species"], dtype=object),
+            box_dims=np.asarray(state["box_dims"], dtype=object),
+            gb_plane_x=state["gb_plane_x"],
+            inplane_periodic=tuple(state["inplane_periodic"]),
+            left_grain_x_bounds=np.asarray(
+                state["left_grain_x_bounds"], dtype=object
+            ),
+            right_grain_x_bounds=np.asarray(
+                state["right_grain_x_bounds"], dtype=object
+            ),
+            coordinate_tolerance=state["coordinate_tolerance"],
+            normal_topology=state["normal_topology"],
+        )
+    except (KeyError, TypeError) as exc:
+        raise GrainOwnershipError(
+            "candidate mapping checkpoint state is incomplete or malformed"
+        ) from exc
 
 
 class GBMinimizerError(Exception):
@@ -817,6 +879,230 @@ class GeneticAlgorithmMinimizer:
     def _is_valid_file(self, p: str | None) -> bool:
         return bool(p) and Path(p).is_file()
 
+    @staticmethod
+    def _owned_evaluation_to_state(record: CandidateEvaluation) -> dict:
+        """Serialize one typed owned evaluation without its live manipulator.
+
+        :param record: Explicit-ownership evaluation to persist.
+        :return: JSON-safe evaluation state.
+        """
+        return {
+            "input_index": record.input_index,
+            "energy": record.energy,
+            "structure_path": record.structure_path,
+            "mapping": (
+                None
+                if record.mapping is None
+                else _candidate_mapping_to_state(record.mapping)
+            ),
+            "success": record.success,
+            "failure_reason": record.failure_reason,
+        }
+
+    def _owned_evaluation_from_state(self, state: object) -> CandidateEvaluation:
+        """Reconstruct one typed owned evaluation from checkpoint state.
+
+        Successful artifacts are reloaded through the authoritative explicit-ownership
+        path. Failed records remain non-reusable and do not require their diagnostic
+        artifact to exist.
+
+        :param state: Deserialized evaluation state.
+        :return: Validated typed evaluation.
+        :raises GBMinimizerError: If the state or a required successful artifact is
+            invalid.
+        """
+        if self._owned_evaluator is None:
+            raise GBMinimizerError(
+                "owned evaluation restore requires an evaluator adapter"
+            )
+        if not isinstance(state, dict):
+            raise GBMinimizerError("owned evaluation state must be a dictionary")
+        try:
+            input_index = int(state["input_index"])
+            energy = float(state["energy"])
+            structure_path = state["structure_path"]
+            success = state["success"]
+            failure_reason = state.get("failure_reason")
+            mapping_state = state["mapping"]
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GBMinimizerError("owned evaluation state is malformed") from exc
+        if isinstance(state.get("input_index"), (bool, np.bool_)) or input_index < -1:
+            raise GBMinimizerError("owned evaluation input_index is invalid")
+        if not np.isfinite(energy):
+            raise GBMinimizerError("owned evaluation energy must be finite")
+        if not isinstance(success, bool):
+            raise GBMinimizerError("owned evaluation success must be Boolean")
+        if structure_path is not None and not isinstance(structure_path, str):
+            raise GBMinimizerError("owned evaluation structure_path is invalid")
+        try:
+            mapping = (
+                None
+                if mapping_state is None
+                else _candidate_mapping_from_state(mapping_state)
+            )
+        except GrainOwnershipError as exc:
+            raise GBMinimizerError(
+                f"owned evaluation mapping is invalid: {exc}"
+            ) from exc
+        if not success:
+            if not isinstance(failure_reason, str) or not failure_reason:
+                raise GBMinimizerError(
+                    "failed owned evaluation lacks failure context"
+                )
+            if energy != self._owned_evaluator.penalty:
+                raise GBMinimizerError(
+                    "failed owned evaluation does not carry the configured penalty"
+                )
+            return CandidateEvaluation(
+                input_index=input_index,
+                energy=energy,
+                structure_path=structure_path,
+                mapping=mapping,
+                manipulator=None,
+                success=False,
+                failure_reason=failure_reason,
+            )
+        if mapping is None or structure_path is None:
+            raise GBMinimizerError(
+                "successful owned evaluation lacks reconstruction state"
+            )
+        try:
+            manipulator = self._owned_evaluator._reload_mapping(
+                structure_path,
+                mapping,
+            )
+        except (
+            OSError,
+            LammpsDataError,
+            GrainOwnershipError,
+            ParentError,
+            GBManipulatorError,
+        ) as exc:
+            raise GBMinimizerError(
+                "Checkpoint owned evaluation artifact is missing, unreadable, or "
+                f"inconsistent: {structure_path}"
+            ) from exc
+        return CandidateEvaluation(
+            input_index=input_index,
+            energy=energy,
+            structure_path=structure_path,
+            mapping=mapping,
+            manipulator=manipulator,
+            success=True,
+        )
+
+    def _write_owned_population_checkpoint(
+        self,
+        checkpoint_file: Path,
+        unique_id: str,
+        next_generation: int,
+        manipulators: list[GBManipulator],
+        structures: list[np.ndarray],
+    ) -> list[dict]:
+        """Write owned pending structures and their explicit reconstruction metadata.
+
+        :param checkpoint_file: Run-level checkpoint path whose directory owns artifacts.
+        :param unique_id: Stable run identifier.
+        :param next_generation: Generation that will consume the pending population.
+        :param manipulators: Candidate manipulators in population order.
+        :param structures: Candidate atom rows in matching population order.
+        :return: Ordered serialized population snapshots.
+        :raises GBMinimizerError: If population alignment or ownership is invalid.
+        """
+        if self._owned_evaluator is None:
+            raise GBMinimizerError(
+                "owned population checkpoint requires an evaluator adapter"
+            )
+        if len(manipulators) != len(structures):
+            raise GBMinimizerError(
+                "owned checkpoint population lost manipulator/structure alignment"
+            )
+        snapshots = []
+        for index, (manipulator, structure) in enumerate(
+            zip(manipulators, structures, strict=True)
+        ):
+            try:
+                mapping = self._owned_evaluator._candidate_file_mapping(
+                    manipulator,
+                    structure,
+                )
+            except GrainOwnershipError as exc:
+                raise GBMinimizerError(
+                    f"owned checkpoint candidate {index} has invalid ownership: {exc}"
+                ) from exc
+            pending_path = checkpoint_file.parent / (
+                f"GA_{unique_id}_g{next_generation}_c{index}.owned.pending"
+            )
+            try:
+                self.GB.write_lammps(
+                    str(pending_path),
+                    structure,
+                    mapping.box_dims,
+                    precision=15,
+                )
+            except (OSError, GBMakerError) as exc:
+                raise GBMinimizerError(
+                    f"could not persist owned checkpoint candidate {index}"
+                ) from exc
+            snapshots.append(
+                {
+                    "structure_path": str(pending_path),
+                    "mapping": _candidate_mapping_to_state(mapping),
+                }
+            )
+        return snapshots
+
+    def _restore_owned_population(
+        self,
+        snapshots: object,
+    ) -> tuple[list[GBManipulator], list[np.ndarray]]:
+        """Restore an aligned pending owned population from checkpoint snapshots.
+
+        :param snapshots: Ordered serialized structure/mapping snapshots.
+        :return: Reconstructed manipulators and atom arrays.
+        :raises GBMinimizerError: If state is malformed or any required artifact fails
+            explicit reload validation.
+        """
+        if self._owned_evaluator is None:
+            raise GBMinimizerError(
+                "owned population restore requires an evaluator adapter"
+            )
+        if not isinstance(snapshots, list) or len(snapshots) != self.population_size:
+            raise GBMinimizerError(
+                "owned checkpoint population has an invalid candidate count"
+            )
+        manipulators = []
+        structures = []
+        for index, snapshot in enumerate(snapshots):
+            if not isinstance(snapshot, dict):
+                raise GBMinimizerError(
+                    f"owned checkpoint candidate {index} is malformed"
+                )
+            path = snapshot.get("structure_path")
+            if not isinstance(path, str):
+                raise GBMinimizerError(
+                    f"owned checkpoint candidate {index} lacks a structure path"
+                )
+            try:
+                mapping = _candidate_mapping_from_state(snapshot.get("mapping"))
+                manipulator = self._owned_evaluator._reload_mapping(path, mapping)
+            except (
+                OSError,
+                LammpsDataError,
+                GrainOwnershipError,
+                ParentError,
+                GBManipulatorError,
+            ) as exc:
+                raise GBMinimizerError(
+                    f"Checkpoint owned population path {path} is missing, unreadable, "
+                    "or inconsistent."
+                ) from exc
+            manipulators.append(manipulator)
+            structures.append(
+                np.array(manipulator.parents[0].whole_system, copy=True)
+            )
+        return manipulators, structures
+
     def run_GA(
         self,
         unique_id: "int | uuid.UUID | None" = None,
@@ -839,21 +1125,30 @@ class GeneticAlgorithmMinimizer:
         extend a run. Do not delete or move the ``.pending`` files independently of the
         checkpoint file.
 
-        :param unique_id: Label applied to all output files. Restored from the
-            checkpoint on resume if not provided.
-        :param checkpoint_file: Path to the run-level checkpoint file. If the file
-            exists the run resumes from it; otherwise a fresh run begins and the file is
-            created.
-        :param checkpoint_format: Serialization format — ``"json"`` (default,
-            human-readable) or ``"pickle"`` (binary, no numpy conversion needed).
-        :param checkpoint_interval: Save a run-level checkpoint every N generations
-            (default 1).
+        :param unique_id: Argument, optional, defaults to ``None``. Label applied to all
+            output files. Restored from the checkpoint on resume if not provided.
+        :param checkpoint_file: Keyword argument, optional, defaults to ``None``. Path to
+            the run-level checkpoint file. If the file exists the run resumes from it;
+            otherwise a fresh run begins and the file is created.
+        :param checkpoint_format: Keyword argument, optional, defaults to ``"json"``.
+            Serialization format: ``"json"`` (human-readable) or ``"pickle"`` (binary,
+            no NumPy conversion needed).
+        :param checkpoint_interval: Keyword argument, optional, defaults to 1. Save a
+            run-level checkpoint every N generations.
         :return: Tuple containing the minimum energy value observed and the associated
             dump filename.
+        :raises GBMinimizerError: If a checkpoint is malformed or references a missing,
+            unreadable, or ownership-inconsistent required structure artifact.
+        :raises GBMinimizerValueError: If checkpoint configuration is invalid.
         """
 
         if self.initial_ownership is not None:
-            return self._run_owned_GA(unique_id=unique_id)
+            return self._run_owned_GA(
+                unique_id=unique_id,
+                checkpoint_file=checkpoint_file,
+                checkpoint_format=checkpoint_format,
+                checkpoint_interval=checkpoint_interval,
+            )
 
         try:
             if checkpoint_file is not None:
@@ -1100,76 +1395,286 @@ class GeneticAlgorithmMinimizer:
     def _run_owned_GA(
         self,
         unique_id: int | uuid.UUID | None = None,
+        *,
+        checkpoint_file: str | Path | None = None,
+        checkpoint_format: str = "json",
+        checkpoint_interval: int = 1,
     ) -> tuple[float, str]:
         """Run the GA while preserving explicit ownership through every reload.
 
-        :param unique_id: Run identifier, optional, defaults to ``None``.
+        :param unique_id: Argument, optional, defaults to ``None``. Run identifier.
+        :param checkpoint_file: Keyword argument, optional, defaults to ``None``. Run-level
+            checkpoint path used for generation-boundary and candidate-sidecar recovery.
+        :param checkpoint_format: Keyword argument, optional, defaults to ``"json"``.
+            Checkpoint serialization format, either ``"json"`` or ``"pickle"``.
+        :param checkpoint_interval: Keyword argument, optional, defaults to 1. Save the
+            run-level checkpoint every N completed generations.
         :return: Minimum energy and validated structure path.
-        :raises RuntimeError: If initial evaluation fails or aligned population state
-            cannot be maintained.
+        :raises GBMinimizerError: If evaluation fails initially, aligned population state
+            cannot be maintained, or checkpoint state cannot be reconstructed safely.
+        :raises GBMinimizerValueError: If checkpoint configuration is invalid.
         """
         if self._owned_evaluator is None:
-            raise RuntimeError(
+            raise GBMinimizerError(
                 "explicit-ownership execution requires an evaluator adapter"
             )
-        if unique_id is None:
-            unique_id = uuid.uuid4()
-        self.GBE_vals = []
-        self.history = []
-        self.last_generation_evaluations: list[CandidateEvaluation] = []
+
+        try:
+            if checkpoint_file is None:
+                checkpoint = CheckpointStore.disabled()
+                state = None
+                unique_id = str(unique_id) if unique_id is not None else str(uuid.uuid4())
+            else:
+                checkpoint_file = Path(checkpoint_file)
+                checkpoint = CheckpointStore.from_optional(
+                    checkpoint_file,
+                    checkpoint_format,
+                    checkpoint_interval,
+                )
+                state = checkpoint.load()
+                if state is None:
+                    unique_id = (
+                        str(unique_id) if unique_id is not None else str(uuid.uuid4())
+                    )
+                else:
+                    unique_id = state["run_params"]["unique_id"]
+        except CheckpointError as exc:
+            raise GBMinimizerValueError(str(exc)) from exc
+        except (KeyError, TypeError) as exc:
+            raise GBMinimizerError(
+                "Invalid explicit-ownership GA checkpoint envelope."
+            ) from exc
+
         self._owned_evaluator.begin_run()
 
-        initial_atoms = np.array(
-            self.manipulator.parents[0].whole_system,
-            copy=True,
-        )
-        # No mutation has occurred yet, so the initial candidate labels are the
-        # persistent labels carried by the owned parent.
-        initial_record = self._owned_evaluator.evaluate_candidate(
-            self.manipulator,
-            initial_atoms,
-            f"GA_initial{unique_id}",
-            -1,
-        )
-        if not initial_record.success or initial_record.structure_path is None:
-            raise RuntimeError(
-                "initial explicit-ownership evaluation failed: "
-                f"{initial_record.failure_reason}"
+        population_snapshots: list[dict] = []
+        if state is not None:
+            try:
+                if not isinstance(state, dict):
+                    raise GBMinimizerError(
+                        "checkpoint envelope must be a dictionary"
+                    )
+                if (
+                    state.get("schema_version") != CHECKPOINT_SCHEMA_VERSION
+                    or state.get("minimizer") != "GeneticAlgorithmMinimizer"
+                    or state.get("progress_unit") != "generation"
+                ):
+                    raise GBMinimizerError(
+                        "checkpoint envelope is not a supported genetic-algorithm state"
+                    )
+                owned_state = state["state"]
+                if (
+                    owned_state.get("ga_mode") != "explicit_ownership"
+                    or owned_state.get("owned_checkpoint_version")
+                    != _OWNED_GA_CHECKPOINT_VERSION
+                ):
+                    raise GBMinimizerError(
+                        "checkpoint does not contain supported explicit-ownership state"
+                    )
+                run_params = state["run_params"]
+                expected_params = {
+                    "population_size": self.population_size,
+                    "keep_top_pct": self.keep_top_pct,
+                    "intermediate_pct": self.intermediate_pct,
+                    "allow_variable_cell": self.allow_variable_cell,
+                    "choices": self.mutator.choices_keys,
+                }
+                for name, expected in expected_params.items():
+                    if run_params.get(name) != expected:
+                        raise GBMinimizerError(
+                            f"owned checkpoint run parameter {name!r} does not match "
+                            "the minimizer configuration"
+                        )
+
+                progress_index = state["progress_index"]
+                if (
+                    isinstance(progress_index, (bool, np.bool_))
+                    or not isinstance(progress_index, Integral)
+                    or progress_index < 0
+                ):
+                    raise GBMinimizerError(
+                        "owned checkpoint progress_index is invalid"
+                    )
+                self.GBE_vals = owned_state["GBE_vals"]
+                self.history = owned_state["history"]
+                if (
+                    not isinstance(self.GBE_vals, list)
+                    or len(self.GBE_vals) != progress_index + 2
+                    or not isinstance(self.history, list)
+                    or len(self.history) != progress_index + 1
+                ):
+                    raise GBMinimizerError(
+                        "owned checkpoint energy/history progress is inconsistent"
+                    )
+                self.local_random.bit_generator.state = state["rng_state"]
+                _start_gen = int(progress_index) + 1
+                best_record = self._owned_evaluation_from_state(
+                    owned_state["best_evaluation"]
+                )
+                if not best_record.success:
+                    raise GBMinimizerError(
+                        "owned checkpoint best evaluation is not reusable"
+                    )
+                if not np.isclose(
+                    best_record.energy,
+                    float(state["best_energy"]),
+                    rtol=0.0,
+                    atol=0.0,
+                ) or best_record.structure_path != state["best_dump"]:
+                    raise GBMinimizerError(
+                        "owned checkpoint best-evaluation envelope is inconsistent"
+                    )
+                population_lineages = owned_state["population_lineages"]
+                if (
+                    not isinstance(population_lineages, list)
+                    or len(population_lineages) != self.population_size
+                    or not all(isinstance(lineage, list) for lineage in population_lineages)
+                ):
+                    raise GBMinimizerError(
+                        "owned checkpoint population lineages are invalid"
+                    )
+                population_snapshots = owned_state["population_candidates"]
+                population_manipulators, population_structures = (
+                    self._restore_owned_population(population_snapshots)
+                )
+                last_states = owned_state["last_generation_evaluations"]
+                if not isinstance(last_states, list) or len(last_states) != self.population_size:
+                    raise GBMinimizerError(
+                        "owned checkpoint generation evaluations are invalid"
+                    )
+                self.last_generation_evaluations = [
+                    self._owned_evaluation_from_state(record_state)
+                    for record_state in last_states
+                ]
+                self._owned_evaluator.restore_claimed_paths(
+                    owned_state["claimed_paths"]
+                )
+                self.best_evaluation = best_record
+                stale = CandidateCheckpoint._derive_path(
+                    checkpoint_file,
+                    int(progress_index),
+                )
+                if stale.exists():
+                    stale.unlink()
+            except GBMinimizerError:
+                raise
+            except (KeyError, TypeError, ValueError) as exc:
+                raise GBMinimizerError(
+                    f"Invalid explicit-ownership GA checkpoint state: {exc}"
+                ) from exc
+        else:
+            self.GBE_vals = []
+            self.history = []
+            self.last_generation_evaluations = []
+            initial_atoms = np.array(
+                self.manipulator.parents[0].whole_system,
+                copy=True,
             )
-        self.GBE_vals.append([initial_record.energy])
-        best_record = initial_record
-        self.best_evaluation = best_record
-
-        population_manipulators: list[GBManipulator] = []
-        population_structures: list[np.ndarray] = []
-        population_lineages: list[list[str]] = []
-
-        seed_manipulator = self._clone_owned_record(initial_record)
-        population_manipulators.append(seed_manipulator)
-        population_structures.append(
-            np.array(seed_manipulator.parents[0].whole_system, copy=True)
-        )
-        population_lineages.append(["START", initial_record.structure_path])
-
-        for _ in range(self.population_size - 1):
-            candidate_manipulator = self._clone_owned_record(initial_record)
-            mutation, candidate_structure = self.mutator.mutate(
-                local_random=self.local_random,
-                GB=self.GB,
-                manipulator=candidate_manipulator,
+            # No mutation has occurred yet, so initial labels are the persistent labels
+            # carried by the owned parent.
+            initial_record = self._owned_evaluator.evaluate_candidate(
+                self.manipulator,
+                initial_atoms,
+                f"GA_initial{unique_id}",
+                -1,
             )
-            population_manipulators.append(candidate_manipulator)
-            population_structures.append(candidate_structure)
-            population_lineages.append([mutation, initial_record.structure_path])
+            if not initial_record.success or initial_record.structure_path is None:
+                raise GBMinimizerError(
+                    "initial explicit-ownership evaluation failed: "
+                    f"{initial_record.failure_reason}"
+                )
+            self.GBE_vals.append([initial_record.energy])
+            best_record = initial_record
+            self.best_evaluation = best_record
 
-        for gen in range(self.generations):
-            records = self._owned_evaluator.evaluate_generation(
-                population_manipulators,
-                population_structures,
-                population_lineages,
-                gen,
-                unique_id,
+            population_manipulators = []
+            population_structures = []
+            population_lineages = []
+            seed_manipulator = self._clone_owned_record(initial_record)
+            population_manipulators.append(seed_manipulator)
+            population_structures.append(
+                np.array(seed_manipulator.parents[0].whole_system, copy=True)
             )
+            population_lineages.append(["START", initial_record.structure_path])
+
+            for _ in range(self.population_size - 1):
+                candidate_manipulator = self._clone_owned_record(initial_record)
+                mutation, candidate_structure = self.mutator.mutate(
+                    local_random=self.local_random,
+                    GB=self.GB,
+                    manipulator=candidate_manipulator,
+                )
+                population_manipulators.append(candidate_manipulator)
+                population_structures.append(candidate_structure)
+                population_lineages.append([mutation, initial_record.structure_path])
+            _start_gen = 0
+
+        def _build_owned_state(gen: int) -> dict:
+            return {
+                "schema_version": CHECKPOINT_SCHEMA_VERSION,
+                "minimizer": "GeneticAlgorithmMinimizer",
+                "progress_unit": "generation",
+                "progress_index": gen,
+                "best_energy": best_record.energy,
+                "best_dump": best_record.structure_path,
+                "rng_state": self.local_random.bit_generator.state,
+                "run_params": {
+                    "unique_id": str(unique_id),
+                    "population_size": self.population_size,
+                    "keep_top_pct": self.keep_top_pct,
+                    "intermediate_pct": self.intermediate_pct,
+                    "allow_variable_cell": self.allow_variable_cell,
+                    "choices": self.mutator.choices_keys,
+                },
+                "state": {
+                    "ga_mode": "explicit_ownership",
+                    "owned_checkpoint_version": _OWNED_GA_CHECKPOINT_VERSION,
+                    "GBE_vals": self.GBE_vals,
+                    "history": self.history,
+                    "population_lineages": population_lineages,
+                    "population_candidates": population_snapshots,
+                    "best_evaluation": self._owned_evaluation_to_state(best_record),
+                    "last_generation_evaluations": [
+                        self._owned_evaluation_to_state(record)
+                        for record in self.last_generation_evaluations
+                    ],
+                    "claimed_paths": self._owned_evaluator.claimed_paths_state(),
+                },
+            }
+
+        for gen in range(_start_gen, self.generations):
+            current_pending = [
+                snapshot["structure_path"]
+                for snapshot in population_snapshots
+                if str(snapshot.get("structure_path", "")).endswith(
+                    ".owned.pending"
+                )
+            ]
+            all_uids = [
+                f"GA_{unique_id}_g{gen}_c{index}"
+                for index in range(len(population_structures))
+            ]
+            try:
+                gen_checkpoint = (
+                    CandidateCheckpoint.new_or_resume(
+                        checkpoint_file,
+                        checkpoint_format,
+                        gen,
+                        all_uids,
+                    )
+                    if checkpoint.enabled
+                    else None
+                )
+                records = self._owned_evaluator.evaluate_generation(
+                    population_manipulators,
+                    population_structures,
+                    population_lineages,
+                    gen,
+                    unique_id,
+                    gen_checkpoint=gen_checkpoint,
+                )
+            except CheckpointError as exc:
+                raise GBMinimizerError(str(exc)) from exc
             self.last_generation_evaluations = records
             generation_energies = [record.energy for record in records]
             self.GBE_vals.append(generation_energies)
@@ -1177,9 +1682,9 @@ class GeneticAlgorithmMinimizer:
             valid_records = [record for record in records if record.success]
 
             if not valid_records:
-                next_manipulators = []
-                next_structures = []
-                next_lineages = []
+                next_manipulators: list[GBManipulator] = []
+                next_structures: list[np.ndarray] = []
+                next_lineages: list[list[str]] = []
                 for _ in range(self.population_size):
                     candidate_manipulator = self._clone_owned_record(best_record)
                     mutation, candidate_structure = self.mutator.mutate(
@@ -1193,52 +1698,73 @@ class GeneticAlgorithmMinimizer:
                 population_manipulators = next_manipulators
                 population_structures = next_structures
                 population_lineages = next_lineages
-                continue
+            else:
+                for record in valid_records:
+                    if record.energy < best_record.energy:
+                        best_record = record
+                        self.best_evaluation = record
 
-            for record in valid_records:
-                if record.energy < best_record.energy:
-                    best_record = record
-                    self.best_evaluation = record
-
-            valid_energies = [record.energy for record in valid_records]
-            lowest_indices, intermediate_indices = self._select_indices_by_energy(
-                valid_energies
-            )
-            next_manipulators: list[GBManipulator] = []
-            next_structures: list[np.ndarray] = []
-            next_lineages: list[list[str]] = []
-            for index in lowest_indices:
-                record = valid_records[index]
-                carryover = self._clone_owned_record(record)
-                next_manipulators.append(carryover)
-                next_structures.append(
-                    np.array(carryover.parents[0].whole_system, copy=True)
+                valid_energies = [record.energy for record in valid_records]
+                lowest_indices, intermediate_indices = self._select_indices_by_energy(
+                    valid_energies
                 )
-                next_lineages.append(["carryover", record.structure_path])
+                next_manipulators = []
+                next_structures = []
+                next_lineages = []
+                for index in lowest_indices:
+                    record = valid_records[index]
+                    carryover = self._clone_owned_record(record)
+                    next_manipulators.append(carryover)
+                    next_structures.append(
+                        np.array(carryover.parents[0].whole_system, copy=True)
+                    )
+                    next_lineages.append(["carryover", record.structure_path])
 
-            offspring_count = self.population_size - len(next_manipulators)
-            new_manipulators, new_structures, new_lineages = (
-                self._make_next_owned_generation(
-                    valid_records,
-                    intermediate_indices,
-                    offspring_count,
+                offspring_count = self.population_size - len(next_manipulators)
+                new_manipulators, new_structures, new_lineages = (
+                    self._make_next_owned_generation(
+                        valid_records,
+                        intermediate_indices,
+                        offspring_count,
+                    )
                 )
-            )
-            next_manipulators.extend(new_manipulators)
-            next_structures.extend(new_structures)
-            next_lineages.extend(new_lineages)
+                next_manipulators.extend(new_manipulators)
+                next_structures.extend(new_structures)
+                next_lineages.extend(new_lineages)
             if not (
                 len(next_manipulators)
                 == len(next_structures)
                 == len(next_lineages)
                 == self.population_size
             ):
-                raise RuntimeError(
+                raise GBMinimizerError(
                     "owned GA failed to construct a complete aligned population"
                 )
             population_manipulators = next_manipulators
             population_structures = next_structures
             population_lineages = next_lineages
+
+            is_final_gen = gen == self.generations - 1
+            if checkpoint.enabled and (checkpoint.is_due(gen + 1) or is_final_gen):
+                new_snapshots = self._write_owned_population_checkpoint(
+                    checkpoint_file,
+                    str(unique_id),
+                    gen + 1,
+                    population_manipulators,
+                    population_structures,
+                )
+                population_snapshots = new_snapshots
+                try:
+                    checkpoint.save_final(_build_owned_state(gen))
+                except CheckpointError as exc:
+                    raise GBMinimizerError(str(exc)) from exc
+                for path in current_pending:
+                    Path(path).unlink(missing_ok=True)
+
+            # Candidate sidecars are transient once the generation boundary is safely
+            # represented by the main checkpoint (or checkpointing is disabled).
+            if gen_checkpoint is not None:
+                gen_checkpoint.delete()
 
         self.best_evaluation = best_record
         return best_record.energy, str(best_record.structure_path)

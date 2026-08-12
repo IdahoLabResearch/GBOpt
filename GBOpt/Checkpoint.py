@@ -249,7 +249,9 @@ class CandidateCheckpoint:
         self._path = path
         self._fmt = fmt
         self.iteration_index = iteration_index
-        # None → not yet evaluated; dict → {"energy": float, "dump": str | None}
+        # None → not yet evaluated; dict → result payload.  ``metadata`` is
+        # optional so legacy checkpoints remain readable while richer optimizer paths
+        # can retain typed failure context without serializing live objects.
         self._results: dict = {uid: None for uid in unique_ids}
 
     # ---------------------------------------------------------------------- factories
@@ -343,15 +345,45 @@ class CandidateCheckpoint:
             )
         return (r["energy"], r["dump"])
 
-    def record(self, unique_id: str, energy: float, dump: "str | None") -> None:
+    def get_metadata(self, unique_id: str) -> "dict | None":
+        """Return optional optimizer-specific metadata for a completed candidate.
+
+        :param unique_id: The candidate's unique ID.
+        :return: A copied metadata dictionary, or ``None`` for a legacy result.
+        :raises CheckpointError: If the candidate has not been evaluated yet.
+        """
+        result = self._results.get(unique_id)
+        if result is None:
+            raise CheckpointError(
+                f"No result recorded for {unique_id!r}. "
+                "Check is_done() before calling get_metadata()."
+            )
+        metadata = result.get("metadata")
+        if metadata is None:
+            return None
+        return dict(metadata)
+
+    def record(
+        self,
+        unique_id: str,
+        energy: float,
+        dump: "str | None",
+        *,
+        metadata: "dict | None" = None,
+    ) -> None:
         """Record a candidate result and atomically persist the checkpoint to disk.
 
         :param unique_id: The candidate's unique ID.
         :param energy: Evaluated grain boundary energy.
         :param dump: Path to the output dump file, or ``None`` on failure.
+        :param metadata: Keyword argument, optional, defaults to ``None``. JSON-safe
+            optimizer-specific result metadata.
         :raises CheckpointError: If the file cannot be written.
         """
-        self._results[unique_id] = {"energy": float(energy), "dump": dump}
+        payload = {"energy": float(energy), "dump": dump}
+        if metadata is not None:
+            payload["metadata"] = metadata
+        self._results[unique_id] = payload
         self._save()
 
     def delete(self) -> None:

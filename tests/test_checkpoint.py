@@ -270,6 +270,36 @@ class TestCandidateCheckpoint(unittest.TestCase):
         energy, dump = cp.get_result("run_i0_c2")
         self.assertIsNone(dump)
 
+    def test_metadata_round_trips_without_changing_legacy_result(self):
+        cp = self._make_fresh()
+        metadata = {
+            "owned_evaluation_version": 1,
+            "success": False,
+            "failure_reason": "lost atoms",
+        }
+        cp.record(
+            "run_i0_c2",
+            1.0e30,
+            None,
+            metadata=metadata,
+        )
+
+        restored = CandidateCheckpoint._load(
+            CandidateCheckpoint._derive_path(self.main_cp, 0),
+            "json",
+            0,
+            self.uids,
+        )
+
+        self.assertEqual(restored.get_result("run_i0_c2"), (1.0e30, None))
+        self.assertEqual(restored.get_metadata("run_i0_c2"), metadata)
+
+    def test_legacy_result_has_no_metadata(self):
+        cp = self._make_fresh()
+        cp.record("run_i0_c0", 1.25, "/legacy.data")
+
+        self.assertIsNone(cp.get_metadata("run_i0_c0"))
+
     def test_load_restores_state_json(self):
         cp = self._make_fresh()
         cp.record("run_i0_c0", 1.1, "/a.data")
