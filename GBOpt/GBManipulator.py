@@ -40,6 +40,11 @@ from GBOpt.GrainOwnership import (
     GrainOwnershipError,
 )
 from GBOpt.UnitCell import UnitCell
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    composition_delta_is_formula_multiple,
+    validate_formula_composition,
+)
 
 # TODO: Generalize to interfaces, not just GBs
 
@@ -58,6 +63,10 @@ class GBManipulatorValueError(GBManipulatorError, ValueError):
 class GBManipulatorTypeError(GBManipulatorError, TypeError):
     """Exception raised in the GBManipulator class an invalid type is assigned to a
     GBManipulator attribute."""
+
+
+class CompositionAwareCrossoverError(GBManipulatorValueError):
+    """Raised when no exact formula-preserving crossover cut is available."""
 
 
 def _validate_finite_real(name: str, value: object) -> float:
@@ -264,6 +273,146 @@ def _translate_inplane(
             )
         updated[axis_name] = translated
     return updated
+
+
+def _crossover_scalar_coordinates(
+    atoms: np.ndarray,
+    box_dims: np.ndarray,
+    *,
+    amplitude_y: float,
+    amplitude_z: float,
+    phase_y: float,
+    phase_z: float,
+) -> np.ndarray:
+    """Project atoms onto one periodic-wave crossover coordinate.
+
+    :param atoms: Structured atom rows in the crossover box.
+    :param box_dims: Orthogonal crossover box bounds.
+    :param amplitude_y: Keyword argument, required. y-periodic wave amplitude in
+        angstroms.
+    :param amplitude_z: Keyword argument, required. z-periodic wave amplitude in
+        angstroms.
+    :param phase_y: Keyword argument, required. y-periodic phase in radians.
+    :param phase_z: Keyword argument, required. z-periodic phase in radians.
+    :return: Scalar coordinates for comparison with the crossover offset.
+    """
+    box = np.asarray(box_dims, dtype=float)
+    ylo, yhi = box[1]
+    zlo, zhi = box[2]
+    y_phase = 2.0 * np.pi * (atoms["y"] - ylo) / (yhi - ylo) + phase_y
+    z_phase = 2.0 * np.pi * (atoms["z"] - zlo) / (zhi - zlo) + phase_z
+    return (
+        np.asarray(atoms["x"], dtype=float)
+        - amplitude_y * np.sin(y_phase)
+        - amplitude_z * np.sin(z_phase)
+    )
+
+
+def _admissible_crossover_intervals(
+    first_atoms: np.ndarray,
+    second_atoms: np.ndarray,
+    first_coordinates: np.ndarray,
+    second_coordinates: np.ndarray,
+    *,
+    lower: float,
+    upper: float,
+    species_ratio: tuple[tuple[str, int], ...],
+) -> tuple[tuple[float, float], ...]:
+    """Return positive-width cut intervals with a formula-vector count exchange.
+
+    :param first_atoms: First-parent structured atom rows.
+    :param second_atoms: Second-parent structured atom rows.
+    :param first_coordinates: First-parent scalar crossover coordinates.
+    :param second_coordinates: Second-parent scalar crossover coordinates.
+    :param lower: Keyword argument, required. Inclusive offset lower bound.
+    :param upper: Keyword argument, required. Exclusive offset upper bound.
+    :param species_ratio: Keyword argument, required. Normalized formula vector.
+    :return: Ordered, maximally merged admissible offset intervals.
+    """
+    species = tuple(name for name, _coefficient in species_ratio)
+    first_names = np.asarray(first_atoms["name"]).astype(str)
+    second_names = np.asarray(second_atoms["name"]).astype(str)
+    first_counts = {
+        name: int(np.count_nonzero((first_coordinates < lower) & (first_names == name)))
+        for name in species
+    }
+    second_counts = {
+        name: int(
+            np.count_nonzero(
+                (second_coordinates < lower) & (second_names == name)
+            )
+        )
+        for name in species
+    }
+    events: list[tuple[float, int, str]] = []
+    for parent_index, coordinates, names in (
+        (0, first_coordinates, first_names),
+        (1, second_coordinates, second_names),
+    ):
+        selected = np.flatnonzero((coordinates >= lower) & (coordinates < upper))
+        events.extend(
+            (float(coordinates[index]), parent_index, str(names[index]))
+            for index in selected
+        )
+    events.sort(key=lambda event: event[0])
+
+    intervals: list[tuple[float, float]] = []
+    cursor = lower
+    event_index = 0
+    while event_index < len(events):
+        coordinate = events[event_index][0]
+        if coordinate > cursor and composition_delta_is_formula_multiple(
+            first_counts,
+            second_counts,
+            species_ratio,
+        ):
+            if intervals and intervals[-1][1] == cursor:
+                intervals[-1] = (intervals[-1][0], coordinate)
+            else:
+                intervals.append((cursor, coordinate))
+        while event_index < len(events) and events[event_index][0] == coordinate:
+            _value, parent_index, name = events[event_index]
+            target = first_counts if parent_index == 0 else second_counts
+            target[name] += 1
+            event_index += 1
+        cursor = coordinate
+    if cursor < upper and composition_delta_is_formula_multiple(
+        first_counts,
+        second_counts,
+        species_ratio,
+    ):
+        if intervals and intervals[-1][1] == cursor:
+            intervals[-1] = (intervals[-1][0], upper)
+        else:
+            intervals.append((cursor, upper))
+    return tuple(intervals)
+
+
+def _sample_interval_by_width(
+    intervals: tuple[tuple[float, float], ...],
+    rng: np.random.Generator,
+) -> float:
+    """Sample uniformly over the union of positive-width intervals.
+
+    :param intervals: Positive-width ordered intervals.
+    :param rng: Optimizer-owned random-number generator.
+    :return: Sample strictly inside one interval, selected in proportion to its width.
+    """
+    widths = np.asarray([upper - lower for lower, upper in intervals], dtype=float)
+    total = float(np.sum(widths))
+    target = min(float(rng.random()), np.nextafter(1.0, 0.0)) * total
+    cumulative = 0.0
+    selected_lower, selected_upper = intervals[-1]
+    for interval, width in zip(intervals, widths, strict=True):
+        if target < cumulative + width:
+            selected_lower, selected_upper = interval
+            break
+        cumulative += float(width)
+    fraction = min(float(rng.random()), np.nextafter(1.0, 0.0))
+    cut = selected_lower + fraction * (selected_upper - selected_lower)
+    if cut <= selected_lower:
+        cut = float(np.nextafter(selected_lower, selected_upper))
+    return cut
 
 
 def _cycle_half_open(
@@ -1701,6 +1850,8 @@ class GBManipulator:
         else:
             self.__rng = np.random.default_rng(seed=seed)
 
+        self.__last_crossover_provenance: tuple[tuple[str, object], ...] | None = None
+
         self.__parents = [None, None]
 
         if not system2:
@@ -1748,6 +1899,7 @@ class GBManipulator:
             raise GBManipulatorValueError("_from_parents requires Parent instances")
         result = cls.__new__(cls)
         result.__rng = np.random.default_rng() if rng is None else rng
+        result.__last_crossover_provenance = None
         result.__parents = [copy_module.copy(parent1), None]
         if parent2 is not None:
             result.__parents[1] = copy_module.copy(parent2)
@@ -1834,6 +1986,14 @@ class GBManipulator:
         result = np.array(self.__candidate_grain_labels, dtype=np.int8, copy=True)
         result.setflags(write=False)
         return result
+
+    @property
+    def last_crossover_provenance(self) -> tuple[tuple[str, object], ...] | None:
+        """Return immutable parameters for the most recent crossover.
+
+        :return: Ordered crossover parameter pairs, or ``None`` before crossover.
+        """
+        return self.__last_crossover_provenance
 
     @property
     def rng(self):
@@ -2323,19 +2483,39 @@ class GBManipulator:
             interface_separation=separation,
         )
 
-    def slice_and_merge(self) -> np.ndarray:
-        """
-        Given two GB systems, merge them by cutting them at the same location and
-        swapping one slice with the same slice in the other system.
+    def slice_and_merge(
+        self,
+        *,
+        surface_mode: str = "normal_plane",
+        max_tilt_degrees: float = 5.0,
+    ) -> np.ndarray:
+        """Construct an exact formula-preserving child from two parents.
 
-        :return: Atom positions after merging the slices.
+        ``normal_plane`` uses a plane parallel to yz. ``periodic_wave`` uses a smooth
+        sinusoidal surface that is continuous across the y/z periodic boundaries. Its
+        combined maximum local tilt is bounded by ``max_tilt_degrees``.
+
+        :param surface_mode: Keyword argument, optional, defaults to
+            ``"normal_plane"``. Crossover surface mode.
+        :param max_tilt_degrees: Keyword argument, optional, defaults to ``5.0``.
+            Maximum combined local tilt for ``periodic_wave``, in degrees.
+        :return: Formula-preserving child atom rows.
+        :raises GBManipulatorValueError: If parent geometry or arguments are invalid.
+        :raises CompositionAwareCrossoverError: If the parents are compositionally
+            inadmissible or no positive-width admissible cut interval exists.
         """
-        # TODO: Make the slice a randomly oriented, randomly placed plane, rather than a
-        # randomly placed x-oriented plane. Would need a check that the maximum
-        # deviation from the x axis isn't too high though.
         if self.__one_parent:
             raise GBManipulatorValueError(
                 "Unable to slice and merge with only one parent.")
+        if surface_mode not in {"normal_plane", "periodic_wave"}:
+            raise GBManipulatorValueError(
+                "surface_mode must be 'normal_plane' or 'periodic_wave'"
+            )
+        tilt = _validate_finite_real("max_tilt_degrees", max_tilt_degrees)
+        if tilt < 0.0 or tilt >= 90.0:
+            raise GBManipulatorValueError(
+                "max_tilt_degrees must satisfy 0 <= value < 90"
+            )
         parent1 = self.__parents[0]
         parent2 = self.__parents[1]
         labels1 = parent1.grain_labels
@@ -2405,17 +2585,102 @@ class GBManipulator:
                 parent2.box_dims,
                 parent1.box_dims,
             )
-        # Limit the slice site to be a quarter of the gb width from the GB itself.
-        slice_pos = parent1.gb_plane_x + \
-            parent1.gb_thickness * (-0.25 + 0.5*self.__rng.random())
-        mask1 = pos1["x"] < slice_pos
-        mask2 = pos2["x"] >= slice_pos
+
+        try:
+            first_composition = validate_formula_composition(
+                pos1,
+                parent1.unit_cell,
+            )
+            second_composition = validate_formula_composition(
+                pos2,
+                parent2.unit_cell,
+            )
+        except CandidateAdmissibilityError as exc:
+            raise CompositionAwareCrossoverError(str(exc)) from exc
+        if first_composition.species_ratio != second_composition.species_ratio:
+            raise CompositionAwareCrossoverError(
+                "crossover parents use different normalized formula vectors"
+            )
+
+        amplitude_y = 0.0
+        amplitude_z = 0.0
+        phase_y = 0.0
+        phase_z = 0.0
+        if surface_mode == "periodic_wave" and tilt > 0.0:
+            maximum_slope = np.tan(np.deg2rad(tilt))
+            slope_radius = maximum_slope * np.sqrt(float(self.__rng.random()))
+            slope_angle = 2.0 * np.pi * float(self.__rng.random())
+            slope_y = slope_radius * np.cos(slope_angle)
+            slope_z = slope_radius * np.sin(slope_angle)
+            y_length = float(np.ptp(parent1.box_dims[1]))
+            z_length = float(np.ptp(parent1.box_dims[2]))
+            amplitude_y = slope_y * y_length / (2.0 * np.pi)
+            amplitude_z = slope_z * z_length / (2.0 * np.pi)
+            phase_y = 2.0 * np.pi * float(self.__rng.random())
+            phase_z = 2.0 * np.pi * float(self.__rng.random())
+
+        first_coordinates = _crossover_scalar_coordinates(
+            pos1,
+            parent1.box_dims,
+            amplitude_y=amplitude_y,
+            amplitude_z=amplitude_z,
+            phase_y=phase_y,
+            phase_z=phase_z,
+        )
+        second_coordinates = _crossover_scalar_coordinates(
+            pos2,
+            parent1.box_dims,
+            amplitude_y=amplitude_y,
+            amplitude_z=amplitude_z,
+            phase_y=phase_y,
+            phase_z=phase_z,
+        )
+        half_window = 0.25 * parent1.gb_thickness
+        maximum_excursion = abs(amplitude_y) + abs(amplitude_z)
+        lower = parent1.gb_plane_x - half_window + maximum_excursion
+        upper = parent1.gb_plane_x + half_window - maximum_excursion
+        if lower >= upper:
+            raise CompositionAwareCrossoverError(
+                "periodic crossover surface does not fit inside the GB cut window"
+            )
+        intervals = _admissible_crossover_intervals(
+            pos1,
+            pos2,
+            first_coordinates,
+            second_coordinates,
+            lower=lower,
+            upper=upper,
+            species_ratio=first_composition.species_ratio,
+        )
+        if not intervals:
+            raise CompositionAwareCrossoverError(
+                "no positive-width formula-preserving crossover interval exists"
+            )
+        slice_pos = _sample_interval_by_width(intervals, self.__rng)
+        mask1 = first_coordinates < slice_pos
+        mask2 = second_coordinates >= slice_pos
         new_positions = np.hstack((pos1[mask1], pos2[mask2]))
         if labels1 is None:
             child_labels = None
         else:
             child_labels = np.hstack((labels1[mask1], labels2[mask2]))
         self.__set_candidate_labels(child_labels, len(new_positions))
+
+        try:
+            validate_formula_composition(new_positions, parent1.unit_cell)
+        except CandidateAdmissibilityError as exc:
+            raise CompositionAwareCrossoverError(
+                f"internal crossover composition invariant failed: {exc}"
+            ) from exc
+        self.__last_crossover_provenance = (
+            ("surface_mode", surface_mode),
+            ("max_tilt_degrees", tilt),
+            ("amplitude_y", float(amplitude_y)),
+            ("amplitude_z", float(amplitude_z)),
+            ("phase_y", float(phase_y)),
+            ("phase_z", float(phase_z)),
+            ("offset", float(slice_pos)),
+        )
 
         return new_positions
 

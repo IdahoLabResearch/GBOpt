@@ -14,7 +14,11 @@ import pytest
 from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
-from GBOpt.GBManipulator import GBManipulatorValueError
+from GBOpt.GBManipulator import (
+    CompositionAwareCrossoverError,
+    GBManipulator,
+    GBManipulatorValueError,
+)
 from GBOpt.GBMinimizer import (
     GBMinimizerError,
     GBMinimizerValueError,
@@ -940,6 +944,41 @@ def test_initial_owned_manipulator_preserves_labels_and_plane(owned_ga):
     assert len(parent.right_grain) == len(gb.right_grain)
 
 
+def test_owned_evaluator_rejects_inadmissible_candidate_before_callback(owned_ga):
+    gb, seed_path, ownership, _labels = owned_ga
+    callback_calls = 0
+
+    def unexpected_energy(GB, manipulator, atom_positions, unique_id):
+        nonlocal callback_calls
+        callback_calls += 1
+        raise AssertionError("inadmissible candidate reached the evaluator callback")
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        unexpected_energy,
+        ["translate_right_grain"],
+        seed=37,
+        initial_structure=str(seed_path),
+        initial_ownership=ownership,
+        population_size=2,
+        generations=1,
+    )
+    atoms = np.array(minimizer.manipulator.parents[0].whole_system, copy=True)
+    atoms[0]["name"] = "Cu"
+
+    record = minimizer._owned_evaluator.evaluate_candidate(
+        minimizer.manipulator,
+        atoms,
+        "inadmissible",
+        0,
+    )
+
+    assert callback_calls == 0
+    assert not record.success
+    assert record.energy == pytest.approx(1.0e30)
+    assert "composition is inadmissible" in record.failure_reason
+
+
 def test_owned_ga_variable_cell_reload_becomes_next_parent_geometry(owned_ga, tmp_path):
     gb, seed_path, ownership, labels = owned_ga
     initial_box = np.asarray(gb.box_dims, dtype=float)
@@ -1302,6 +1341,53 @@ def test_owned_ga_carryover_and_crossover_preserve_ownership(owned_ga, tmp_path)
         assert parent.normal_topology is ownership.normal_topology
 
 
+def test_owned_ga_uses_bounded_mutation_fallback_for_inadmissible_crossover(
+    monkeypatch,
+    owned_ga,
+    tmp_path,
+):
+    gb, seed_path, ownership, _labels = owned_ga
+    attempts = 0
+
+    def reject_crossover(self, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise CompositionAwareCrossoverError("no admissible interval")
+
+    monkeypatch.setattr(GBManipulator, "slice_and_merge", reject_crossover)
+
+    def fake_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 1.0, str(output)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        gb,
+        fake_energy,
+        ["translate_right_grain"],
+        seed=43,
+        initial_structure=seed_path,
+        initial_ownership=ownership,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        crossover_attempts=3,
+    )
+    minimizer.run_GA(unique_id=62)
+
+    assert attempts == 6
+    second_generation_ops = [lineage[0] for lineage, _energy in minimizer.history[1]]
+    assert "carryover" in second_generation_ops
+    assert sum(
+        op.startswith("crossover_fallback_shift") for op in second_generation_ops
+    ) == 1
+
+
 def _owned_checkpoint_energy(tmp_path, *, relaxed_initial_box=None):
     """Return a deterministic owned evaluator writing ID-reordered artifacts."""
 
@@ -1374,7 +1460,11 @@ def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_pa
 
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert state["state"]["ga_mode"] == "explicit_ownership"
-    assert state["state"]["owned_checkpoint_version"] == 1
+    assert state["state"]["owned_checkpoint_version"] == 2
+    assert state["run_params"]["crossover_surface"] == "periodic_wave"
+    assert state["run_params"]["crossover_max_tilt_degrees"] == pytest.approx(5.0)
+    assert state["run_params"]["crossover_attempts"] == 8
+    assert state["run_params"]["composition_policy"] == [["Ni", 1]]
     assert state["progress_index"] == 0
     assert len(state["state"]["population_candidates"]) == 4
     candidate = state["state"]["population_candidates"][0]

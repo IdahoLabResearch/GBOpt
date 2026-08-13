@@ -7,7 +7,7 @@ import shutil
 import uuid
 import warnings
 from collections.abc import Callable
-from numbers import Integral
+from numbers import Integral, Real
 from pathlib import Path
 from time import time
 from typing import Any
@@ -34,9 +34,18 @@ from GBOpt.FileGrainOwnership import (
     LammpsDataError,
 )
 from GBOpt.GBMaker import GBMakerError
-from GBOpt.GBManipulator import GBManipulatorError, GBManipulatorValueError, ParentError
+from GBOpt.GBManipulator import (
+    CompositionAwareCrossoverError,
+    GBManipulatorError,
+    GBManipulatorValueError,
+    ParentError,
+)
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    validate_formula_composition,
+)
 
-_OWNED_GA_CHECKPOINT_VERSION = 1
+_OWNED_GA_CHECKPOINT_VERSION = 2
 
 
 def _candidate_mapping_to_state(mapping: CandidateFileMapping) -> dict:
@@ -512,6 +521,9 @@ class GeneticAlgorithmMinimizer:
         keep_top_pct: int = 10,
         intermediate_pct: int = 60,
         gb_batch_energy_func: Callable | None = None,
+        crossover_surface: str = "periodic_wave",
+        crossover_max_tilt_degrees: float = 5.0,
+        crossover_attempts: int = 8,
     ):
         """
         :param GB: GBMaker object to perform minimization on.
@@ -546,8 +558,17 @@ class GeneticAlgorithmMinimizer:
             :class:`~warnings.UserWarning` is emitted in that case. Declare ``checkpoint
             = None`` and call ``checkpoint.record(unique_id, energy, dump)`` per job to
             get per-job recovery granularity.
+        :param crossover_surface: Keyword argument, optional, defaults to
+            ``"periodic_wave"``. Formula-preserving crossover surface mode,
+            ``"normal_plane"`` or ``"periodic_wave"``.
+        :param crossover_max_tilt_degrees: Keyword argument, optional, defaults to
+            ``5.0``. Maximum combined local periodic-wave tilt in degrees.
+        :param crossover_attempts: Keyword argument, optional, defaults to ``8``.
+            Maximum parent-pair attempts before one crossover slot falls back to
+            mutation.
         :raises TypeError: If ``initial_ownership`` is not GrainOwnership, accompanies
-            a non-file initial structure, or ``allow_variable_cell`` is not Boolean.
+            a non-file initial structure, ``allow_variable_cell`` is not Boolean, or a
+            crossover policy argument has an invalid type.
         :raises ValueError: If ownership is supplied without an initial structure or
             variable-cell execution is requested without explicit ownership.
         """
@@ -565,6 +586,38 @@ class GeneticAlgorithmMinimizer:
                 )
         elif allow_variable_cell:
             raise ValueError("allow_variable_cell requires initial_ownership")
+        if not isinstance(crossover_surface, str):
+            raise GBMinimizerTypeError("crossover_surface must be a string")
+        if crossover_surface not in {"normal_plane", "periodic_wave"}:
+            raise GBMinimizerValueError(
+                "crossover_surface must be 'normal_plane' or 'periodic_wave'"
+            )
+        if (
+            isinstance(crossover_max_tilt_degrees, (bool, np.bool_))
+            or not isinstance(crossover_max_tilt_degrees, Real)
+        ):
+            raise GBMinimizerTypeError(
+                "crossover_max_tilt_degrees must be a non-Boolean real scalar"
+            )
+        if (
+            not np.isfinite(crossover_max_tilt_degrees)
+            or float(crossover_max_tilt_degrees) < 0.0
+            or float(crossover_max_tilt_degrees) >= 90.0
+        ):
+            raise GBMinimizerValueError(
+                "crossover_max_tilt_degrees must be finite and satisfy 0 <= value < 90"
+            )
+        if (
+            isinstance(crossover_attempts, (bool, np.bool_))
+            or not isinstance(crossover_attempts, Integral)
+        ):
+            raise GBMinimizerTypeError(
+                "crossover_attempts must be a non-Boolean integer"
+            )
+        if int(crossover_attempts) <= 0:
+            raise GBMinimizerValueError(
+                "crossover_attempts must be a positive integer"
+            )
         self.GB = GB
         self.gb_energy_func = gb_energy_func
         if gb_batch_energy_func is not None:
@@ -615,12 +668,25 @@ class GeneticAlgorithmMinimizer:
             else None
         )
         self.manipulator = self._make_initial_manipulator()
+        try:
+            initial_composition = validate_formula_composition(
+                self.manipulator.parents[0].whole_system,
+                self.manipulator.parents[0].unit_cell,
+            )
+        except CandidateAdmissibilityError as exc:
+            raise GBMinimizerValueError(
+                f"initial candidate composition is inadmissible: {exc}"
+            ) from exc
+        self.composition_policy = tuple(initial_composition.species_ratio)
         self.mutator = Mutator(choices, self.manipulator)
         self.manipulator.rng = self.local_random
         self.population_size = population_size
         self.generations = generations
         self.keep_top_pct = keep_top_pct
         self.intermediate_pct = intermediate_pct
+        self.crossover_surface = crossover_surface
+        self.crossover_max_tilt_degrees = float(crossover_max_tilt_degrees)
+        self.crossover_attempts = int(crossover_attempts)
         self.GBE_vals = []
 
     def _make_initial_manipulator(self) -> GBManipulator:
@@ -706,29 +772,61 @@ class GeneticAlgorithmMinimizer:
         n_mutate = offspring_count - n_slice
 
         for _ in range(n_slice):
-            replace = len(intermediate_indices) < 2
-            idx_1, idx_2 = self.local_random.choice(
-                intermediate_indices,
-                size=2,
-                replace=replace,
+            failures: list[str] = []
+            record1 = records[intermediate_indices[0]]
+            crossed = False
+            for _attempt in range(self.crossover_attempts):
+                replace = len(intermediate_indices) < 2
+                idx_1, idx_2 = self.local_random.choice(
+                    intermediate_indices,
+                    size=2,
+                    replace=replace,
+                )
+                record1 = records[int(idx_1)]
+                record2 = records[int(idx_2)]
+                parent1 = self._clone_owned_record(record1).parents[0]
+                parent2 = self._clone_owned_record(record2).parents[0]
+                new_manipulator = GBManipulator._from_parents(
+                    parent1,
+                    parent2,
+                    rng=self.local_random,
+                )
+                try:
+                    new_structure = new_manipulator.slice_and_merge(
+                        surface_mode=self.crossover_surface,
+                        max_tilt_degrees=self.crossover_max_tilt_degrees,
+                    )
+                except CompositionAwareCrossoverError as exc:
+                    failures.append(str(exc))
+                    continue
+                provenance = dict(new_manipulator.last_crossover_provenance or ())
+                manipulators.append(new_manipulator)
+                candidates.append(new_structure)
+                lineages.append(
+                    [
+                        "slice_and_merge",
+                        str(record1.structure_path),
+                        str(record2.structure_path),
+                        repr(provenance),
+                    ]
+                )
+                crossed = True
+                break
+            if crossed:
+                continue
+            fallback = self._clone_owned_record(record1)
+            mutation, new_structure = self.mutator.mutate(
+                local_random=self.local_random,
+                GB=self.GB,
+                manipulator=fallback,
             )
-            record1 = records[int(idx_1)]
-            record2 = records[int(idx_2)]
-            parent1 = self._clone_owned_record(record1).parents[0]
-            parent2 = self._clone_owned_record(record2).parents[0]
-            new_manipulator = GBManipulator._from_parents(
-                parent1,
-                parent2,
-                rng=self.local_random,
-            )
-            new_structure = new_manipulator.slice_and_merge()
-            manipulators.append(new_manipulator)
+            manipulators.append(fallback)
             candidates.append(new_structure)
             lineages.append(
                 [
-                    "slice_and_merge",
+                    "crossover_fallback_" + mutation,
                     str(record1.structure_path),
-                    str(record2.structure_path),
+                    f"{len(failures)} inadmissible crossover attempts",
                 ]
             )
 
@@ -904,23 +1002,53 @@ class GeneticAlgorithmMinimizer:
 
         # Slice & merge
         for _ in range(N_slice):
-            replace = len(intermediate_indices) < 2
-            idx_1, idx_2 = self.local_random.choice(
-                intermediate_indices, size=2, replace=replace
+            p1 = files[intermediate_indices[0]]
+            crossed = False
+            for _attempt in range(self.crossover_attempts):
+                replace = len(intermediate_indices) < 2
+                idx_1, idx_2 = self.local_random.choice(
+                    intermediate_indices,
+                    size=2,
+                    replace=replace,
+                )
+                p1, p2 = files[int(idx_1)], files[int(idx_2)]
+                new_manip = GBManipulator(
+                    p1,
+                    p2,
+                    unit_cell=self.GB.unit_cell,
+                    gb_thickness=self.GB.gb_thickness,
+                )
+                new_manip.rng = self.local_random
+                try:
+                    new_struct = new_manip.slice_and_merge(
+                        surface_mode=self.crossover_surface,
+                        max_tilt_degrees=self.crossover_max_tilt_degrees,
+                    )
+                except CompositionAwareCrossoverError:
+                    continue
+                candidates.append(new_struct)
+                manipulators.append(new_manip)
+                lineages.append(
+                    [
+                        "slice_and_merge",
+                        p1,
+                        p2,
+                        repr(dict(new_manip.last_crossover_provenance or ())),
+                    ]
+                )
+                crossed = True
+                break
+            if crossed:
+                continue
+            fallback = self._make_manipulator_from_file(p1)
+            mutation, new_struct = self.mutator.mutate(
+                local_random=self.local_random,
+                GB=self.GB,
+                manipulator=fallback,
             )
-            p1, p2 = files[idx_1], files[idx_2]
-            new_manip = GBManipulator(
-                p1,
-                p2,
-                unit_cell=self.GB.unit_cell,
-                gb_thickness=self.GB.gb_thickness,
-            )
-            new_manip.rng = self.local_random
-            new_struct = new_manip.slice_and_merge()
-
             candidates.append(new_struct)
-            manipulators.append(new_manip)
-            lineages.append(["slice_and_merge", p1, p2])
+            manipulators.append(fallback)
+            lineages.append(["crossover_fallback_" + mutation, p1])
 
         # Mutations
         if not intermediate_indices:
@@ -1550,6 +1678,15 @@ class GeneticAlgorithmMinimizer:
                     "intermediate_pct": self.intermediate_pct,
                     "allow_variable_cell": self.allow_variable_cell,
                     "choices": self.mutator.choices_keys,
+                    "crossover_surface": self.crossover_surface,
+                    "crossover_max_tilt_degrees": (
+                        self.crossover_max_tilt_degrees
+                    ),
+                    "crossover_attempts": self.crossover_attempts,
+                    "composition_policy": [
+                        [species, coefficient]
+                        for species, coefficient in self.composition_policy
+                    ],
                 }
                 for name, expected in expected_params.items():
                     if run_params.get(name) != expected:
@@ -1697,6 +1834,15 @@ class GeneticAlgorithmMinimizer:
                     "intermediate_pct": self.intermediate_pct,
                     "allow_variable_cell": self.allow_variable_cell,
                     "choices": self.mutator.choices_keys,
+                    "crossover_surface": self.crossover_surface,
+                    "crossover_max_tilt_degrees": (
+                        self.crossover_max_tilt_degrees
+                    ),
+                    "crossover_attempts": self.crossover_attempts,
+                    "composition_policy": [
+                        [species, coefficient]
+                        for species, coefficient in self.composition_policy
+                    ],
                 },
                 "state": {
                     "ga_mode": "explicit_ownership",

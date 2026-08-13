@@ -23,6 +23,10 @@ from GBOpt.FileGrainOwnership import (
 from GBOpt.Checkpoint import CandidateCheckpoint, CheckpointError
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import GBManipulator, GBManipulatorError, ParentError
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    validate_formula_composition,
+)
 
 PENALTY = 1.0e30
 _MISSING = object()
@@ -141,6 +145,12 @@ class ExplicitOwnershipEvaluator:
                 "explicit-ownership mutation did not propagate grain labels"
             )
         parent = manipulator.parents[0]
+        try:
+            validate_formula_composition(atoms, parent.unit_cell)
+        except CandidateAdmissibilityError as exc:
+            raise GrainOwnershipError(
+                f"candidate composition is inadmissible: {exc}"
+            ) from exc
         return CandidateFileMapping.from_candidate(
             atoms,
             labels,
@@ -228,6 +238,15 @@ class ExplicitOwnershipEvaluator:
             type_dict=self.GB.unit_cell.type_map,
             allow_variable_cell=self.allow_variable_cell,
         )
+        try:
+            validate_formula_composition(
+                manipulator.parents[0].whole_system,
+                manipulator.parents[0].unit_cell,
+            )
+        except CandidateAdmissibilityError as exc:
+            raise GrainOwnershipError(
+                f"evaluator output composition is inadmissible: {exc}"
+            ) from exc
         manipulator.rng = self.local_random
         return manipulator
 

@@ -1023,7 +1023,7 @@ def _write_owned_test_data(path, atoms, box_dims):
     with open(path, "w", encoding="utf-8", newline="\n") as stream:
         stream.write("Owned candidate\n\n")
         stream.write(f"{len(atoms)} atoms\n")
-        stream.write("1 atom types\n")
+        stream.write(f"{len(np.unique(atoms['name']))} atom types\n")
         stream.writelines(
             f"{lower:.12f} {upper:.12f} {axis}lo {axis}hi\n"
             for axis, (lower, upper) in zip("xyz", box_dims, strict=True)
@@ -1348,6 +1348,114 @@ def test_explicit_ownership_slice_and_merge_uses_atom_masks_for_labels(
         expected_labels,
     )
     assert len(child) == len(expected_labels)
+
+
+def test_periodic_wave_crossover_preserves_uo2_formula_and_tilt(tmp_path):
+    unit_cell = UnitCell()
+    unit_cell.init_by_structure("fluorite", 5.454, ("U", "O"))
+    box = np.asarray([[0.0, 10.0], [0.0, 12.0], [0.0, 8.0]])
+    labels = np.asarray(
+        [LEFT_GRAIN_LABEL] * 3 + [RIGHT_GRAIN_LABEL] * 3,
+        dtype=np.int8,
+    )
+    first_atoms = np.asarray(
+        [
+            ("U", 3.0, 1.0, 1.0),
+            ("O", 3.5, 3.0, 2.0),
+            ("O", 4.0, 5.0, 3.0),
+            ("U", 5.5, 7.0, 4.0),
+            ("O", 6.0, 9.0, 5.0),
+            ("O", 6.5, 11.0, 6.0),
+        ],
+        dtype=Atom.atom_dtype,
+    )
+    second_atoms = np.asarray(
+        [
+            ("U", 3.0, 1.5, 1.5),
+            ("U", 3.5, 3.5, 2.5),
+            ("O", 4.0, 5.5, 3.5),
+            ("O", 5.5, 7.5, 4.5),
+            ("O", 6.0, 9.5, 5.5),
+            ("O", 6.5, 11.5, 6.5),
+        ],
+        dtype=Atom.atom_dtype,
+    )
+
+    def owned_parent(atoms, suffix):
+        path = tmp_path / f"uo2_{suffix}.data"
+        _write_owned_test_data(path, atoms, box)
+        ownership = GrainOwnership(
+            atom_ids=np.arange(1, len(atoms) + 1),
+            labels=labels,
+            gb_plane_x=5.0,
+            inplane_periodic=(True, True),
+            left_grain_x_bounds=(0.0, 5.0),
+            right_grain_x_bounds=(5.0, 10.0),
+            coordinate_tolerance=1.0e-8,
+            normal_topology=BoundaryNormalTopology.PERIODIC_BICRYSTAL,
+        )
+        return GBManipulator(
+            str(path),
+            unit_cell=unit_cell,
+            gb_thickness=10.0,
+            grain_ownership=ownership,
+        ).parents[0]
+
+    crossover = GBManipulator._from_parents(
+        owned_parent(first_atoms, "first"),
+        owned_parent(second_atoms, "second"),
+        rng=np.random.default_rng(29),
+    )
+    child = crossover.slice_and_merge(
+        surface_mode="periodic_wave",
+        max_tilt_degrees=5.0,
+    )
+
+    names = np.asarray(child["name"]).astype(str)
+    assert np.count_nonzero(names == "O") == 2 * np.count_nonzero(names == "U")
+    assert len(crossover.candidate_grain_labels) == len(child)
+
+    provenance = dict(crossover.last_crossover_provenance)
+    assert provenance["surface_mode"] == "periodic_wave"
+    slope_y = 2.0 * np.pi * provenance["amplitude_y"] / 12.0
+    slope_z = 2.0 * np.pi * provenance["amplitude_z"] / 8.0
+    assert np.hypot(slope_y, slope_z) <= np.tan(np.deg2rad(5.0))
+
+    # Each sinusoidal component has an integral period across its box direction, so
+    # the crossover surface meets itself at both periodic face pairs.
+    phase_y = provenance["phase_y"]
+    phase_z = provenance["phase_z"]
+    assert np.sin(phase_y) == pytest.approx(np.sin(2.0 * np.pi + phase_y))
+    assert np.sin(phase_z) == pytest.approx(np.sin(2.0 * np.pi + phase_z))
+
+
+@pytest.mark.parametrize(
+    ("surface_mode", "max_tilt", "match"),
+    [
+        pytest.param("tilted_plane", 5.0, "surface_mode", id="mode"),
+        pytest.param("periodic_wave", -1.0, "max_tilt", id="negative-tilt"),
+        pytest.param("periodic_wave", 90.0, "max_tilt", id="right-angle-tilt"),
+    ],
+)
+def test_slice_and_merge_rejects_invalid_surface_policy(
+    tmp_path,
+    surface_mode,
+    max_tilt,
+    match,
+):
+    first, _atoms, _labels, _box = _owned_test_manipulator(tmp_path, suffix="p1")
+    second, _atoms, _labels, _box = _owned_test_manipulator(tmp_path, suffix="p2")
+    crossover = GBManipulator._from_parents(
+        first.parents[0],
+        second.parents[0],
+        rng=np.random.default_rng(3),
+    )
+
+    with pytest.raises(GBManipulatorValueError, match=match):
+        crossover.slice_and_merge(
+            surface_mode=surface_mode,
+            max_tilt_degrees=max_tilt,
+        )
 
 
 @pytest.mark.parametrize(
