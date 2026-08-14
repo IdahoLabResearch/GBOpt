@@ -479,6 +479,7 @@ class ExplicitOwnershipEvaluator:
         unique_id: int | UUID,
         *,
         gen_checkpoint: CandidateCheckpoint | None = None,
+        cached_evaluations: list[CandidateEvaluation | None] | None = None,
     ) -> list[CandidateEvaluation]:
         """Evaluate one index-aligned explicit-ownership population.
 
@@ -489,6 +490,9 @@ class ExplicitOwnershipEvaluator:
         :param unique_id: Run identifier used to construct callback IDs.
         :param gen_checkpoint: Keyword argument, optional, defaults to ``None``.
             Per-candidate recovery sidecar for this generation.
+        :param cached_evaluations: Keyword argument, optional, defaults to ``None``.
+            Successful evaluations aligned to unchanged carryover candidates. ``None``
+            entries are evaluated normally.
         :return: One aligned typed evaluation per input candidate.
         :raises ValueError: If population arrays or batch results are not aligned, or
             if a batch result is not a dictionary.
@@ -505,15 +509,53 @@ class ExplicitOwnershipEvaluator:
                 "explicit-ownership population manipulators, structures, and "
                 "lineages must remain index-aligned"
             )
+        if cached_evaluations is None:
+            cached_evaluations = [None] * population_length
+        elif len(cached_evaluations) != population_length:
+            raise ValueError(
+                "cached explicit-ownership evaluations must remain index-aligned"
+            )
+
+        records: list[CandidateEvaluation | None] = [None] * population_length
+        for index, cached in enumerate(cached_evaluations):
+            if cached is None:
+                continue
+            if (
+                not cached.success
+                or cached.structure_path is None
+                or cached.mapping is None
+                or cached.manipulator is None
+            ):
+                raise ValueError(
+                    "only successful explicit-ownership evaluations may be reused"
+                )
+            if not Path(cached.structure_path).is_file():
+                continue
+            try:
+                mapping = self._candidate_file_mapping(
+                    population_manipulators[index],
+                    population_structures[index],
+                )
+            except GrainOwnershipError:
+                continue
+            records[index] = CandidateEvaluation(
+                input_index=index,
+                energy=cached.energy,
+                structure_path=cached.structure_path,
+                mapping=mapping,
+                manipulator=population_manipulators[index],
+                success=True,
+            )
 
         unique_ids = [
             f"GA_{unique_id}_g{gen}_c{i}" for i in range(population_length)
         ]
         if self.batch_energy_func is None:
-            records = []
             for index, (manipulator, atoms, candidate_id) in enumerate(
                 zip(population_manipulators, population_structures, unique_ids)
             ):
+                if records[index] is not None:
+                    continue
                 try:
                     mapping = self._candidate_file_mapping(manipulator, atoms)
                 except GrainOwnershipError as exc:
@@ -537,15 +579,20 @@ class ExplicitOwnershipEvaluator:
                             index,
                         )
                 self._checkpoint_record(gen_checkpoint, candidate_id, record)
-                records.append(record)
-            return records
+                records[index] = record
+            if any(record is None for record in records):
+                raise RuntimeError(
+                    "explicit-ownership evaluation lost candidate alignment"
+                )
+            return [record for record in records if record is not None]
 
-        records: list[CandidateEvaluation | None] = [None] * population_length
         valid_indices: list[int] = []
         valid_mappings: list[CandidateFileMapping] = []
         for index, (manipulator, atoms) in enumerate(
             zip(population_manipulators, population_structures)
         ):
+            if records[index] is not None:
+                continue
             try:
                 mapping = self._candidate_file_mapping(manipulator, atoms)
             except GrainOwnershipError as exc:

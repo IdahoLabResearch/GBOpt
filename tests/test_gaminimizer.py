@@ -785,6 +785,167 @@ def test_slice_and_merge_pct_rejects_invalid_values(ga_gb, value, error_type):
         )
 
 
+def test_legacy_carryover_cache_skips_only_unchanged_survivor(ga_gb, tmp_path):
+    evaluated_ids = []
+
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        evaluated_ids.append(str(unique_id))
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 0.0, str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        reuse_carryover_evaluations=True,
+    )
+
+    minimizer.run_GA(unique_id=102)
+
+    generation_one_ids = [uid for uid in evaluated_ids if "_g1_c" in uid]
+    assert generation_one_ids == [
+        "GA_102_g1_c1",
+        "GA_102_g1_c2",
+        "GA_102_g1_c3",
+    ]
+    assert minimizer.history[1][0][0][0] == "carryover"
+    assert minimizer.history[1][0][1] == minimizer.history[0][0][1]
+
+
+def test_legacy_carryover_cache_survives_checkpoint_extension(ga_gb, tmp_path):
+    checkpoint = tmp_path / "cached.json"
+
+    def write_energy(GB, manipulator, atom_positions, unique_id):
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 0.0, str(dump_file)
+
+    partial = GeneticAlgorithmMinimizer(
+        ga_gb,
+        write_energy,
+        ["translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=1,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        reuse_carryover_evaluations=True,
+    )
+    partial.run_GA(unique_id=103, checkpoint_file=checkpoint)
+
+    resumed_ids = []
+
+    def tracking_energy(GB, manipulator, atom_positions, unique_id):
+        resumed_ids.append(str(unique_id))
+        return write_energy(GB, manipulator, atom_positions, unique_id)
+
+    resumed = GeneticAlgorithmMinimizer(
+        ga_gb,
+        tracking_energy,
+        ["translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        reuse_carryover_evaluations=True,
+    )
+    resumed.run_GA(unique_id=103, checkpoint_file=checkpoint)
+
+    assert resumed_ids == [
+        "GA_103_g1_c1",
+        "GA_103_g1_c2",
+        "GA_103_g1_c3",
+    ]
+
+
+def test_legacy_batch_cache_preserves_full_population_indices(ga_gb, tmp_path):
+    submitted_ids = []
+
+    def batch_energy(
+        GB,
+        manipulators,
+        structures,
+        lineages,
+        unique_ids,
+        checkpoint=None,
+    ):
+        submitted_ids.extend(str(uid) for uid in unique_ids)
+        results = []
+        for manipulator, structure, unique_id in zip(
+            manipulators,
+            structures,
+            unique_ids,
+            strict=True,
+        ):
+            dump_file = tmp_path / f"{unique_id}.data"
+            GB.write_lammps(
+                str(dump_file),
+                structure,
+                manipulator.parents[0].box_dims,
+            )
+            results.append({"energy": 0.0, "final_dump": str(dump_file)})
+        return results
+
+    initial_path = tmp_path / "initial.data"
+    ga_gb.write_lammps(
+        str(initial_path),
+        ga_gb.whole_system,
+        ga_gb.box_dims,
+    )
+
+    def initial_energy(GB, manipulator, atom_positions, unique_id):
+        return 0.0, str(initial_path)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        initial_energy,
+        ["translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        reuse_carryover_evaluations=True,
+        gb_batch_energy_func=batch_energy,
+    )
+
+    minimizer.run_GA(unique_id=104)
+
+    assert [uid for uid in submitted_ids if "_g1_c" in uid] == [
+        "GA_104_g1_c1",
+        "GA_104_g1_c2",
+        "GA_104_g1_c3",
+    ]
+
+
+def test_reuse_carryover_evaluations_requires_boolean(ga_gb):
+    with pytest.raises(
+        GBMinimizerTypeError,
+        match="reuse_carryover_evaluations",
+    ):
+        GeneticAlgorithmMinimizer(
+            ga_gb,
+            lambda *_args: (0.0, None),
+            ["translate_right_grain"],
+            reuse_carryover_evaluations=1,
+        )
+
+
 def test_history_populated_after_run(ga_gb, tmp_path):
     def fake_energy_func(GB, manipulator, atom_positions, unique_id):
         dump_file = tmp_path / f"{unique_id}.data"
@@ -1497,6 +1658,7 @@ def _make_owned_checkpoint_minimizer(
     population_size=4,
     keep_top_pct=25,
     slice_and_merge_pct=50.0,
+    reuse_carryover_evaluations=False,
     allow_variable_cell=False,
     batch_energy=None,
 ):
@@ -1514,6 +1676,7 @@ def _make_owned_checkpoint_minimizer(
         keep_top_pct=keep_top_pct,
         intermediate_pct=100,
         slice_and_merge_pct=slice_and_merge_pct,
+        reuse_carryover_evaluations=reuse_carryover_evaluations,
         gb_batch_energy_func=batch_energy,
     )
 
@@ -1551,6 +1714,92 @@ def test_slice_and_merge_pct_controls_owned_offspring_mix(
     assert operations.count("carryover") == 1
     assert crossover_slots == expected_crossover_slots
     assert len(operations) == minimizer.population_size
+
+
+def test_owned_carryover_cache_survives_checkpoint_extension(owned_ga, tmp_path):
+    checkpoint = tmp_path / "owned-cached.json"
+    energy = _owned_checkpoint_energy(tmp_path)
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        energy,
+        generations=1,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+    )
+    partial.run_GA(unique_id=213, checkpoint_file=checkpoint)
+
+    resumed_ids = []
+
+    def tracking_energy(GB, manipulator, atom_positions, unique_id):
+        resumed_ids.append(str(unique_id))
+        return energy(GB, manipulator, atom_positions, unique_id)
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        tracking_energy,
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+    )
+    resumed.run_GA(unique_id=213, checkpoint_file=checkpoint)
+
+    assert resumed_ids == [
+        "GA_213_g1_c1",
+        "GA_213_g1_c2",
+        "GA_213_g1_c3",
+    ]
+    assert resumed.history[1][0][0][0] == "carryover"
+    assert resumed.history[1][0][1] == resumed.history[0][0][1]
+
+
+def test_owned_batch_cache_preserves_full_population_indices(owned_ga, tmp_path):
+    scalar_energy = _owned_checkpoint_energy(tmp_path)
+    submitted_ids = []
+
+    def batch_energy(
+        GB,
+        manipulators,
+        structures,
+        lineages,
+        unique_ids,
+        checkpoint=None,
+    ):
+        submitted_ids.extend(str(uid) for uid in unique_ids)
+        results = []
+        for manipulator, structure, unique_id in zip(
+            manipulators,
+            structures,
+            unique_ids,
+            strict=True,
+        ):
+            energy, output = scalar_energy(
+                GB,
+                manipulator,
+                structure,
+                unique_id,
+            )
+            results.append({"energy": energy, "final_dump": output})
+        return results
+
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        scalar_energy,
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        batch_energy=batch_energy,
+    )
+
+    minimizer.run_GA(unique_id=214)
+
+    assert [uid for uid in submitted_ids if "_g1_c" in uid] == [
+        "GA_214_g1_c1",
+        "GA_214_g1_c2",
+        "GA_214_g1_c3",
+    ]
 
 
 def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_path):
