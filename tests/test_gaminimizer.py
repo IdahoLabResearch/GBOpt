@@ -21,6 +21,7 @@ from GBOpt.GBManipulator import (
 )
 from GBOpt.GBMinimizer import (
     GBMinimizerError,
+    GBMinimizerTypeError,
     GBMinimizerValueError,
     GeneticAlgorithmMinimizer,
     Mutator,
@@ -714,6 +715,74 @@ def test_run_ga_returns_best_energy_and_dump(ga_gb, tmp_path):
     assert isinstance(best_energy, float)
     assert Path(best_dump).is_file()
     assert len(minimizer.GBE_vals) == minimizer.generations + 1
+
+
+@pytest.mark.parametrize(
+    ("slice_and_merge_pct", "expected_crossover_slots"),
+    [
+        pytest.param(0.0, 0, id="mutation-only"),
+        pytest.param(50.0, 1, id="default-mixed"),
+        pytest.param(100.0, 3, id="crossover-only"),
+    ],
+)
+def test_slice_and_merge_pct_controls_legacy_offspring_mix(
+    ga_gb,
+    tmp_path,
+    slice_and_merge_pct,
+    expected_crossover_slots,
+):
+    def fake_energy_func(GB, manipulator, atom_positions, unique_id):
+        dump_file = tmp_path / f"{unique_id}.data"
+        GB.write_lammps(
+            str(dump_file),
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 0.0, str(dump_file)
+
+    minimizer = GeneticAlgorithmMinimizer(
+        ga_gb,
+        fake_energy_func,
+        ["translate_right_grain"],
+        seed=0,
+        population_size=4,
+        generations=2,
+        keep_top_pct=25,
+        intermediate_pct=100,
+        slice_and_merge_pct=slice_and_merge_pct,
+    )
+
+    minimizer.run_GA(unique_id=101)
+
+    operations = [lineage[0] for lineage, _energy in minimizer.history[1]]
+    crossover_slots = sum(
+        operation == "slice_and_merge"
+        or operation.startswith("crossover_fallback_")
+        for operation in operations
+    )
+    assert operations.count("carryover") == 1
+    assert crossover_slots == expected_crossover_slots
+    assert len(operations) == minimizer.population_size
+
+
+@pytest.mark.parametrize(
+    ("value", "error_type"),
+    [
+        pytest.param(True, GBMinimizerTypeError, id="boolean"),
+        pytest.param("50", GBMinimizerTypeError, id="string"),
+        pytest.param(float("nan"), GBMinimizerValueError, id="nan"),
+        pytest.param(-0.1, GBMinimizerValueError, id="negative"),
+        pytest.param(100.1, GBMinimizerValueError, id="above-one-hundred"),
+    ],
+)
+def test_slice_and_merge_pct_rejects_invalid_values(ga_gb, value, error_type):
+    with pytest.raises(error_type, match="slice_and_merge_pct"):
+        GeneticAlgorithmMinimizer(
+            ga_gb,
+            lambda *_args: (0.0, None),
+            ["translate_right_grain"],
+            slice_and_merge_pct=value,
+        )
 
 
 def test_history_populated_after_run(ga_gb, tmp_path):
@@ -1427,6 +1496,7 @@ def _make_owned_checkpoint_minimizer(
     choices=None,
     population_size=4,
     keep_top_pct=25,
+    slice_and_merge_pct=50.0,
     allow_variable_cell=False,
     batch_energy=None,
 ):
@@ -1443,8 +1513,44 @@ def _make_owned_checkpoint_minimizer(
         generations=generations,
         keep_top_pct=keep_top_pct,
         intermediate_pct=100,
+        slice_and_merge_pct=slice_and_merge_pct,
         gb_batch_energy_func=batch_energy,
     )
+
+
+@pytest.mark.parametrize(
+    ("slice_and_merge_pct", "expected_crossover_slots"),
+    [
+        pytest.param(0.0, 0, id="mutation-only"),
+        pytest.param(100.0, 3, id="crossover-only"),
+    ],
+)
+def test_slice_and_merge_pct_controls_owned_offspring_mix(
+    owned_ga,
+    tmp_path,
+    slice_and_merge_pct,
+    expected_crossover_slots,
+):
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+        slice_and_merge_pct=slice_and_merge_pct,
+    )
+
+    minimizer.run_GA(unique_id=200)
+
+    operations = [lineage[0] for lineage, _energy in minimizer.history[1]]
+    crossover_slots = sum(
+        operation == "slice_and_merge"
+        or operation.startswith("crossover_fallback_")
+        for operation in operations
+    )
+    assert operations.count("carryover") == 1
+    assert crossover_slots == expected_crossover_slots
+    assert len(operations) == minimizer.population_size
 
 
 def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_path):
