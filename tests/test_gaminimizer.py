@@ -33,6 +33,12 @@ from GBOpt.GrainOwnership import (
 )
 
 
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:File-backed Parent initialization without explicit grain ownership is "
+    "deprecated.*:DeprecationWarning"
+)
+
+
 class TestGeneticAlgorithmMinimizerCheckpointing(unittest.TestCase):
 
     def setUp(self):
@@ -227,20 +233,17 @@ class TestGAIntraGenerationCheckpointing(unittest.TestCase):
         original_record = CandidateCheckpoint.record
         record_calls = {"n": 0}
 
-        def crashing_record(self_cp, unique_id, energy, dump):
+        def crashing_record(self_cp, unique_id, energy, dump, **kwargs):
             record_calls["n"] += 1
-            original_record(self_cp, unique_id, energy, dump)
+            original_record(self_cp, unique_id, energy, dump, **kwargs)
             if record_calls["n"] >= crash_after:
                 raise RuntimeError(
                     "Simulated mid-gen crash via checkpoint record")
 
-        CandidateCheckpoint.record = crashing_record
         minimizer = self._make_minimizer(generations=2)
-        try:
+        with patch.object(CandidateCheckpoint, "record", crashing_record):
             with self.assertRaises(RuntimeError):
                 minimizer.run_GA(unique_id=20, checkpoint_file=cp)
-        finally:
-            CandidateCheckpoint.record = original_record
 
         # Resume: count how many gen-0 evaluations are made
         resume_calls = {"n": 0}
@@ -290,20 +293,17 @@ class TestGAIntraGenerationCheckpointing(unittest.TestCase):
         original_record = CandidateCheckpoint.record
         record_calls = {"n": 0}
 
-        def crashing_record(self_cp, unique_id, energy, dump):
+        def crashing_record(self_cp, unique_id, energy, dump, **kwargs):
             record_calls["n"] += 1
-            original_record(self_cp, unique_id, energy, dump)
+            original_record(self_cp, unique_id, energy, dump, **kwargs)
             if record_calls["n"] >= 2:
                 raise RuntimeError(
                     "Simulated mid-gen crash via checkpoint record")
 
-        CandidateCheckpoint.record = crashing_record
         minimizer = self._make_minimizer(generations=2)
-        try:
+        with patch.object(CandidateCheckpoint, "record", crashing_record):
             with self.assertRaises(RuntimeError):
                 minimizer.run_GA(unique_id=22, checkpoint_file=cp)
-        finally:
-            CandidateCheckpoint.record = original_record
 
         minimizer2 = self._make_minimizer(generations=2)
         minimizer2.run_GA(unique_id=22, checkpoint_file=cp)
@@ -323,7 +323,10 @@ class TestGAIntraGenerationCheckpointing(unittest.TestCase):
                 })
             return results
 
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"does not accept a 'checkpoint' kwarg",
+        ):
             minimizer = GeneticAlgorithmMinimizer(
                 self.gb,
                 self._fake_energy_func,

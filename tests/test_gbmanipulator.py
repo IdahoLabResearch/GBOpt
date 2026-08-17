@@ -6,6 +6,7 @@ import importlib
 import math
 import tempfile
 import unittest
+import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -33,6 +34,12 @@ from GBOpt.GBManipulator import (
     _ParentsProxy,
 )
 from GBOpt.GrainOwnership import LEFT_GRAIN_LABEL, RIGHT_GRAIN_LABEL, GrainOwnership
+
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:File-backed Parent initialization without explicit grain ownership is "
+    "deprecated.*:DeprecationWarning"
+)
 from GBOpt.UnitCell import UnitCell
 
 _TEST_DIR = Path(__file__).resolve().parent
@@ -397,7 +404,6 @@ class TestGBManipulator(unittest.TestCase):
     def test_init_with_one_gbmaker_parent(self):
         self.assertIsNotNone(self.manipulator_tilt.parents[0])
         self.assertIsNone(self.manipulator_tilt.parents[1])
-        self.assertTrue(self.manipulator_tilt._GBManipulator__one_parent)
 
     def test_init_with_two_gbmaker_parents(self):
         manipulator = GBManipulator(self.tilt, self.tilt)
@@ -452,7 +458,10 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_grain_translation_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt)
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "grain translation only occurring based on parent 1",
+        ):
             _ = manipulator.translate_right_grain(1.0, 1.0)
 
     def test_slice_and_merge(self):
@@ -474,12 +483,18 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_remove_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Atom removal only occurring based on parent 1",
+        ):
             _ = manipulator.remove_atoms(gb_fraction=0.10)
             _ = manipulator.remove_atoms(gb_fraction=0.10)
 
     def test_remove_atoms_calculated_fraction_warning(self):
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Calculated fraction of atoms to remove is 0",
+        ):
             _ = self.manipulator_tilt.remove_atoms(gb_fraction=1e-7)
 
     def test_remove_atoms_with_specific_number(self):
@@ -525,15 +540,24 @@ class TestGBManipulator(unittest.TestCase):
 
     def test_insert_atoms_2_parent_warning(self):
         manipulator = GBManipulator(self.tilt, self.tilt, seed=self.seed)
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Atom insertion only occurring based on parent 1",
+        ):
             _ = manipulator.insert_atoms(fill_fraction=0.10, method='delaunay')
 
     def test_insert_atoms_calculated_fraction_warning(self):
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Calculated fraction of atoms to insert is 0",
+        ):
             _ = self.manipulator_tilt.insert_atoms(
                 fill_fraction=1e-7, method='delaunay')
 
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            "Calculated fraction of atoms to insert is 0",
+        ):
             _ = self.manipulator_tilt.insert_atoms(
                 fill_fraction=1e-7, method='grid')
 
@@ -804,7 +828,7 @@ class TestParent(unittest.TestCase):
         self.assertEqual(parent.y_dim, self.GB.y_dim)
         self.assertEqual(parent.z_dim, self.GB.z_dim)
 
-        x_gb = parent._Parent__gb_plane_x
+        x_gb = parent.gb_plane_x
         left_cut = x_gb - parent.gb_thickness / 2.0
         right_cut = x_gb + parent.gb_thickness / 2.0
         left_gb = parent.left_grain[parent.left_grain["x"] > left_cut]
@@ -916,7 +940,7 @@ class TestParentGBRegion(unittest.TestCase):
 
     def test_gb_indices_lie_within_symmetric_window(self):
         parent = self.parent
-        x_gb = parent._Parent__gb_plane_x
+        x_gb = parent.gb_plane_x
         half = parent.gb_thickness / 2.0
         xs = parent.whole_system["x"][parent.gb_indices]
         self.assertGreater(len(xs), 0)
@@ -938,35 +962,38 @@ class TestParentGBRegion(unittest.TestCase):
         )
 
     def test_gb_plane_x_from_gbmaker_matches_source(self):
-        self.assertAlmostEqual(self.parent._Parent__gb_plane_x,
-                               self.gbm.gb_plane_x, places=10)
+        self.assertAlmostEqual(self.parent.gb_plane_x, self.gbm.gb_plane_x, places=10)
 
-    def test_file_path_gb_plane_x_near_gbmaker_value(self):
+    def test_legacy_file_path_gb_plane_x_inference_warns_and_remains_near_source(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "asymmetric_boundary.dat"
             self.gbm.write_lammps(str(path), type_as_int=True)
             unit_cell = UnitCell()
             unit_cell.init_by_structure("sc", 1.0, "Cu")
-            parent_file = Parent(
-                str(path),
-                unit_cell=unit_cell,
-                gb_thickness=self.gbm.gb_thickness,
-            )
+            with self.assertWarnsRegex(
+                DeprecationWarning,
+                "without explicit grain ownership is deprecated",
+            ):
+                parent_file = Parent(
+                    str(path),
+                    unit_cell=unit_cell,
+                    gb_thickness=self.gbm.gb_thickness,
+                )
 
         self.assertAlmostEqual(
-            parent_file._Parent__gb_plane_x,
+            parent_file.gb_plane_x,
             self.gbm.gb_plane_x,
             delta=self.d_hkl,
-            msg="File-path gb_plane_x should be within one d_hkl of GBMaker value",
+            msg="Legacy inferred gb_plane_x should be within one d_hkl of source",
         )
 
-    def test_gbpos_atoms_lie_within_gb_indices_window(self):
+    def test_gb_atoms_lie_within_interface_window(self):
         parent = self.parent
-        x_gb = parent._Parent__gb_plane_x
+        x_gb = parent.gb_plane_x
         half = parent.gb_thickness / 2.0
-        gbpos_xs = parent._Parent__GBpos["x"]
-        self.assertTrue(np.all(gbpos_xs >= x_gb - half))
-        self.assertTrue(np.all(gbpos_xs <= x_gb + half))
+        gb_xs = parent.gb_atoms["x"]
+        self.assertTrue(np.all(gb_xs >= x_gb - half))
+        self.assertTrue(np.all(gb_xs <= x_gb + half))
 
 
 class TestParentProxy(unittest.TestCase):
@@ -1120,7 +1147,11 @@ def _owned_test_manipulator(
 
 
 def test_explicit_ownership_file_parent_does_not_reclassify_crossing_atom(tmp_path):
-    manipulator, _atoms, labels, _box = _owned_test_manipulator(tmp_path)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", DeprecationWarning)
+        manipulator, _atoms, labels, _box = _owned_test_manipulator(tmp_path)
+
+    assert not any(issubclass(item.category, DeprecationWarning) for item in caught)
     parent = manipulator.parents[0]
 
     assert np.array_equal(parent.grain_labels, labels)

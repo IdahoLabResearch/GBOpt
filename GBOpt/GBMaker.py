@@ -1222,9 +1222,9 @@ class GBMaker:
         atoms = np.empty(expected_site_count, dtype=structured_basis.dtype)
         atoms["name"] = structured_basis["name"][basis_indices]
 
-        # This is the sole exact-to-floating conversion in grain construction.
-        # Exact site metadata stores canonical repeated-supercell coordinates; multiplying
-        # by S reconstructs exact conventional-cell coordinate numerators.
+        # This is the sole exact-to-floating conversion in grain construction. Exact
+        # site metadata stores canonical repeated-supercell coordinates; multiplying by
+        # S reconstructs exact conventional-cell coordinate numerators.
         conventional_numerators = sites.coordinate_numerators @ sites.supercell_matrix
 
         try:

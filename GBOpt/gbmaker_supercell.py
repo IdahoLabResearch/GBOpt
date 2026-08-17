@@ -639,57 +639,8 @@ def enumerate_supercell_sites(
     )
 
 
-def supercell_axis_numerators(
-    supercell: np.ndarray,
-    origins: np.ndarray,
-    *,
-    axis: int = 0,
-) -> np.ndarray:
-    """Return exact supercell-coordinate numerators for integer origins.
-
-    For a supercell matrix ``S``, an integer origin has reduced supercell coordinates
-    ``u = origin @ inv(S)``. This function returns the selected numerator column of
-    ``origin @ adj(S)``, leaving the common denominator ``det(S)`` implicit. Distinct
-    numerator values identify fine integer layers along the selected supercell axis.
-
-    :param supercell: 3 by 3 integer supercell matrix ``S``.
-    :param origins: Integer conventional-cell origins with shape ``(N, 3)``.
-    :param axis: Supercell coordinate axis to return. Must be 0, 1, or 2.
-    :return: Integer numerator coordinates parallel to ``origins``.
-    :raises TypeError: If ``axis`` is not an integer scalar or is a boolean.
-    :raises ValueError: If inputs cannot be converted to exact integer arrays, if the
-        integer ``axis`` is outside 0 through 2, or if ``supercell`` is singular or has
-        negative determinant.
-    """
-    int_supercell = as_int_array(supercell, (3, 3), "S")
-
-    if isinstance(axis, (bool, np.bool_)) or not isinstance(axis, (int, np.integer)):
-        raise TypeError(f"axis must be 0, 1, or 2; got {axis!r}")
-    axis = int(axis)
-    if axis not in (0, 1, 2):
-        raise ValueError(f"axis must be 0, 1, or 2; got {axis!r}")
-
-    origins_arr = np.asarray(origins, dtype=object)
-    if origins_arr.ndim != 2 or origins_arr.shape[1] != 3:
-        raise ValueError(f"origins must have shape (N, 3); got {origins_arr.shape}")
-
-    int_origins = as_int_array(origins_arr, origins_arr.shape, "origins")
-
-    det_S = integer_det3(int_supercell)
-    if det_S == 0:
-        raise ValueError("supercell_axis_numerators requires non-singular S")
-    if det_S < 0:
-        raise ValueError("supercell_axis_numerators requires positive determinant S")
-
-    adj_S = np.array(integer_adj3(int_supercell), dtype=object)
-    numerators = int_origins @ adj_S[:, axis]
-
-    return np.asarray([int(value) for value in numerators], dtype=object)
-
-
 __all__ = [
     "build_supercell_matrix",
     "enumerate_supercell_origins",
     "enumerate_supercell_sites",
-    "supercell_axis_numerators",
 ]

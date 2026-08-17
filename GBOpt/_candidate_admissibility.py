@@ -1,82 +1,75 @@
 """Validate exact formula composition for in-memory interface candidates.
 
-This internal interface-domain module owns composition invariants shared by
-manipulation and evaluation. Potential-specific charge policy and optimizer fallback
-policy do not belong here.
+This internal interface-domain module owns composition invariants shared by manipulation
+and evaluation. Potential-specific charge policy and optimizer fallback policy do not
+belong here.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from math import gcd
 from typing import Any
 
 import numpy as np
+
+from GBOpt.UnitCell import UnitCellError
 
 
 class CandidateAdmissibilityError(ValueError):
     """Raised when candidate composition is outside the configured formula domain."""
 
 
-@dataclass(frozen=True, slots=True)
-class FormulaComposition:
-    """Exact normalized species formula and candidate formula-unit count."""
-
-    species_ratio: tuple[tuple[str, int], ...]
-    formula_units: int
-
-
 def _formula_ratio(unit_cell: Any) -> tuple[tuple[str, int], ...]:
-    """Return the unit cell's type-indexed ratio as a normalized species formula.
+    """Return authoritative formula metadata from a unit-cell-like object.
 
-    :param unit_cell: Unit cell providing ``ratio`` and ``type_map``.
-    :return: Canonically ordered, greatest-common-divisor-normalized formula.
-    :raises CandidateAdmissibilityError: If formula metadata are malformed.
+    :param unit_cell: Unit cell providing ``formula_ratio``.
+    :return: Canonically ordered normalized species formula.
+    :raises CandidateAdmissibilityError: If formula metadata are unavailable or
+        malformed.
     """
     try:
-        raw_ratio = unit_cell.ratio
-        type_map = unit_cell.type_map
-    except AttributeError as exc:
+        ratio = unit_cell.formula_ratio
+    except (AttributeError, UnitCellError) as exc:
         raise CandidateAdmissibilityError(
-            "candidate formula validation requires unit-cell ratio and type mapping"
+            "candidate formula validation requires valid unit-cell formula metadata"
         ) from exc
-    if not isinstance(raw_ratio, dict) or not raw_ratio:
-        raise CandidateAdmissibilityError("unit-cell formula ratio must be nonempty")
-    inverse = {int(type_id): str(species) for species, type_id in type_map.items()}
-    values: list[tuple[str, int]] = []
-    divisor = 0
-    for type_id, coefficient in raw_ratio.items():
+
+    if not isinstance(ratio, tuple) or not ratio:
+        raise CandidateAdmissibilityError(
+            "unit-cell formula ratio must be a nonempty tuple"
+        )
+
+    normalized: list[tuple[str, int]] = []
+    for item in ratio:
         if (
-            isinstance(type_id, (bool, np.bool_))
-            or isinstance(coefficient, (bool, np.bool_))
-            or not isinstance(type_id, (int, np.integer))
-            or not isinstance(coefficient, (int, np.integer))
-            or int(coefficient) <= 0
+            not isinstance(item, tuple)
+            or len(item) != 2
+            or not isinstance(item[0], str)
+            or isinstance(item[1], (bool, np.bool_))
+            or not isinstance(item[1], (int, np.integer))
+            or int(item[1]) <= 0
         ):
             raise CandidateAdmissibilityError(
-                "unit-cell formula ratio must contain positive integer coefficients"
+                "unit-cell formula ratio must contain species/positive-integer pairs"
             )
-        try:
-            species = inverse[int(type_id)]
-        except KeyError as exc:
-            raise CandidateAdmissibilityError(
-                f"unit-cell formula type {int(type_id)} has no species mapping"
-            ) from exc
-        normalized = int(coefficient)
-        divisor = gcd(divisor, normalized)
-        values.append((species, normalized))
-    return tuple(sorted((species, value // divisor) for species, value in values))
+        species, coefficient = item
+        normalized.append((species, int(coefficient)))
+
+    if len({species for species, _coefficient in normalized}) != len(normalized):
+        raise CandidateAdmissibilityError(
+            "unit-cell formula ratio must contain unique species"
+        )
+    return tuple(normalized)
 
 
 def validate_formula_composition(
     atoms: np.ndarray,
     unit_cell: Any,
-) -> FormulaComposition:
+) -> int:
     """Validate that candidate species counts are an exact formula multiple.
 
     :param atoms: Structured candidate atom rows containing a ``name`` field.
-    :param unit_cell: Unit cell defining the exact type-indexed formula ratio.
-    :return: Normalized formula and exact number of formula units.
+    :param unit_cell: Unit cell defining the authoritative normalized formula ratio.
+    :return: Exact number of formula units represented by ``atoms``.
     :raises CandidateAdmissibilityError: If atoms, species, or counts are invalid.
     """
     structured = np.asarray(atoms)
@@ -94,8 +87,8 @@ def validate_formula_composition(
     actual_species = set(names.tolist())
     if actual_species != expected_species:
         raise CandidateAdmissibilityError(
-            "candidate species do not exactly match the unit-cell formula: "
-            f"expected {sorted(expected_species)}, observed {sorted(actual_species)}"
+            "candidate species do not exactly match the unit-cell formula: expected "
+            f"{sorted(expected_species)}, observed {sorted(actual_species)}"
         )
     formula_units: int | None = None
     observed: list[str] = []
@@ -122,7 +115,7 @@ def validate_formula_composition(
         raise CandidateAdmissibilityError(
             "candidate must contain at least one complete formula unit"
         )
-    return FormulaComposition(ratio, formula_units)
+    return formula_units
 
 
 def composition_delta_is_formula_multiple(

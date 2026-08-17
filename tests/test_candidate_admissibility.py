@@ -26,28 +26,48 @@ def _atoms(species):
 
 
 def test_uo2_formula_composition_accepts_exact_formula_multiple(fluorite_uo2):
-    result = validate_formula_composition(
+    formula_units = validate_formula_composition(
         _atoms(["U", "O", "O", "U", "O", "O"]),
         fluorite_uo2,
     )
 
-    assert result.species_ratio == (("O", 2), ("U", 1))
-    assert result.formula_units == 2
+    assert formula_units == 2
 
 
-def test_uploaded_failure_composition_is_rejected(fluorite_uo2):
-    atoms = np.empty(3272 + 6291, dtype=Atom.atom_dtype)
-    atoms["name"][:3272] = "U"
-    atoms["name"][3272:] = "O"
-    atoms["x"] = 0.0
-    atoms["y"] = 0.0
-    atoms["z"] = 0.0
+def test_formula_composition_supports_more_than_two_species():
+    cell = UnitCell()
+    species = ["H"] * 2 + ["He"] * 4 + ["Li"] * 6
+    coordinates = np.column_stack(
+        (
+            np.linspace(0.0, 0.55, len(species)),
+            np.zeros(len(species)),
+            np.zeros(len(species)),
+        )
+    )
+    cell.init_by_custom(
+        coordinates,
+        species,
+        1.0,
+        np.eye(3),
+        np.eye(3),
+        {},
+        ratio={1: 2, 2: 4, 3: 6},
+    )
 
+    formula_units = validate_formula_composition(_atoms(species), cell)
+
+    assert formula_units == 2
+
+
+def test_uo2_formula_composition_rejects_nonintegral_formula_ratio(fluorite_uo2):
     with pytest.raises(
         CandidateAdmissibilityError,
         match="formula",
     ):
-        validate_formula_composition(atoms, fluorite_uo2)
+        validate_formula_composition(
+            _atoms(["U", "U", "O", "O", "O"]),
+            fluorite_uo2,
+        )
 
 
 def test_formula_composition_rejects_unexpected_species(fluorite_uo2):

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from numbers import Real
+from numbers import Integral, Real
 from pathlib import Path
 from uuid import UUID
 
@@ -28,7 +28,6 @@ from GBOpt._candidate_admissibility import (
     validate_formula_composition,
 )
 
-PENALTY = 1.0e30
 _MISSING = object()
 
 
@@ -37,7 +36,8 @@ class CandidateEvaluation:
     """Aligned result for one explicit-ownership candidate evaluation.
 
     :param input_index: Candidate position in the submitted population.
-    :param energy: Normalized finite energy, or ``PENALTY`` on failure.
+    :param energy: Normalized finite energy, or the optimizer-supplied penalty on
+        failure.
     :param structure_path: Canonical evaluator artifact path, when available.
     :param mapping: Candidate-to-file ownership mapping, when available.
     :param manipulator: Validated reconstructed candidate, when successful.
@@ -52,6 +52,58 @@ class CandidateEvaluation:
     manipulator: GBManipulator | None
     success: bool
     failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Normalize scalar fields and enforce coherent result state.
+
+        :raises TypeError: If scalar or path fields have invalid types.
+        :raises ValueError: If energy is non-finite or success/failure fields are
+            internally inconsistent.
+        """
+        if isinstance(self.input_index, (bool, np.bool_)) or not isinstance(
+            self.input_index, Integral
+        ):
+            raise TypeError("input_index must be a non-Boolean integer")
+        if isinstance(self.energy, (bool, np.bool_)) or not isinstance(
+            self.energy, Real
+        ):
+            raise TypeError("energy must be a non-Boolean real scalar")
+        energy = float(self.energy)
+        if not np.isfinite(energy):
+            raise ValueError("energy must be finite")
+        if type(self.success) is not bool:
+            raise TypeError("success must be a bool")
+
+        structure_path = self.structure_path
+        if structure_path is not None:
+            if not isinstance(structure_path, (str, Path)):
+                raise TypeError("structure_path must be a path-like string or None")
+            structure_path = str(structure_path)
+
+        object.__setattr__(self, "input_index", int(self.input_index))
+        object.__setattr__(self, "energy", energy)
+        object.__setattr__(self, "structure_path", structure_path)
+
+        if self.success:
+            if (
+                structure_path is None
+                or self.mapping is None
+                or self.manipulator is None
+            ):
+                raise ValueError(
+                    "successful evaluation requires a structure path, mapping, and "
+                    "manipulator"
+                )
+            if self.failure_reason is not None:
+                raise ValueError(
+                    "successful evaluation must not include a failure reason"
+                )
+            return
+
+        if not isinstance(self.failure_reason, str) or not self.failure_reason:
+            raise ValueError("failed evaluation requires a failure reason")
+        if self.manipulator is not None:
+            raise ValueError("failed evaluation must not include a manipulator")
 
 
 class ExplicitOwnershipEvaluator:
@@ -72,8 +124,8 @@ class ExplicitOwnershipEvaluator:
         scalar_energy_func: Callable,
         batch_energy_func: Callable | None,
         local_random: np.random.Generator,
+        penalty: float,
         allow_variable_cell: bool = False,
-        penalty: float = PENALTY,
     ) -> None:
         """Initialize the explicit-ownership evaluator adapter.
 
@@ -84,12 +136,25 @@ class ExplicitOwnershipEvaluator:
             callback; may be ``None``.
         :param local_random: Keyword argument, required. Optimizer-owned random-number
             generator.
+        :param penalty: Keyword argument, required. Optimizer-owned energy assigned to
+            failed calculations.
         :param allow_variable_cell: Keyword argument, optional, defaults to ``False``.
             Allow validated orthogonal evaluator-returned box relaxation.
-        :param penalty: Keyword argument, optional, defaults to ``PENALTY``. Energy
-            assigned to failed calculations.
-        :raises TypeError: If ``allow_variable_cell`` is not Boolean.
+        :raises TypeError: If a callback, random generator, penalty, or Boolean option
+            has an invalid type.
+        :raises ValueError: If ``penalty`` is non-finite.
         """
+        if not callable(scalar_energy_func):
+            raise TypeError("scalar_energy_func must be callable")
+        if batch_energy_func is not None and not callable(batch_energy_func):
+            raise TypeError("batch_energy_func must be callable or None")
+        if not isinstance(local_random, np.random.Generator):
+            raise TypeError("local_random must be a numpy.random.Generator")
+        if isinstance(penalty, (bool, np.bool_)) or not isinstance(penalty, Real):
+            raise TypeError("penalty must be a non-Boolean real scalar")
+        normalized_penalty = float(penalty)
+        if not np.isfinite(normalized_penalty):
+            raise ValueError("penalty must be finite")
         if not isinstance(allow_variable_cell, (bool, np.bool_)):
             raise TypeError("allow_variable_cell must be a Boolean")
         self.GB = GB
@@ -97,7 +162,7 @@ class ExplicitOwnershipEvaluator:
         self.batch_energy_func = batch_energy_func
         self.local_random = local_random
         self.allow_variable_cell = bool(allow_variable_cell)
-        self.penalty = float(penalty)
+        self.penalty = normalized_penalty
         self._claimed_paths: set[Path] = set()
 
     def begin_run(self) -> None:
@@ -209,6 +274,10 @@ class ExplicitOwnershipEvaluator:
 
         :param structure_path: Evaluator-returned path-like value.
         :return: Canonical path string, or None for a non-path value.
+        :raises OSError: If path normalization fails at the filesystem layer.
+        :raises RuntimeError: If path normalization encounters an unrecoverable path
+            resolution error.
+        :raises ValueError: If the path value is malformed.
         """
         if not isinstance(structure_path, (str, Path)):
             return None
@@ -226,18 +295,22 @@ class ExplicitOwnershipEvaluator:
         :return: Reconstructed manipulator with the optimizer RNG attached.
         :raises FileNotFoundError: If the artifact does not exist.
         :raises LammpsDataError: If the artifact cannot be read unambiguously.
-        :raises GrainOwnershipError: If the artifact changed candidate identity.
-        :raises ParentError: If the reconstructed parent is invalid.
-        :raises GBManipulatorError: If manipulator reconstruction fails.
+        :raises GrainOwnershipError: If the artifact changed candidate identity or
+            cannot be reconstructed as a valid candidate.
         """
-        manipulator = reload_explicit_manipulator(
-            structure_path,
-            candidate_mapping=mapping,
-            unit_cell=self.GB.unit_cell,
-            gb_thickness=self.GB.gb_thickness,
-            type_dict=self.GB.unit_cell.type_map,
-            allow_variable_cell=self.allow_variable_cell,
-        )
+        try:
+            manipulator = reload_explicit_manipulator(
+                structure_path,
+                candidate_mapping=mapping,
+                unit_cell=self.GB.unit_cell,
+                gb_thickness=self.GB.gb_thickness,
+                type_dict=self.GB.unit_cell.type_map,
+                allow_variable_cell=self.allow_variable_cell,
+            )
+        except (ParentError, GBManipulatorError) as exc:
+            raise GrainOwnershipError(
+                "evaluator artifact could not reconstruct a valid candidate"
+            ) from exc
         try:
             validate_formula_composition(
                 manipulator.parents[0].whole_system,
@@ -281,7 +354,14 @@ class ExplicitOwnershipEvaluator:
             missing_fields.append("energy")
         if structure_path is _MISSING or structure_path is None:
             missing_fields.append("final_dump")
-        diagnostic_path = self._diagnostic_path(structure_path)
+        try:
+            diagnostic_path = self._diagnostic_path(structure_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            return self._failed_evaluation(
+                input_index,
+                f"invalid structure path: {type(exc).__name__}: {exc}",
+                mapping,
+            )
         if missing_fields:
             return self._failed_evaluation(
                 input_index,
@@ -329,8 +409,6 @@ class ExplicitOwnershipEvaluator:
             OSError,
             LammpsDataError,
             GrainOwnershipError,
-            ParentError,
-            GBManipulatorError,
         ) as exc:
             return self._failed_evaluation(
                 input_index,

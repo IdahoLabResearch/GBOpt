@@ -374,6 +374,29 @@ def test_custom_initialization_sets_requested_state():
     assert cell.rational_basis is None
 
 
+def test_formula_ratio_is_normalized_species_metadata_for_multicomponent_cell():
+    cell = UnitCell()
+    species = ["H"] * 2 + ["He"] * 4 + ["Li"] * 6
+    coordinates = np.column_stack(
+        (
+            np.linspace(0.0, 0.55, len(species)),
+            np.zeros(len(species)),
+            np.zeros(len(species)),
+        )
+    )
+    cell.init_by_custom(
+        coordinates,
+        species,
+        1.0,
+        np.eye(3),
+        np.eye(3),
+        {},
+        ratio={1: 2, 2: 4, 3: 6},
+    )
+
+    assert cell.formula_ratio == (("H", 1), ("He", 2), ("Li", 3))
+
+
 # ---------------------------------------------------------------------------
 # Conversion, representation, and type mapping
 # ---------------------------------------------------------------------------

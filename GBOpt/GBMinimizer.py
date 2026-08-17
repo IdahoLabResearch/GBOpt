@@ -16,13 +16,16 @@ from typing import Any
 import numpy as np
 
 from GBOpt import GBMaker, GBManipulator
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    validate_formula_composition,
+)
 from GBOpt._explicit_ownership_evaluation import (
     CandidateEvaluation,
     ExplicitOwnershipEvaluator,
 )
 from GBOpt.Checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
-    ENERGY_PENALTY,
     CandidateCheckpoint,
     CheckpointError,
     CheckpointStore,
@@ -41,10 +44,9 @@ from GBOpt.GBManipulator import (
     GBManipulatorValueError,
     ParentError,
 )
-from GBOpt._candidate_admissibility import (
-    CandidateAdmissibilityError,
-    validate_formula_composition,
-)
+
+ENERGY_PENALTY: float = 1.0e30
+"""Optimizer policy for ranking failed candidate evaluations."""
 
 _OWNED_GA_CHECKPOINT_VERSION = 2
 
@@ -141,8 +143,7 @@ class Mutator:
                 + ", ".join(repr(choice) for choice in invalid_choices)
             )
 
-        # Preserve the existing behavior where duplicate names do not weight
-        # a mutation more heavily.
+        # Duplicate names do not weight a mutation more heavily.
         self.choices_keys = list(dict.fromkeys(choices))
         if not self.choices_keys:
             raise GBMinimizerValueError(
@@ -184,17 +185,10 @@ class Mutator:
                 y_dim = parent.box_dims[1, 1] - parent.box_dims[1, 0]
                 z_dim = parent.box_dims[2, 1] - parent.box_dims[2, 0]
 
-                dy = (
-                    y_dim / GB.repeat_factor[0]
-                ) * local_random.uniform(0, 1)
-                dz = (
-                    z_dim / GB.repeat_factor[1]
-                ) * local_random.uniform(0, 1)
+                dy = (y_dim / GB.repeat_factor[0]) * local_random.uniform(0, 1)
+                dz = (z_dim / GB.repeat_factor[1]) * local_random.uniform(0, 1)
 
-                new_system = manipulator.translate_right_grain(
-                    dy=dy,
-                    dz=dz,
-                )
+                new_system = manipulator.translate_right_grain(dy=dy, dz=dz)
                 mutation = f"shift{dy:.8f}dy{dz:.8f}dz"
 
             case _:
@@ -213,8 +207,8 @@ class Mutator:
         """Perform a randomly selected feasible mutation.
 
         Each configured mutation is attempted at most once. If an operation is
-        physically infeasible for the current candidate, another configured
-        operation is tried. Failure of every configured operation is fatal.
+        physically infeasible for the current candidate, another configured operation is
+        tried. Failure of every configured operation is fatal.
 
         :param local_random: Optimizer-owned random-number generator.
         :param GB: GBMaker providing boundary dimensions and repeat factors.
@@ -241,8 +235,8 @@ class Mutator:
             f"{choice}: {exc}" for choice, exc in failures
         )
         error = GBMinimizerError(
-            "No configured mutation could produce a valid candidate. "
-            f"Attempted mutations: {failure_details}"
+            "No configured mutation could produce a valid candidate. Attempted "
+            f"mutations: {failure_details}"
         )
         raise error from failures[-1][1]
 
@@ -289,10 +283,10 @@ class MonteCarloMinimizer:
         - gbmaker (self.GB) remains the authoritative reference for
           unit_cell/gb_thickness.
         - initial structure may be:
-            * None -> Use GBManipulator(self.GB)
-            * GBMaker -> generate starting structure from that maker
-            * anything else -> pass to GBManipulator as a "structure spec" that it can read,
-                while still injecting unit_cell/gb_thickness from self.GB.
+          * None -> Use GBManipulator(self.GB)
+          * GBMaker -> generate starting structure from that maker
+          * anything else -> pass to GBManipulator as a "structure spec" that it can
+            read, while still injecting unit_cell/gb_thickness from self.GB.
         """
         seed = self.initial_structure
         if seed is None:
@@ -669,7 +663,8 @@ class GeneticAlgorithmMinimizer:
                         stacklevel=2,
                     )
                     gb_batch_energy_func = _wrap_batch_func_with_checkpoint(
-                        gb_batch_energy_func)
+                        gb_batch_energy_func, penalty=ENERGY_PENALTY
+                    )
             except ValueError:
                 # C callables have no inspectable signature — wrap at batch-return granularity.
                 warnings.warn(
@@ -680,7 +675,8 @@ class GeneticAlgorithmMinimizer:
                     stacklevel=2,
                 )
                 gb_batch_energy_func = _wrap_batch_func_with_checkpoint(
-                    gb_batch_energy_func)
+                    gb_batch_energy_func, penalty=ENERGY_PENALTY
+                )
             except TypeError:
                 raise GBMinimizerTypeError(
                     "gb_batch_energy_func must be callable."
@@ -697,22 +693,24 @@ class GeneticAlgorithmMinimizer:
                 scalar_energy_func=gb_energy_func,
                 batch_energy_func=gb_batch_energy_func,
                 local_random=self.local_random,
+                penalty=ENERGY_PENALTY,
                 allow_variable_cell=allow_variable_cell,
             )
             if initial_ownership is not None
             else None
         )
         self.manipulator = self._make_initial_manipulator()
+        initial_parent = self.manipulator.parents[0]
         try:
-            initial_composition = validate_formula_composition(
-                self.manipulator.parents[0].whole_system,
-                self.manipulator.parents[0].unit_cell,
+            validate_formula_composition(
+                initial_parent.whole_system,
+                initial_parent.unit_cell,
             )
         except CandidateAdmissibilityError as exc:
             raise GBMinimizerValueError(
                 f"initial candidate composition is inadmissible: {exc}"
             ) from exc
-        self.composition_policy = tuple(initial_composition.species_ratio)
+        self.composition_policy = tuple(initial_parent.unit_cell.formula_ratio)
         self.mutator = Mutator(choices, self.manipulator)
         self.manipulator.rng = self.local_random
         self.population_size = population_size
@@ -1819,7 +1817,8 @@ class GeneticAlgorithmMinimizer:
             if checkpoint_file is None:
                 checkpoint = CheckpointStore.disabled()
                 state = None
-                unique_id = str(unique_id) if unique_id is not None else str(uuid.uuid4())
+                unique_id = str(unique_id) if unique_id is not None else str(
+                    uuid.uuid4())
             else:
                 checkpoint_file = Path(checkpoint_file)
                 checkpoint = CheckpointStore.from_optional(

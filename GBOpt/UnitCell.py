@@ -10,6 +10,7 @@ here.
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from math import gcd
 
 import numpy as np
 from scipy.spatial import KDTree
@@ -709,6 +710,51 @@ class UnitCell:
     def ratio(self) -> dict[int, int]:
         """Returns the ratios of the different atom types in the defined UnitCell."""
         return self.__ratio
+
+    @property
+    def formula_ratio(self) -> tuple[tuple[str, int], ...]:
+        """Return the canonical normalized species formula for this unit cell.
+
+        The stored ``ratio`` is indexed by integer atom type because several legacy
+        manipulation routines operate on numeric types.  Candidate-level composition
+        checks, however, operate on species names.  This property is the authoritative
+        bridge between those representations so callers do not reconstruct the formula
+        independently.
+
+        :return: Species/coefficient pairs sorted by species name and reduced by their
+            greatest common divisor.
+        :raises UnitCellValueError: If ratio and type-map metadata are inconsistent.
+        """
+        if not isinstance(self.__ratio, dict) or not self.__ratio:
+            raise UnitCellValueError("unit-cell formula ratio must be nonempty")
+
+        inverse = {int(type_id): species for species, type_id in self.__type_map.items()}
+        values: list[tuple[str, int]] = []
+        divisor = 0
+        for type_id, coefficient in self.__ratio.items():
+            if (
+                isinstance(type_id, (bool, np.bool_))
+                or isinstance(coefficient, (bool, np.bool_))
+                or not isinstance(type_id, (int, np.integer))
+                or not isinstance(coefficient, (int, np.integer))
+                or int(coefficient) <= 0
+            ):
+                raise UnitCellValueError(
+                    "unit-cell formula ratio must contain positive integer coefficients"
+                )
+            try:
+                species = inverse[int(type_id)]
+            except KeyError as exc:
+                raise UnitCellValueError(
+                    f"unit-cell formula type {int(type_id)} has no species mapping"
+                ) from exc
+            normalized = int(coefficient)
+            divisor = gcd(divisor, normalized)
+            values.append((species, normalized))
+
+        return tuple(
+            sorted((species, coefficient // divisor) for species, coefficient in values)
+        )
 
     @property
     def type_map(self) -> dict[str, int]:

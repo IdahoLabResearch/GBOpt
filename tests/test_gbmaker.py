@@ -4,7 +4,6 @@ import filecmp
 import importlib
 import math
 import os
-import sys
 import tempfile
 import unittest
 import warnings
@@ -1831,7 +1830,7 @@ class TestGBMakerPeriodicSpacing(unittest.TestCase):
             warnings.simplefilter("always")
             gbm = self._make_gb(self.sigma3_111)
 
-        self.assertEqual(gbm._GBMaker__inplane_periodic, (True, True))
+        self.assertEqual(gbm.inplane_periodic, (True, True))
         self.assertAlmostEqual(gbm.spacing["y"], self.a0 * np.sqrt(6), places=5)
         self.assertAlmostEqual(gbm.spacing["z"], self.a0 * np.sqrt(2), places=5)
         self.assertAlmostEqual(
@@ -1848,15 +1847,11 @@ class TestGBMakerPeriodicSpacing(unittest.TestCase):
         )
 
     def test_periodic_spacing_sigma7_marks_y_nonperiodic_and_warns_for_y_only(self):
-        mod = sys.modules.get("GBOpt.GBMaker")
-        if mod is not None and hasattr(mod, "__warningregistry__"):
-            mod.__warningregistry__.clear()
-
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             gbm = self._make_gb(self.sigma7_111)
 
-        self.assertEqual(gbm._GBMaker__inplane_periodic, (False, True))
+        self.assertEqual(gbm.inplane_periodic, (False, True))
         self.assertAlmostEqual(gbm.spacing["y"], 15 * self.a0, places=12)
         self.assertAlmostEqual(gbm.spacing["z"], self.a0 * 7 * np.sqrt(2), places=5)
         non_periodic_messages = [
@@ -2849,6 +2844,10 @@ class TestGBMakerTriclinic(unittest.TestCase):
         self.assertAlmostEqual(xz, 0.0, places=3)
         self.assertAlmostEqual(yz, 0.0, places=3)
 
+    @pytest.mark.filterwarnings(
+        "ignore:File-backed Parent initialization without explicit grain ownership is "
+        "deprecated.*:DeprecationWarning"
+    )
     def test_triclinic_gbmanipulator_reads_back(self):
         from GBOpt.GBManipulator import Parent
         with tempfile.NamedTemporaryFile(delete=False, suffix=".dat", mode="w") as f:
@@ -2938,10 +2937,13 @@ class TestGBMakerTriclinic(unittest.TestCase):
                 )
 
     def test_nonperiodic_inplane_axis_rejects_triclinic_output(self):
-        with self.assertWarns(UserWarning):
+        with self.assertWarnsRegex(
+            UserWarning,
+            r"boundary is non-periodic along [yz]",
+        ):
             self.gbm.update_spacing(threshold=self.gbm.a0)
 
-        self.assertIn(False, self.gbm._GBMaker__inplane_periodic)
+        self.assertIn(False, self.gbm.inplane_periodic)
         with self.assertRaises(GBMakerValueError):
             self.gbm._GBMaker__get_triclinic_params()
 
@@ -3188,16 +3190,24 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
 
     def test_sigma7_111_construction_succeeds(self):
         """Regression: Sigma7 (111) must construct without ValueError."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Required y-spacing .*boundary is non-periodic along y\.",
+                category=UserWarning,
+            )
             gbm = self._make_gb(self.sigma7_111)
         self.assertGreater(gbm.left_grain.shape[0], 0)
         self.assertGreater(gbm.right_grain.shape[0], 0)
 
     def test_sigma7_111_x_spacing_correct(self):
         """Sigma7 (111) x-spacing must be a0*sqrt(3) for both grains."""
-        with warnings.catch_warnings(record=True):
-            warnings.simplefilter("always")
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"Required y-spacing .*boundary is non-periodic along y\.",
+                category=UserWarning,
+            )
             gbm = self._make_gb(self.sigma7_111)
         s = gbm.spacing
         self.assertAlmostEqual(s["x"]["left"], self.a0 * np.sqrt(3), places=5)
@@ -3212,16 +3222,6 @@ class TestGBMakerNonCommutingBoundaries(unittest.TestCase):
         non-periodic warning is expected. A non-periodic UserWarning is
         therefore correct behavior, not an error.
         """
-        # GBMaker.__calculate_periodic_spacing calls warnings.simplefilter("once", ...)
-        # without a catch_warnings guard, which populates the per-module
-        # __warningregistry__. catch_warnings restores warnings.filters on exit
-        # but does NOT clear __warningregistry__, so if another Sigma7 test ran
-        # first the "once" filter would suppress the warning here. Clear it
-        # explicitly.
-        mod = sys.modules.get("GBOpt.GBMaker")
-        if mod is not None and hasattr(mod, "__warningregistry__"):
-            mod.__warningregistry__.clear()
-
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             self._make_gb(self.sigma7_111)

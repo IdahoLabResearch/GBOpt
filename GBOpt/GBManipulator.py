@@ -21,6 +21,11 @@ from numba import float64, jit, prange
 from numba.typed import List
 from scipy.spatial import ConvexHull, Delaunay, KDTree
 
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    composition_delta_is_formula_multiple,
+    validate_formula_composition,
+)
 from GBOpt.Atom import Atom
 from GBOpt.BoundaryTopology import (
     BoundaryNormalTopology,
@@ -40,11 +45,6 @@ from GBOpt.GrainOwnership import (
     GrainOwnershipError,
 )
 from GBOpt.UnitCell import UnitCell
-from GBOpt._candidate_admissibility import (
-    CandidateAdmissibilityError,
-    composition_delta_is_formula_multiple,
-    validate_formula_composition,
-)
 
 # TODO: Generalize to interfaces, not just GBs
 
@@ -805,8 +805,11 @@ class ParentsProxyTypeError(ParentsProxyError, TypeError):
 
 
 class Parent:
-    """
-    Class containing the information about a parent of a new structure.
+    """Legacy compatibility state used by :class:`GBManipulator` inputs.
+
+    ``Parent`` retains material and derived GB-region context required by older
+    manipulation methods.  It is not a separate parent-only structure domain model;
+    composable manipulation state is represented by :class:`InterfaceCandidate`.
 
     :param system: A GBMaker instance or string containing the filename of a LAMMPS dump
         file.
@@ -816,7 +819,9 @@ class Parent:
     :param type_dict: The map from integer to element string. The default mapping is
         1 -> 'H', 2 -> 'He', etc.
     :param grain_ownership: Keyword argument, optional, defaults to ``None``. Explicit
-        persistent grain ownership for a single file-backed parent.
+        persistent grain ownership for a single file-backed parent. File-backed
+        construction without explicit ownership uses deprecated coordinate-based grain
+        inference.
     """
     __num_to_name = {val: key for key, val in Atom._numbers.items()}
 
@@ -875,6 +880,41 @@ class Parent:
                 )
             )
         ]
+
+    def _to_interface_candidate(
+        self,
+        atoms: np.ndarray,
+        grain_labels: np.ndarray,
+        *,
+        interface_separation: float = 0.0,
+    ) -> InterfaceCandidate:
+        """Convert candidate rows using this parent's interface geometry context.
+
+        This method is the narrow compatibility bridge from legacy ``Parent`` state to
+        the immutable candidate representation used by composable manipulation
+        operations.  Parent/child status remains an optimizer role rather than a
+        distinct candidate data type.
+
+        :param atoms: Candidate atom rows.
+        :param grain_labels: Candidate-aligned left/right labels.
+        :param interface_separation: Keyword argument, optional, defaults to ``0.0``.
+            Existing inserted interface separation in angstroms.
+        :return: Immutable geometry-bearing interface candidate.
+        :raises GBManipulatorValueError: If candidate rows or stored geometry are
+            inconsistent.
+        """
+        return InterfaceCandidate(
+            atoms=atoms,
+            box_dims=self.box_dims,
+            gb_plane_x=self.gb_plane_x,
+            left_grain_x_bounds=self.left_grain_x_bounds,
+            right_grain_x_bounds=self.right_grain_x_bounds,
+            grain_labels=grain_labels,
+            inplane_periodic=self.inplane_periodic,
+            normal_topology=self.normal_topology,
+            coordinate_tolerance=self.coordinate_tolerance,
+            interface_separation=interface_separation,
+        )
 
     def __init_by_gbmaker(self, system: GBMaker) -> None:
         """
@@ -1009,6 +1049,15 @@ class Parent:
 
         for method, file_keywords in keywords.items():
             if any(keyword in line for keyword in file_keywords for line in head):
+                if grain_ownership is None:
+                    warnings.warn(
+                        "File-backed Parent initialization without explicit grain "
+                        "ownership is deprecated because gb_plane_x and grain "
+                        "membership must be inferred from coordinates. Supply "
+                        "grain_ownership with explicit interface metadata instead.",
+                        DeprecationWarning,
+                        stacklevel=3,
+                    )
                 method(
                     system_file,
                     unit_cell,
@@ -2028,32 +2077,6 @@ class GBManipulator:
             )
         )
 
-    def __geometry_candidate(
-        self,
-        atoms: np.ndarray,
-        labels: np.ndarray,
-    ) -> InterfaceCandidate:
-        """Return a fixed-cell candidate using the first parent's geometry.
-
-        :param atoms: Candidate atom rows in left-then-right order.
-        :param labels: Candidate-aligned local grain labels.
-        :return: Validated immutable interface candidate.
-        :raises GBManipulatorValueError: If candidate rows or parent geometry are
-            inconsistent.
-        """
-        parent = self.__parents[0]
-        return InterfaceCandidate(
-            atoms=atoms,
-            box_dims=parent.box_dims,
-            gb_plane_x=parent.gb_plane_x,
-            left_grain_x_bounds=parent.left_grain_x_bounds,
-            right_grain_x_bounds=parent.right_grain_x_bounds,
-            grain_labels=labels,
-            inplane_periodic=parent.inplane_periodic,
-            normal_topology=parent.normal_topology,
-            coordinate_tolerance=parent.coordinate_tolerance,
-        )
-
     def make_parent_candidate(self) -> InterfaceCandidate:
         """Return the first parent as a complete immutable interface candidate.
 
@@ -2074,7 +2097,7 @@ class GBManipulator:
         if labels is None:
             labels = self.__concatenated_labels(parent, len(parent.whole_system))
         self.__set_candidate_labels(labels, len(parent.whole_system))
-        return self.__geometry_candidate(parent.whole_system, labels)
+        return parent._to_interface_candidate(parent.whole_system, labels)
 
     def translate_right_grain(
         self,
@@ -2169,7 +2192,7 @@ class GBManipulator:
 
         atoms = self.translate_right_grain(dy, dz, dx=dx)
         labels = self.__concatenated_labels(parent, len(atoms))
-        return self.__geometry_candidate(atoms, labels)
+        return parent._to_interface_candidate(atoms, labels)
 
     def cycle_grain_terminations(
         self,
@@ -2382,7 +2405,7 @@ class GBManipulator:
         )
         parent = self.__parents[0]
         labels = self.__concatenated_labels(parent, len(atoms))
-        return self.__geometry_candidate(atoms, labels)
+        return parent._to_interface_candidate(atoms, labels)
 
     def apply_interface_separation(
         self,
@@ -2587,17 +2610,13 @@ class GBManipulator:
             )
 
         try:
-            first_composition = validate_formula_composition(
-                pos1,
-                parent1.unit_cell,
-            )
-            second_composition = validate_formula_composition(
-                pos2,
-                parent2.unit_cell,
-            )
+            validate_formula_composition(pos1, parent1.unit_cell)
+            validate_formula_composition(pos2, parent2.unit_cell)
         except CandidateAdmissibilityError as exc:
             raise CompositionAwareCrossoverError(str(exc)) from exc
-        if first_composition.species_ratio != second_composition.species_ratio:
+        first_formula = parent1.unit_cell.formula_ratio
+        second_formula = parent2.unit_cell.formula_ratio
+        if first_formula != second_formula:
             raise CompositionAwareCrossoverError(
                 "crossover parents use different normalized formula vectors"
             )
@@ -2650,7 +2669,7 @@ class GBManipulator:
             second_coordinates,
             lower=lower,
             upper=upper,
-            species_ratio=first_composition.species_ratio,
+            species_ratio=first_formula,
         )
         if not intervals:
             raise CompositionAwareCrossoverError(
@@ -3099,12 +3118,9 @@ class GBManipulator:
              "fill_fraction <= 0.25"
              )
 
-        if (num_to_insert is not None and
-            (
-                        num_to_insert < 1 or
-                        num_to_insert > int(0.25 * len(gb_atoms))
-                    )
-            ):
+        if num_to_insert is not None and (
+            num_to_insert < 1 or num_to_insert > int(0.25 * len(gb_atoms))
+        ):
             raise GBManipulatorValueError(
                 "Invalid num_to_insert value. Must be >= 1, and must be less than or "
                 "equal to 25% of the total number of atoms in the GB region.")

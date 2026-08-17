@@ -288,20 +288,10 @@ def test_exact_inplane_dimensions_are_integer_multiples_of_both_grain_periods(
     assert repeat_count == pytest.approx(round(repeat_count), abs=1e-6, rel=0.0)
 
 
-def test_exact_mode_does_not_approximate_rotation_rows(monkeypatch, build_gb):
-    def fail_if_called(*_args, **_kwargs):
-        raise AssertionError(
-            "The exact construction path must not approximate rotation rows."
-        )
-
-    monkeypatch.setattr(
-        GBMaker,
-        "_GBMaker__approximate_rotation_matrix_as_int",
-        fail_if_called,
-    )
-
+def test_exact_mode_reports_exact_construction(build_gb):
     gb = build_gb()
 
+    assert gb.uses_exact_construction is True
     assert gb.whole_system.size > 0
 
 

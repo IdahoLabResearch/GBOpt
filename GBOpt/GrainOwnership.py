@@ -387,9 +387,9 @@ class GrainOwnership:
 
     def __copy__(self) -> GrainOwnership:
         """Independent immutable ownership copy."""
-        # doccheck: ignore=DOC115[GrainOwnershipError]
-        #   Frozen/read-only state cannot become invalid through the supported API;
-        #   constructor failure here would indicate unsupported internal corruption.
+        # pyrc: ignore=DOC115[GrainOwnershipError]
+        #     Frozen/read-only state cannot become invalid through the supported API;
+        #     constructor failure here would indicate unsupported internal corruption.
         return GrainOwnership(
             atom_ids=self._atom_ids,
             labels=self._labels,
