@@ -9,12 +9,19 @@ import unittest
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBMinimizer import (
     GBMinimizerError,
     GBMinimizerValueError,
     MonteCarloMinimizer,
+)
+
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:File-backed Parent initialization without explicit grain ownership is "
+    "deprecated.*:DeprecationWarning"
 )
 
 

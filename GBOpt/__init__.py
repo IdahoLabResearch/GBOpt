@@ -3,10 +3,11 @@
 __version__ = "0.2.0"
 
 from GBOpt.Atom import Atom
+from GBOpt.BoundaryTopology import BoundaryNormalTopology
 from GBOpt.GBMaker import GBMaker
-from GBOpt.GBManipulator import GBManipulator
+from GBOpt.GBManipulator import GBManipulator, InterfaceCandidate
 from GBOpt.Position import Position
-from GBOpt.UnitCell import UnitCell
+from GBOpt.UnitCell import RationalBasis, UnitCell
 
 __citation__ = """
 French, J. C. and Bhave, C. V. (2026). GBOpt: Grain Boundary Structure Optimization
