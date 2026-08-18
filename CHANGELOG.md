@@ -2,7 +2,7 @@
 
 All notable changes to GBOpt are documented in this file.
 
-## v0.2.0 — boundary specifications, complete exact construction, and interface-aware optimization
+## v0.2.0 — boundary specifications, complete exact decorated-site construction, and interface-aware optimization
 
 ### Added
 
@@ -71,9 +71,12 @@ All notable changes to GBOpt are documented in this file.
   geometry, periodicity, and topology before reconstructing an optimizer candidate.
   Changed orthogonal box bounds remain rejected by default and are accepted only when
   variable-cell execution is explicitly enabled.
-- Failed or incomplete explicit-ownership evaluations retain aligned failure
-  records and receive the optimizer penalty without corrupting GA population
-  ordering.
+- Explicit-ownership evaluation results enforce coherent success/failure
+  state, normalize persistent scalar values, retain aligned failure context, and
+  use the optimizer-owned penalty policy without corrupting GA population ordering.
+- Candidate-level evaluation checkpoints are bound to the exact ordered candidate
+  population and iteration. Incompatible sidecars are rejected rather than
+  partially reusing results from different populations.
 - Boundary-normal operations no longer infer slab physics from an ambiguous
   false legacy periodic-interface flag.
 
@@ -84,6 +87,10 @@ All notable changes to GBOpt are documented in this file.
   positional constructor issues a `DeprecationWarning`. Migrate to
   `GBMaker.from_boundary_spec(...)`. The legacy path will be removed in a future
   release.
+- File-backed `Parent`/`GBManipulator` initialization without explicit
+  `GrainOwnership` metadata issues a `DeprecationWarning`. The legacy
+  coordinate-based fallback for grain assignment and GB-plane inference remains
+  available for compatibility; callers should provide explicit ownership metadata.
 
 ### Known limitations
 
