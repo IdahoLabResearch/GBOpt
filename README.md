@@ -55,6 +55,56 @@ gb = GBMaker.from_boundary_spec(
 )
 ```
 
+## Artifact retention and evaluator cleanup
+
+Explicit-ownership GA runs can opt into bounded artifact retention. When a retention
+policy uses `prune=True`, cleanup must have an explicit filesystem owner and checkpointing
+must be enabled. For evaluators whose returned structure files are directly owned by
+GBOpt, pass `managed_artifact_root` and GBOpt will remove only canonical paths beneath
+that root after a durable generation checkpoint is committed.
+
+Evaluators with richer work-directory layouts should instead provide a
+`cleanup_candidate` callback. The callback receives an `ArtifactCleanupRequest` only
+after GBOpt has determined that the evaluator source is transient and restart-safe. It
+can derive the backend work directory and use `remove_managed_path(...)` for the actual
+recursive deletion:
+
+```python
+from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest, remove_managed_path
+from GBOpt.GBMinimizer import GeneticAlgorithmMinimizer
+
+run_root = "/scratch/user/run123/evaluations"
+
+
+def cleanup_candidate(request):
+    work_dir = request.source_path.parent
+    remove_managed_path(work_dir, managed_root=run_root)
+
+
+retention = ArtifactRetentionPolicy(
+    rules=(
+        KeepBest(
+            name="objective_elite",
+            property="objective",
+            direction="min",
+            count=5,
+        ),
+    ),
+    prune=True,
+)
+
+minimizer = GeneticAlgorithmMinimizer(
+    ...,
+    retention_policy=retention,
+    cleanup_candidate=cleanup_candidate,
+)
+```
+
+Cleanup callback objects and managed-root configuration are runtime settings and are not
+serialized into optimizer checkpoints. Cleanup failures emit warnings and leave the
+committed checkpoint valid; the resulting failure mode is retained storage rather than
+invalid restart state.
+
 To install, create a new conda environment
 ```
 conda create --name GBOpt python
