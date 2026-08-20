@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from GBOpt.BoundarySpec import CSLExactSpec
-from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest
+from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest, remove_managed_path
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
@@ -1666,8 +1666,17 @@ def _make_owned_checkpoint_minimizer(
     allow_variable_cell=False,
     batch_energy=None,
     retention_policy=None,
+    managed_artifact_root=None,
+    cleanup_candidate=None,
 ):
     gb, seed_path, ownership, _labels = owned_ga
+    if (
+        managed_artifact_root is None
+        and cleanup_candidate is None
+        and retention_policy is not None
+        and retention_policy.prune
+    ):
+        managed_artifact_root = Path(seed_path).parent
     return GeneticAlgorithmMinimizer(
         gb,
         energy,
@@ -1684,6 +1693,8 @@ def _make_owned_checkpoint_minimizer(
         reuse_carryover_evaluations=reuse_carryover_evaluations,
         gb_batch_energy_func=batch_energy,
         retention_policy=retention_policy,
+        managed_artifact_root=managed_artifact_root,
+        cleanup_candidate=cleanup_candidate,
     )
 
 
@@ -2445,6 +2456,71 @@ def _objective_retention_policy(*, count=1, prune=True):
     )
 
 
+def test_owned_pruning_requires_explicit_cleanup_owner(owned_ga):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(
+        GBMinimizerValueError,
+        match="requires managed_artifact_root or cleanup_candidate",
+    ):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=seed_path,
+            initial_ownership=ownership,
+            retention_policy=_objective_retention_policy(),
+        )
+
+
+def test_owned_cleanup_configuration_requires_pruning_policy(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(
+        GBMinimizerValueError,
+        match="requires retention_policy prune=True",
+    ):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=seed_path,
+            initial_ownership=ownership,
+            managed_artifact_root=tmp_path,
+        )
+
+
+def test_owned_cleanup_configuration_rejects_ambiguous_owner(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(GBMinimizerValueError, match="either managed_artifact_root"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=seed_path,
+            initial_ownership=ownership,
+            retention_policy=_objective_retention_policy(),
+            managed_artifact_root=tmp_path,
+            cleanup_candidate=lambda _request: None,
+        )
+
+
+def test_owned_cleanup_configuration_validates_callback_type(owned_ga):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(GBMinimizerTypeError, match="cleanup_candidate must be callable"):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=seed_path,
+            initial_ownership=ownership,
+            retention_policy=_objective_retention_policy(),
+            cleanup_candidate=object(),
+        )
+
+
 def test_owned_retention_prunes_sources_only_after_checkpoint_commit(owned_ga, tmp_path):
     checkpoint = tmp_path / "retained.json"
     minimizer = _make_owned_checkpoint_minimizer(
@@ -2807,6 +2883,82 @@ def test_owned_prune_resume_matches_continuous_run(owned_ga, tmp_path):
         for record in resumed_state["artifact_store"]["records"]
         if record["archive_path"] is not None
     )
+
+def test_owned_managed_root_rejects_evaluator_path_escape_without_invalidating_checkpoint(
+    owned_ga,
+    tmp_path,
+):
+    checkpoint = tmp_path / "managed-root.json"
+    managed_root = tmp_path / "managed"
+    managed_root.mkdir()
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+        managed_artifact_root=managed_root,
+    )
+
+    with pytest.warns(RuntimeWarning, match="outside managed artifact root"):
+        minimizer.run_GA(unique_id=311, checkpoint_file=checkpoint)
+
+    assert checkpoint.is_file()
+    evaluator_sources = sorted(tmp_path.glob("GA_311*.data"))
+    assert evaluator_sources
+    assert all(path.is_file() for path in evaluator_sources)
+
+
+def test_owned_cleanup_callback_removes_complete_work_directories_after_commit(
+    owned_ga,
+    tmp_path,
+):
+    checkpoint = tmp_path / "callback-cleanup.json"
+    cleanup_observations = []
+
+    def workdir_energy(GB, manipulator, atom_positions, unique_id):
+        work_dir = tmp_path / f"workdir.{unique_id}"
+        work_dir.mkdir()
+        output = work_dir / "final.data"
+        _write_owned_evaluator_output(
+            output,
+            np.array(atom_positions, copy=True),
+            np.asarray(manipulator.parents[0].box_dims, dtype=float),
+        )
+        (work_dir / "log.lammps").write_text("temporary log", encoding="utf-8")
+        return float(np.mean(atom_positions["x"])), str(output)
+
+    def cleanup_candidate(request):
+        cleanup_observations.append(
+            (request.candidate_id, checkpoint.is_file(), request.archive_path)
+        )
+        remove_managed_path(request.source_path.parent, managed_root=tmp_path)
+
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        workdir_energy,
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+        cleanup_candidate=cleanup_candidate,
+    )
+
+    _energy, best_path = minimizer.run_GA(
+        unique_id=312,
+        checkpoint_file=checkpoint,
+    )
+
+    assert cleanup_observations
+    assert all(committed for _candidate_id, committed, _archive in cleanup_observations)
+    assert not list(tmp_path.glob("workdir.*"))
+    assert Path(best_path).is_file()
+    assert Path(best_path).parent == checkpoint.with_suffix(".artifacts") / "structures"
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert "managed_artifact_root" not in state["run_params"]
+    assert "cleanup_candidate" not in state["run_params"]
+
 
 def test_owned_cleanup_failure_leaks_source_but_checkpoint_remains_resumable(
     owned_ga,

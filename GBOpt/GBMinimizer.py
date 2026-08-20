@@ -26,6 +26,12 @@ from GBOpt._explicit_ownership_evaluation import (
     CandidateEvaluationSummary,
     ExplicitOwnershipEvaluator,
 )
+from GBOpt.artifacts.cleanup import (
+    ArtifactCleanupError,
+    ArtifactCleanupRequest,
+    _ArtifactCleaner,
+    remove_managed_path,
+)
 from GBOpt.artifacts.policy import ArtifactPolicyError, ArtifactRetentionPolicy
 from GBOpt.artifacts.store import ArtifactStore, ArtifactStoreError
 from GBOpt.artifacts.types import ArtifactPin, ArtifactValueError, CandidatePropertyContext
@@ -535,15 +541,18 @@ class GeneticAlgorithmMinimizer:
         crossover_max_tilt_degrees: float = 5.0,
         crossover_attempts: int = 8,
         retention_policy: ArtifactRetentionPolicy | None = None,
+        managed_artifact_root: str | Path | None = None,
+        cleanup_candidate: Callable[[ArtifactCleanupRequest], None] | None = None,
     ):
-        """
+        """Configure one genetic-algorithm grain-boundary minimizer.
+
         :param GB: GBMaker object to perform minimization on.
         :param gb_energy_func: Function that returns the energy of a GB structure. It
             must be callable with (GBMaker, GBManipulator, atom_positions, unique_id).
         :param choices: List of strings corresponding to GBManipulator operations. Used
             to configure the Mutator.
         :param seed: Seed for numpy.random.default_rng. Keyword argument, optional,
-            defaults to the current time.
+            defaults to ``None``; ``None`` seeds from the current time.
         :param initial_structure: Keyword argument, optional, defaults to ``None``.
             GBMaker or file-backed initial structure.
         :param initial_ownership: Keyword argument, optional, defaults to ``None``.
@@ -565,16 +574,18 @@ class GeneticAlgorithmMinimizer:
         :param reuse_carryover_evaluations: Reuse the validated energy and relaxed
             artifact of unchanged successful carryover candidates instead of invoking
             the evaluator again. Keyword argument, optional, defaults to ``False``.
-        :param gb_batch_energy_func: Optional batch-evaluation function for processing a
-            population in one call. It should accept (GBMaker, manipulators,
+        :param gb_batch_energy_func: Keyword argument, optional, defaults to ``None``.
+            Batch-evaluation function for processing a population in one call. It should
+            accept (GBMaker, manipulators,
             atom_positions_list, lineages, unique_ids) and return a list of dictionaries
             containing at least ``"energy"`` and ``"final_dump"`` keys. If not provided,
             fall back to calling ``gb_energy_func`` per candidate. If the function does
             not declare a ``checkpoint`` keyword argument it is automatically wrapped so
             that checkpointing still occurs at batch-return granularity; a
-            :class:`~warnings.UserWarning` is emitted in that case. Declare ``checkpoint
-            = None`` and call ``checkpoint.record(unique_id, energy, dump)`` per job to
-            get per-job recovery granularity.
+            ``UserWarning`` is emitted in that case. Declare a
+            ``checkpoint=None`` parameter and call
+            ``checkpoint.record(unique_id, energy, dump)`` per job to get per-job
+            recovery granularity.
         :param crossover_surface: Keyword argument, optional, defaults to
             ``"periodic_wave"``. Formula-preserving crossover surface mode,
             ``"normal_plane"`` or ``"periodic_wave"``.
@@ -586,12 +597,20 @@ class GeneticAlgorithmMinimizer:
         :param retention_policy: Keyword argument, optional, defaults to ``None``.
             Scientific artifact-retention policy for explicit-ownership GA execution.
             ``None`` preserves keep-all artifact behavior.
+        :param managed_artifact_root: Keyword argument, optional, defaults to ``None``.
+            Root beneath which GBOpt may remove evaluator-returned source paths after a
+            durable checkpoint commit. Mutually exclusive with ``cleanup_candidate``.
+        :param cleanup_candidate: Keyword argument, optional, defaults to ``None``.
+            Backend-owned callback invoked after a durable checkpoint commit for each
+            evaluator source that has become transient. Mutually exclusive with
+            ``managed_artifact_root``.
         :raises TypeError: If ``initial_ownership`` is not GrainOwnership, accompanies
             a non-file initial structure, ``allow_variable_cell`` is not Boolean, a
-            crossover policy argument has an invalid type, or ``retention_policy`` is
-            not an ``ArtifactRetentionPolicy``.
-        :raises ValueError: If ownership is supplied without an initial structure or
-            variable-cell execution is requested without explicit ownership.
+            crossover/cleanup policy argument has an invalid type, or ``retention_policy``
+            is not an ``ArtifactRetentionPolicy``.
+        :raises ValueError: If ownership is supplied without an initial structure,
+            variable-cell execution is requested without explicit ownership, cleanup
+            ownership is ambiguous, or pruning lacks an explicit cleanup owner.
         """
         if not isinstance(allow_variable_cell, (bool, np.bool_)):
             raise TypeError("allow_variable_cell must be a Boolean")
@@ -616,6 +635,38 @@ class GeneticAlgorithmMinimizer:
         if retention_policy is not None and initial_ownership is None:
             raise GBMinimizerValueError(
                 "retention_policy currently requires explicit ownership"
+            )
+        if managed_artifact_root is not None and not isinstance(
+            managed_artifact_root, (str, os.PathLike)
+        ):
+            raise GBMinimizerTypeError(
+                "managed_artifact_root must be a path-like value or None"
+            )
+        if cleanup_candidate is not None and not callable(cleanup_candidate):
+            raise GBMinimizerTypeError(
+                "cleanup_candidate must be callable or None"
+            )
+        cleanup_configured = (
+            managed_artifact_root is not None or cleanup_candidate is not None
+        )
+        if managed_artifact_root is not None and cleanup_candidate is not None:
+            raise GBMinimizerValueError(
+                "configure either managed_artifact_root or cleanup_candidate, not both"
+            )
+        if cleanup_configured and (
+            retention_policy is None or not retention_policy.prune
+        ):
+            raise GBMinimizerValueError(
+                "artifact cleanup configuration requires retention_policy prune=True"
+            )
+        if (
+            retention_policy is not None
+            and retention_policy.prune
+            and not cleanup_configured
+        ):
+            raise GBMinimizerValueError(
+                "retention_policy prune=True requires managed_artifact_root or "
+                "cleanup_candidate"
             )
         if (
             isinstance(slice_and_merge_pct, (bool, np.bool_))
@@ -707,6 +758,13 @@ class GeneticAlgorithmMinimizer:
         self.initial_ownership = initial_ownership
         self.allow_variable_cell = allow_variable_cell
         self.retention_policy = retention_policy
+        try:
+            self._artifact_cleaner = _ArtifactCleaner(
+                managed_artifact_root=managed_artifact_root,
+                cleanup_candidate=cleanup_candidate,
+            )
+        except ArtifactCleanupError as exc:
+            raise GBMinimizerValueError(str(exc)) from exc
         # pyraisecontract: ignore=DOC115[ArtifactStoreError]
         #   retention_policy was type-validated above, which is the only condition
         #   under which ArtifactStore construction raises ArtifactStoreError.
@@ -1043,33 +1101,70 @@ class GeneticAlgorithmMinimizer:
             self._retention_archive_mappings.pop(artifact.candidate_id, None)
         return evictions
 
-    def _cleanup_committed_owned_artifacts(self, archive_evictions: list[str]) -> None:
-        """Best-effort exact-file cleanup after a durable checkpoint commit.
+    def _cleanup_committed_owned_artifacts(
+        self,
+        archive_evictions: list[str],
+        *,
+        archive_root: Path,
+    ) -> None:
+        """Best-effort evaluator/archive cleanup after a durable checkpoint commit.
 
-        Stage B removes only evaluator-returned structure files and superseded canonical
-        archive files. Recursive evaluator work-directory cleanup remains a separate
-        backend-owned concern.
+        Evaluator sources are removed only through the explicitly configured managed
+        root or backend callback. Canonical archive evictions are removed only after
+        containment validation against the GBOpt-owned archive root. Any cleanup failure
+        produces a warning and leaves the committed optimizer state authoritative.
 
         :param archive_evictions: Canonical archive files detached before checkpoint save.
+        :param archive_root: Keyword argument, required. GBOpt-owned archive root used to
+            validate canonical archive deletion.
         """
         if self.artifact_store is None:
             return
-        paths: list[Path] = []
-        for artifact in self.artifact_store.records():
-            if self.artifact_store.source_is_prunable(artifact.candidate_id):
-                if artifact.source_path is not None:
-                    paths.append(Path(artifact.source_path))
-        paths.extend(Path(path) for path in archive_evictions)
+        try:
+            records = self.artifact_store.records()
+        except ArtifactStoreError as exc:
+            warnings.warn(
+                f"Artifact cleanup state could not be inspected: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+
+        for artifact in records:
+            try:
+                if not self.artifact_store.source_is_prunable(artifact.candidate_id):
+                    continue
+                if artifact.source_path is None:
+                    continue
+                request = ArtifactCleanupRequest(
+                    candidate_id=artifact.candidate_id,
+                    source_path=Path(artifact.source_path),
+                    archive_path=(
+                        None
+                        if artifact.archive_path is None
+                        else Path(artifact.archive_path)
+                    ),
+                )
+                self._artifact_cleaner.cleanup_source(request)
+            except (ArtifactCleanupError, ArtifactStoreError) as exc:
+                warnings.warn(
+                    f"Artifact cleanup failed for candidate "
+                    f"{artifact.candidate_id!r}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         seen: set[Path] = set()
-        for path in paths:
+        for raw_path in archive_evictions:
+            path = Path(raw_path)
             if path in seen:
                 continue
             seen.add(path)
             try:
-                path.unlink(missing_ok=True)
-            except OSError as exc:
+                remove_managed_path(path, managed_root=archive_root)
+            except ArtifactCleanupError as exc:
                 warnings.warn(
-                    f"Artifact cleanup failed for {path}: {exc}",
+                    f"Artifact cleanup failed for archived structure {path}: {exc}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
@@ -2748,7 +2843,9 @@ class GeneticAlgorithmMinimizer:
                                 record.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
                             )
             if committed and self.artifact_store is not None:
-                self._cleanup_committed_owned_artifacts(archive_evictions)
+                self._cleanup_committed_owned_artifacts(
+                    archive_evictions, archive_root=archive_root
+                )
 
         self.best_evaluation = best_record
         return best_record.energy, str(best_record.structure_path)
