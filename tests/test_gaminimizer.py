@@ -1818,7 +1818,7 @@ def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_pa
 
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert state["state"]["ga_mode"] == "explicit_ownership"
-    assert state["state"]["owned_checkpoint_version"] == 2
+    assert state["state"]["owned_checkpoint_version"] == 3
     assert state["run_params"]["crossover_surface"] == "periodic_wave"
     assert state["run_params"]["crossover_max_tilt_degrees"] == pytest.approx(5.0)
     assert state["run_params"]["crossover_attempts"] == 8

@@ -94,6 +94,7 @@ def test_evaluator_requires_optimizer_supplied_penalty():
 
 def test_candidate_evaluation_normalizes_python_scalar_fields():
     result = CandidateEvaluation(
+        candidate_id="GA_initial1",
         input_index=np.int64(-1),
         energy=np.float64(2.5),
         structure_path=None,
@@ -146,6 +147,7 @@ def test_candidate_evaluation_normalizes_python_scalar_fields():
 )
 def test_failed_candidate_evaluation_rejects_incoherent_state(kwargs, error, match):
     arguments = {
+        "candidate_id": "GA_1_g0_c0",
         "input_index": 0,
         "energy": 1.0e30,
         "structure_path": None,
@@ -187,6 +189,7 @@ def test_failed_candidate_evaluation_rejects_incoherent_state(kwargs, error, mat
 )
 def test_successful_candidate_evaluation_rejects_incoherent_state(kwargs, match):
     arguments = {
+        "candidate_id": "GA_1_g0_c0",
         "input_index": 0,
         "energy": 1.25,
         "structure_path": "/tmp/candidate.data",
@@ -205,6 +208,7 @@ def test_invalid_structure_path_becomes_typed_failed_evaluation():
     evaluator = _evaluator(penalty=123.0)
 
     result = evaluator._record_result(
+        candidate_id="GA_1_g0_c4",
         input_index=4,
         mapping=object(),
         energy=1.0,

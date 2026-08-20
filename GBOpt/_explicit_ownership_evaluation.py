@@ -35,6 +35,7 @@ _MISSING = object()
 class CandidateEvaluation:
     """Aligned result for one explicit-ownership candidate evaluation.
 
+    :param candidate_id: Stable logical candidate identity independent of artifact paths.
     :param input_index: Candidate position in the submitted population.
     :param energy: Normalized finite energy, or the optimizer-supplied penalty on
         failure.
@@ -45,6 +46,7 @@ class CandidateEvaluation:
     :param failure_reason: Failure context when ``success`` is false.
     """
 
+    candidate_id: str
     input_index: int
     energy: float
     structure_path: str | None
@@ -60,6 +62,8 @@ class CandidateEvaluation:
         :raises ValueError: If energy is non-finite or success/failure fields are
             internally inconsistent.
         """
+        if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
+            raise TypeError("candidate_id must be a non-empty string")
         if isinstance(self.input_index, (bool, np.bool_)) or not isinstance(
             self.input_index, Integral
         ):
@@ -80,6 +84,7 @@ class CandidateEvaluation:
                 raise TypeError("structure_path must be a path-like string or None")
             structure_path = str(structure_path)
 
+        object.__setattr__(self, "candidate_id", self.candidate_id)
         object.__setattr__(self, "input_index", int(self.input_index))
         object.__setattr__(self, "energy", energy)
         object.__setattr__(self, "structure_path", structure_path)
@@ -230,6 +235,7 @@ class ExplicitOwnershipEvaluator:
 
     def _failed_evaluation(
         self,
+        candidate_id: str,
         input_index: int,
         reason: str,
         mapping: CandidateFileMapping | None = None,
@@ -237,6 +243,7 @@ class ExplicitOwnershipEvaluator:
     ) -> CandidateEvaluation:
         """Create one penalty-bearing failed evaluation result.
 
+        :param candidate_id: Stable logical candidate identity.
         :param input_index: Candidate position in the submitted population.
         :param reason: Human-readable failure context.
         :param mapping: Candidate/file mapping, when construction reached that stage.
@@ -244,6 +251,7 @@ class ExplicitOwnershipEvaluator:
         :return: Failed evaluation carrying both penalty and failure context.
         """
         return CandidateEvaluation(
+            candidate_id=candidate_id,
             input_index=input_index,
             energy=self.penalty,
             structure_path=structure_path,
@@ -326,6 +334,7 @@ class ExplicitOwnershipEvaluator:
     def _record_result(
         self,
         *,
+        candidate_id: str,
         input_index: int,
         mapping: CandidateFileMapping,
         energy: object = _MISSING,
@@ -338,6 +347,7 @@ class ExplicitOwnershipEvaluator:
         evaluator failures is intentionally deferred until evaluators expose a typed
         failure classification.
 
+        :param candidate_id: Keyword argument, required. Stable logical candidate identity.
         :param input_index: Keyword argument, required. Candidate position in the submitted
             population.
         :param mapping: Keyword argument, required. Candidate/file mapping established before
@@ -358,12 +368,14 @@ class ExplicitOwnershipEvaluator:
             diagnostic_path = self._diagnostic_path(structure_path)
         except (OSError, RuntimeError, ValueError) as exc:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 f"invalid structure path: {type(exc).__name__}: {exc}",
                 mapping,
             )
         if missing_fields:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 "incomplete evaluator result missing " + ", ".join(missing_fields),
                 mapping,
@@ -374,6 +386,7 @@ class ExplicitOwnershipEvaluator:
             numeric_energy = self._normalize_energy(energy)
         except (TypeError, ValueError) as exc:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 f"invalid energy: {exc}",
                 mapping,
@@ -382,6 +395,7 @@ class ExplicitOwnershipEvaluator:
 
         if diagnostic_path is None:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 "evaluator did not return a structure path",
                 mapping,
@@ -390,6 +404,7 @@ class ExplicitOwnershipEvaluator:
         path = Path(diagnostic_path)
         if not path.is_file():
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 "evaluator did not return a valid structure path",
                 mapping,
@@ -397,6 +412,7 @@ class ExplicitOwnershipEvaluator:
             )
         if path in self._claimed_paths:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 f"evaluator reused a structure path already assigned in this run: {path}",
                 mapping,
@@ -411,6 +427,7 @@ class ExplicitOwnershipEvaluator:
             GrainOwnershipError,
         ) as exc:
             return self._failed_evaluation(
+                candidate_id,
                 input_index,
                 f"{type(exc).__name__}: {exc}",
                 mapping,
@@ -419,6 +436,7 @@ class ExplicitOwnershipEvaluator:
 
         self._claimed_paths.add(path)
         return CandidateEvaluation(
+            candidate_id=candidate_id,
             input_index=input_index,
             energy=numeric_energy,
             structure_path=diagnostic_path,
@@ -471,12 +489,14 @@ class ExplicitOwnershipEvaluator:
             if not isinstance(reason, str) or not reason:
                 reason = "checkpointed explicit-ownership evaluation failed"
             return self._failed_evaluation(
+                unique_id,
                 input_index,
                 reason,
                 mapping,
                 self._diagnostic_path(structure_path),
             )
         return self._record_result(
+            candidate_id=unique_id,
             input_index=input_index,
             mapping=mapping,
             energy=energy,
@@ -523,7 +543,7 @@ class ExplicitOwnershipEvaluator:
         try:
             mapping = self._candidate_file_mapping(manipulator, atoms)
         except GrainOwnershipError as exc:
-            return self._failed_evaluation(input_index, str(exc))
+            return self._failed_evaluation(unique_id, input_index, str(exc))
 
         try:
             result = self.scalar_energy_func(
@@ -536,12 +556,14 @@ class ExplicitOwnershipEvaluator:
         except Exception as exc:
             # The external evaluator callback is a deliberate recovery boundary.
             return self._failed_evaluation(
+                unique_id,
                 input_index,
                 f"{type(exc).__name__}: {exc}",
                 mapping,
             )
 
         return self._record_result(
+            candidate_id=unique_id,
             input_index=input_index,
             mapping=mapping,
             energy=energy,
@@ -617,6 +639,7 @@ class ExplicitOwnershipEvaluator:
             except GrainOwnershipError:
                 continue
             records[index] = CandidateEvaluation(
+                candidate_id=cached.candidate_id,
                 input_index=index,
                 energy=cached.energy,
                 structure_path=cached.structure_path,
@@ -637,7 +660,7 @@ class ExplicitOwnershipEvaluator:
                 try:
                     mapping = self._candidate_file_mapping(manipulator, atoms)
                 except GrainOwnershipError as exc:
-                    record = self._failed_evaluation(index, str(exc))
+                    record = self._failed_evaluation(candidate_id, index, str(exc))
                 else:
                     if (
                         gen_checkpoint is not None
@@ -674,7 +697,7 @@ class ExplicitOwnershipEvaluator:
             try:
                 mapping = self._candidate_file_mapping(manipulator, atoms)
             except GrainOwnershipError as exc:
-                records[index] = self._failed_evaluation(index, str(exc))
+                records[index] = self._failed_evaluation(unique_ids[index], index, str(exc))
                 continue
             valid_indices.append(index)
             valid_mappings.append(mapping)
@@ -706,6 +729,7 @@ class ExplicitOwnershipEvaluator:
                 # The external evaluator callback is a deliberate recovery boundary.
                 for input_index, mapping in zip(pending_indices, pending_mappings):
                     record = self._failed_evaluation(
+                        unique_ids[input_index],
                         input_index,
                         f"{type(exc).__name__}: {exc}",
                         mapping,
@@ -736,6 +760,7 @@ class ExplicitOwnershipEvaluator:
                     raw_results,
                 ):
                     record = self._record_result(
+                        candidate_id=unique_ids[input_index],
                         input_index=input_index,
                         mapping=mapping,
                         energy=result.get("energy", _MISSING),

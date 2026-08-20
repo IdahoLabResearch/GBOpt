@@ -48,7 +48,7 @@ from GBOpt.GBManipulator import (
 ENERGY_PENALTY: float = 1.0e30
 """Optimizer policy for ranking failed candidate evaluations."""
 
-_OWNED_GA_CHECKPOINT_VERSION = 2
+_OWNED_GA_CHECKPOINT_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -1224,6 +1224,7 @@ class GeneticAlgorithmMinimizer:
         :return: JSON-safe evaluation state.
         """
         return {
+            "candidate_id": record.candidate_id,
             "input_index": record.input_index,
             "energy": record.energy,
             "structure_path": record.structure_path,
@@ -1255,6 +1256,7 @@ class GeneticAlgorithmMinimizer:
         if not isinstance(state, dict):
             raise GBMinimizerError("owned evaluation state must be a dictionary")
         try:
+            candidate_id = state["candidate_id"]
             input_index = int(state["input_index"])
             energy = float(state["energy"])
             structure_path = state["structure_path"]
@@ -1263,6 +1265,8 @@ class GeneticAlgorithmMinimizer:
             mapping_state = state["mapping"]
         except (KeyError, TypeError, ValueError) as exc:
             raise GBMinimizerError("owned evaluation state is malformed") from exc
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise GBMinimizerError("owned evaluation candidate_id is invalid")
         if isinstance(state.get("input_index"), (bool, np.bool_)) or input_index < -1:
             raise GBMinimizerError("owned evaluation input_index is invalid")
         if not np.isfinite(energy):
@@ -1291,6 +1295,7 @@ class GeneticAlgorithmMinimizer:
                     "failed owned evaluation does not carry the configured penalty"
                 )
             return CandidateEvaluation(
+                candidate_id=candidate_id,
                 input_index=input_index,
                 energy=energy,
                 structure_path=structure_path,
@@ -1320,6 +1325,7 @@ class GeneticAlgorithmMinimizer:
                 f"inconsistent: {structure_path}"
             ) from exc
         return CandidateEvaluation(
+            candidate_id=candidate_id,
             input_index=input_index,
             energy=energy,
             structure_path=structure_path,
