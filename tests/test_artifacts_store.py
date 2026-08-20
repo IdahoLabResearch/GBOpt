@@ -222,3 +222,41 @@ def test_prunable_candidate_ids_are_lexically_sorted():
     store.register_candidate(_candidate("a", 1.0))
 
     assert store.prunable_candidate_ids() == ("a", "z")
+
+
+def test_retained_source_becomes_prunable_after_canonical_archive_exists():
+    policy = ArtifactRetentionPolicy(
+        rules=(KeepBest(name="best", property="objective", direction="min", count=1),),
+        prune=True,
+    )
+    store = ArtifactStore(policy=policy)
+    candidate = _candidate("candidate-a", 1.0)
+    store.register_candidate(candidate, source_path="/tmp/source.data")
+
+    assert store.source_is_prunable(candidate.candidate_id) is False
+    store.set_archive_path(candidate.candidate_id, "/tmp/archive.data")
+    assert store.source_is_prunable(candidate.candidate_id) is True
+
+
+def test_best_pin_can_be_satisfied_by_canonical_archive_for_source_pruning():
+    policy = ArtifactRetentionPolicy(rules=(), prune=True)
+    store = ArtifactStore(policy=policy)
+    candidate = _candidate("candidate-a", 1.0)
+    store.register_candidate(candidate, source_path="/tmp/source.data")
+    store.replace_pin(ArtifactPin.BEST_RESULT, candidate.candidate_id)
+
+    assert store.source_is_prunable(candidate.candidate_id) is False
+    store.set_archive_path(candidate.candidate_id, "/tmp/archive.data")
+    assert store.source_is_prunable(candidate.candidate_id) is True
+
+
+def test_archive_path_round_trips_through_store_state():
+    policy = ArtifactRetentionPolicy(rules=(), prune=True)
+    store = ArtifactStore(policy=policy)
+    candidate = _candidate("candidate-a", 1.0)
+    store.register_candidate(candidate, source_path="/tmp/source.data")
+    store.set_archive_path(candidate.candidate_id, "/tmp/archive.data")
+
+    restored = ArtifactStore.from_state(store.to_state(), policy=policy)
+
+    assert restored.record(candidate.candidate_id).archive_path == "/tmp/archive.data"

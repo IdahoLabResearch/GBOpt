@@ -503,14 +503,16 @@ class ArtifactRecord:
     :param candidate: Scientific candidate metadata.
     :param source_path: Optional evaluator artifact path. The candidate identity remains
         independent of this path.
+    :param archive_path: Optional canonical retained structure path.
     :param pins: Active operational pins.
     :param retention_reasons: Active scientific retention reasons.
-    :raises ArtifactValueError: If candidate state, source path, pins, or reasons are
+    :raises ArtifactValueError: If candidate state, artifact paths, pins, or reasons are
         malformed.
     """
 
     candidate: RetentionCandidate
     source_path: str | None = None
+    archive_path: str | None = None
     pins: tuple[ArtifactPin, ...] = ()
     retention_reasons: tuple[str, ...] = ()
 
@@ -530,6 +532,14 @@ class ArtifactRecord:
             ):
                 raise ArtifactValueError("source_path must be a non-empty path or None")
             source_path = str(source_path)
+        archive_path = self.archive_path
+        if archive_path is not None:
+            if (
+                not isinstance(archive_path, (str, Path))
+                or not str(archive_path).strip()
+            ):
+                raise ArtifactValueError("archive_path must be a non-empty path or None")
+            archive_path = str(archive_path)
 
         pins: set[ArtifactPin] = set()
         for pin in self.pins:
@@ -543,6 +553,7 @@ class ArtifactRecord:
         }
 
         object.__setattr__(self, "source_path", source_path)
+        object.__setattr__(self, "archive_path", archive_path)
         object.__setattr__(self, "pins", tuple(sorted(pins, key=lambda pin: pin.value)))
         object.__setattr__(self, "retention_reasons", tuple(sorted(reasons)))
 

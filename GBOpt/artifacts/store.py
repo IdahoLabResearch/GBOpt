@@ -51,11 +51,11 @@ def _normalize_source_path(path: object) -> str | None:
     :return: String path or ``None``.
     :raises ArtifactStoreError: If the path is not a non-empty string/path value.
     """
-    if path is None:
-        return None
-    if not isinstance(path, (str, Path)) or not str(path).strip():
-        raise ArtifactStoreError("source_path must be a non-empty path or None")
-    return str(path)
+    if path is not None:
+        if not isinstance(path, (str, Path)) or not str(path).strip():
+            raise ArtifactStoreError("source_path must be a non-empty path or None")
+        return str(path)
+    return path
 
 
 class ArtifactStore:
@@ -80,6 +80,7 @@ class ArtifactStore:
         self.policy = policy
         self._candidates: dict[str, RetentionCandidate] = {}
         self._source_paths: dict[str, str | None] = {}
+        self._archive_paths: dict[str, str | None] = {}
         self._pins: dict[str, set[ArtifactPin]] = {}
         self._reasons: dict[str, set[str]] = {}
 
@@ -97,6 +98,14 @@ class ArtifactStore:
         :return: Registered candidate count.
         """
         return len(self._candidates)
+
+    def __contains__(self, candidate_id: object) -> bool:
+        """Return whether a logical candidate identity is registered.
+
+        :param candidate_id: Candidate identity to test.
+        :return: Whether the identity is a registered non-empty string.
+        """
+        return isinstance(candidate_id, str) and candidate_id in self._candidates
 
     def _require_candidate(self, candidate_id: object) -> str:
         """Validate and resolve one registered candidate identity.
@@ -162,6 +171,7 @@ class ArtifactStore:
 
         self._candidates[candidate_id] = candidate
         self._source_paths[candidate_id] = normalized_path
+        self._archive_paths[candidate_id] = None
         self._pins[candidate_id] = set()
         self._reasons[candidate_id] = set()
         if memberships is not None:
@@ -313,6 +323,51 @@ class ArtifactStore:
             for candidate_id in candidate_ids:
                 self._reasons[candidate_id].add(reason)
 
+    def set_archive_path(
+        self, candidate_id: str, archive_path: str | Path | None
+    ) -> None:
+        """Set or clear the canonical retained structure path.
+
+        :param candidate_id: Registered logical candidate identity.
+        :param archive_path: Canonical archive path, or ``None`` after eviction.
+        :raises ArtifactStoreError: If candidate identity or path is invalid.
+        """
+        candidate_id = self._require_candidate(candidate_id)
+        self._archive_paths[candidate_id] = _normalize_source_path(archive_path)
+
+    def archive_path(self, candidate_id: str) -> str | None:
+        """Return the canonical retained structure path for one candidate.
+
+        :param candidate_id: Registered logical candidate identity.
+        :return: Archive path or ``None`` when no canonical copy exists.
+        :raises ArtifactStoreError: If candidate identity is malformed or unknown.
+        """
+        candidate_id = self._require_candidate(candidate_id)
+        return self._archive_paths[candidate_id]
+
+    def source_is_prunable(self, candidate_id: str) -> bool:
+        """Return whether the evaluator source file may be removed after commit.
+
+        Scientific reasons may be satisfied by a canonical archive copy. Restart pins
+        other than ``BEST_RESULT`` block source pruning until they are released or rebased;
+        ``BEST_RESULT`` may be satisfied by a validated canonical archive copy.
+
+        :param candidate_id: Registered logical candidate identity.
+        :return: Whether the source artifact is eligible for exact-file cleanup.
+        :raises ArtifactStoreError: If candidate identity is malformed or unknown.
+        """
+        record = self.record(candidate_id)
+        if not self.pruning_enabled or record.source_path is None:
+            return False
+        blocking_pins = set(record.pins).difference({ArtifactPin.BEST_RESULT})
+        if blocking_pins:
+            return False
+        if (record.retention_reasons or ArtifactPin.BEST_RESULT in record.pins) and (
+            record.archive_path is None
+        ):
+            return False
+        return True
+
     def record(self, candidate_id: str) -> ArtifactRecord:
         """Return an immutable snapshot for one registered candidate.
 
@@ -321,9 +376,13 @@ class ArtifactStore:
         :raises ArtifactStoreError: If candidate identity is malformed or unknown.
         """
         candidate_id = self._require_candidate(candidate_id)
+        # pyraisecontract: ignore=DOC115[ArtifactValueError]
+        #   Candidate, path, pin, and reason state is normalized on every store mutation,
+        #   so snapshot construction only revalidates already-enforced invariants.
         return ArtifactRecord(
             candidate=self._candidates[candidate_id],
             source_path=self._source_paths[candidate_id],
+            archive_path=self._archive_paths[candidate_id],
             pins=tuple(self._pins[candidate_id]),
             retention_reasons=tuple(self._reasons[candidate_id]),
         )
@@ -389,6 +448,7 @@ class ArtifactStore:
                 {
                     "candidate": record.candidate.to_state(),
                     "source_path": record.source_path,
+                    "archive_path": record.archive_path,
                     "pins": [pin.value for pin in record.pins],
                     "retention_reasons": list(record.retention_reasons),
                 }
@@ -435,6 +495,7 @@ class ArtifactStore:
                         f"duplicate candidate identity {candidate_id!r} in store state"
                     )
                 source_path = _normalize_source_path(raw_record.get("source_path"))
+                archive_path = _normalize_source_path(raw_record.get("archive_path"))
                 raw_pins = raw_record["pins"]
                 raw_reasons = raw_record["retention_reasons"]
                 if not isinstance(raw_pins, list) or not isinstance(raw_reasons, list):
@@ -443,6 +504,7 @@ class ArtifactStore:
                 reasons = {_normalize_reason(reason) for reason in raw_reasons}
                 store._candidates[candidate_id] = candidate
                 store._source_paths[candidate_id] = source_path
+                store._archive_paths[candidate_id] = archive_path
                 store._pins[candidate_id] = pins
                 store._reasons[candidate_id] = reasons
         except (KeyError, TypeError, ValueError, ArtifactValueError) as exc:
