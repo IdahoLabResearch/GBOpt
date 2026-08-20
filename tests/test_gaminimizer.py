@@ -2560,6 +2560,77 @@ def test_owned_retention_prunes_sources_only_after_checkpoint_commit(owned_ga, t
             assert Path(archive_path).is_file()
 
 
+def test_owned_retention_writes_manifest_and_lifecycle_history(owned_ga, tmp_path):
+    checkpoint = tmp_path / "provenance.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+
+    minimizer.run_GA(unique_id=313, checkpoint_file=checkpoint)
+
+    artifact_root = checkpoint.with_suffix(".artifacts")
+    manifest = json.loads((artifact_root / "manifest.json").read_text(encoding="utf-8"))
+    history = [
+        json.loads(line)
+        for line in (artifact_root / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))["state"]
+
+    expected_ids = sorted(
+        record["candidate"]["candidate_id"]
+        for record in checkpoint_state["artifact_store"]["records"]
+    )
+    assert [record["candidate_id"] for record in manifest["records"]] == expected_ids
+    archived = [record for record in manifest["records"] if record["archive_path"]]
+    assert archived
+    assert all(record["ownership_metadata"] is not None for record in archived)
+    event_types = {event["event"] for event in history}
+    assert {
+        "candidate_evaluated",
+        "properties_calculated",
+        "retention_reason_added",
+        "archive_created",
+        "source_pruned",
+    }.issubset(event_types)
+
+
+def test_owned_provenance_failure_does_not_invalidate_checkpoint(
+    owned_ga,
+    tmp_path,
+    monkeypatch,
+):
+    from GBOpt.artifacts.provenance import (
+        ArtifactProvenanceError,
+        _ArtifactProvenance,
+    )
+
+    checkpoint = tmp_path / "provenance-failure.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+
+    def fail_manifest(_self, _records, **_kwargs):
+        raise ArtifactProvenanceError("simulated manifest failure")
+
+    monkeypatch.setattr(_ArtifactProvenance, "write_manifest", fail_manifest)
+    with pytest.warns(RuntimeWarning, match="Artifact provenance update failed"):
+        minimizer.run_GA(unique_id=314, checkpoint_file=checkpoint)
+
+    assert checkpoint.is_file()
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["state"]["artifact_store"] is not None
+
+
 def test_owned_retention_archive_preserves_explicit_reconstruction_metadata(
     owned_ga,
     tmp_path,
@@ -2991,6 +3062,12 @@ def test_owned_cleanup_failure_leaks_source_but_checkpoint_remains_resumable(
             minimizer.run_GA(unique_id=308, checkpoint_file=checkpoint)
 
     assert checkpoint.is_file()
+    history_path = checkpoint.with_suffix(".artifacts") / "history.jsonl"
+    history = [
+        json.loads(line)
+        for line in history_path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert any(event["event"] == "cleanup_failed" for event in history)
     resumed = _make_owned_checkpoint_minimizer(
         owned_ga,
         _owned_checkpoint_energy(tmp_path),

@@ -33,6 +33,7 @@ from GBOpt.artifacts.cleanup import (
     remove_managed_path,
 )
 from GBOpt.artifacts.policy import ArtifactPolicyError, ArtifactRetentionPolicy
+from GBOpt.artifacts.provenance import ArtifactProvenanceError, _ArtifactProvenance
 from GBOpt.artifacts.store import ArtifactStore, ArtifactStoreError
 from GBOpt.artifacts.types import ArtifactPin, ArtifactValueError, CandidatePropertyContext
 from GBOpt.Checkpoint import (
@@ -774,6 +775,7 @@ class GeneticAlgorithmMinimizer:
             else None
         )
         self._retention_archive_mappings: dict[str, dict] = {}
+        self._artifact_provenance: _ArtifactProvenance | None = None
         self.local_random = np.random.default_rng(int(time()) if seed is None else seed)
         self._owned_evaluator = (
             ExplicitOwnershipEvaluator(
@@ -860,6 +862,25 @@ class GeneticAlgorithmMinimizer:
         manipulator.rng = self.local_random
         return manipulator
 
+    def _run_artifact_provenance(self, action: Callable[[], None]) -> None:
+        """Run one non-authoritative provenance write with warning-only failure policy.
+
+        Provenance is observability rather than restart state. A write failure therefore
+        must not invalidate an otherwise valid optimizer transition or checkpoint.
+
+        :param action: Zero-argument provenance operation to execute.
+        """
+        if self._artifact_provenance is None:
+            return
+        try:
+            action()
+        except ArtifactProvenanceError as exc:
+            warnings.warn(
+                f"Artifact provenance update failed: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+
     def _register_owned_retention_candidate(
         self,
         record: CandidateEvaluation,
@@ -871,6 +892,8 @@ class GeneticAlgorithmMinimizer:
 
         Property acquisition runs only after explicit-ownership reconstruction succeeds,
         so callbacks receive validated relaxed physical state rather than submitted input.
+        Provenance records the successful evaluation, normalized properties, and any
+        scientific-retention membership deltas caused by the new candidate.
 
         :param record: Successful newly evaluated candidate.
         :param generation: Keyword argument, required. Generation where evaluation occurred.
@@ -888,6 +911,10 @@ class GeneticAlgorithmMinimizer:
             )
         parent = record.manipulator.parents[0]
         try:
+            before_reasons = {
+                artifact.candidate_id: set(artifact.retention_reasons)
+                for artifact in self.artifact_store.records()
+            }
             context = CandidatePropertyContext(
                 candidate_id=record.candidate_id,
                 generation=generation,
@@ -905,10 +932,39 @@ class GeneticAlgorithmMinimizer:
                 candidate,
                 source_path=record.structure_path,
             )
+            after_reasons = {
+                artifact.candidate_id: set(artifact.retention_reasons)
+                for artifact in self.artifact_store.records()
+            }
         except (ArtifactPolicyError, ArtifactStoreError, ArtifactValueError) as exc:
             raise GBMinimizerError(
                 f"artifact retention failed for candidate {record.candidate_id!r}: {exc}"
             ) from exc
+
+        provenance = self._artifact_provenance
+        if provenance is None:
+            return
+        self._run_artifact_provenance(
+            lambda: provenance.record_candidate_evaluated(candidate)
+        )
+        self._run_artifact_provenance(
+            lambda: provenance.record_properties_calculated(candidate)
+        )
+        for candidate_id in sorted(set(before_reasons).union(after_reasons)):
+            previous = before_reasons.get(candidate_id, set())
+            current = after_reasons.get(candidate_id, set())
+            for reason in sorted(current.difference(previous)):
+                self._run_artifact_provenance(
+                    lambda candidate_id=candidate_id, reason=reason: (
+                        provenance.record_retention_reason_added(candidate_id, reason)
+                    )
+                )
+            for reason in sorted(previous.difference(current)):
+                self._run_artifact_provenance(
+                    lambda candidate_id=candidate_id, reason=reason: (
+                        provenance.record_retention_reason_removed(candidate_id, reason)
+                    )
+                )
 
     @staticmethod
     def _owned_archive_root(checkpoint_file: Path | None, unique_id: str) -> Path:
@@ -978,6 +1034,11 @@ class GeneticAlgorithmMinimizer:
         self._retention_archive_mappings[candidate_id] = _candidate_mapping_to_state(
             record.mapping
         )
+        provenance = self._artifact_provenance
+        if provenance is not None:
+            self._run_artifact_provenance(
+                lambda: provenance.record_archive_created(candidate_id, destination)
+            )
         return str(destination)
 
     @staticmethod
@@ -1057,7 +1118,7 @@ class GeneticAlgorithmMinimizer:
         self,
         records_by_id: dict[str, CandidateEvaluation],
         archive_root: Path,
-    ) -> list[str]:
+    ) -> list[tuple[str, str]]:
         """Materialize required archives and detach entries eligible for eviction.
 
         The returned paths are deleted only after the main checkpoint commits. Store state
@@ -1090,20 +1151,20 @@ class GeneticAlgorithmMinimizer:
                 )
             self._materialize_owned_archive(record, archive_root)
 
-        evictions: list[str] = []
+        evictions: list[tuple[str, str]] = []
         for artifact in self.artifact_store.records():
             if artifact.archive_path is None:
                 continue
             if artifact.retention_reasons or artifact.pins:
                 continue
-            evictions.append(artifact.archive_path)
+            evictions.append((artifact.candidate_id, artifact.archive_path))
             self.artifact_store.set_archive_path(artifact.candidate_id, None)
             self._retention_archive_mappings.pop(artifact.candidate_id, None)
         return evictions
 
     def _cleanup_committed_owned_artifacts(
         self,
-        archive_evictions: list[str],
+        archive_evictions: list[tuple[str, str]],
         *,
         archive_root: Path,
     ) -> None:
@@ -1114,7 +1175,8 @@ class GeneticAlgorithmMinimizer:
         containment validation against the GBOpt-owned archive root. Any cleanup failure
         produces a warning and leaves the committed optimizer state authoritative.
 
-        :param archive_evictions: Canonical archive files detached before checkpoint save.
+        :param archive_evictions: Candidate IDs and canonical archive files detached
+            before checkpoint save.
         :param archive_root: Keyword argument, required. GBOpt-owned archive root used to
             validate canonical archive deletion.
         """
@@ -1130,6 +1192,7 @@ class GeneticAlgorithmMinimizer:
             )
             return
 
+        provenance = self._artifact_provenance
         for artifact in records:
             try:
                 if not self.artifact_store.source_is_prunable(artifact.candidate_id):
@@ -1146,7 +1209,24 @@ class GeneticAlgorithmMinimizer:
                     ),
                 )
                 self._artifact_cleaner.cleanup_source(request)
+                if provenance is not None:
+                    self._run_artifact_provenance(
+                        lambda artifact=artifact: provenance.record_source_pruned(
+                            artifact.candidate_id, artifact.source_path
+                        )
+                    )
             except (ArtifactCleanupError, ArtifactStoreError) as exc:
+                if provenance is not None and artifact.source_path is not None:
+                    self._run_artifact_provenance(
+                        lambda artifact=artifact, exc=exc: (
+                            provenance.record_cleanup_failed(
+                                "source_prune",
+                                artifact.source_path,
+                                str(exc),
+                                candidate_id=artifact.candidate_id,
+                            )
+                        )
+                    )
                 warnings.warn(
                     f"Artifact cleanup failed for candidate "
                     f"{artifact.candidate_id!r}: {exc}",
@@ -1155,19 +1235,57 @@ class GeneticAlgorithmMinimizer:
                 )
 
         seen: set[Path] = set()
-        for raw_path in archive_evictions:
+        for candidate_id, raw_path in archive_evictions:
             path = Path(raw_path)
             if path in seen:
                 continue
             seen.add(path)
             try:
                 remove_managed_path(path, managed_root=archive_root)
+                if provenance is not None:
+                    self._run_artifact_provenance(
+                        lambda candidate_id=candidate_id, path=path: (
+                            provenance.record_archive_evicted(candidate_id, path)
+                        )
+                    )
             except ArtifactCleanupError as exc:
+                if provenance is not None:
+                    self._run_artifact_provenance(
+                        lambda candidate_id=candidate_id, path=path, exc=exc: (
+                            provenance.record_cleanup_failed(
+                                "archive_evict",
+                                path,
+                                str(exc),
+                                candidate_id=candidate_id,
+                            )
+                        )
+                    )
                 warnings.warn(
                     f"Artifact cleanup failed for archived structure {path}: {exc}",
                     RuntimeWarning,
                     stacklevel=2,
                 )
+
+    def _write_owned_artifact_manifest(self) -> None:
+        """Persist current artifact state without making provenance restart-authoritative."""
+        provenance = self._artifact_provenance
+        if provenance is None or self.artifact_store is None:
+            return
+        try:
+            records = self.artifact_store.records()
+        except ArtifactStoreError as exc:
+            warnings.warn(
+                f"Artifact provenance state could not be inspected: {exc}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return
+        self._run_artifact_provenance(
+            lambda: provenance.write_manifest(
+                records,
+                ownership_metadata=self._retention_archive_mappings,
+            )
+        )
 
     def _make_next_owned_generation(
         self,
@@ -2262,6 +2380,18 @@ class GeneticAlgorithmMinimizer:
                 "retention_policy prune=True requires checkpoint_file for durable cleanup"
             )
 
+        self._artifact_provenance = None
+        if self.artifact_store is not None:
+            archive_root = self._owned_archive_root(checkpoint_file, str(unique_id))
+            try:
+                self._artifact_provenance = _ArtifactProvenance(archive_root)
+            except ArtifactProvenanceError as exc:
+                warnings.warn(
+                    f"Artifact provenance initialization failed: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
         population_snapshots: list[dict] = []
         if state is not None:
             try:
@@ -2762,7 +2892,7 @@ class GeneticAlgorithmMinimizer:
             committed = checkpoint.enabled and (
                 checkpoint.is_due(gen + 1) or is_final_gen
             )
-            archive_evictions: list[str] = []
+            archive_evictions: list[tuple[str, str]] = []
             if committed:
                 new_snapshots = self._write_owned_population_checkpoint(
                     checkpoint_file,
@@ -2846,6 +2976,8 @@ class GeneticAlgorithmMinimizer:
                 self._cleanup_committed_owned_artifacts(
                     archive_evictions, archive_root=archive_root
                 )
+            if self.artifact_store is not None:
+                self._write_owned_artifact_manifest()
 
         self.best_evaluation = best_record
         return best_record.energy, str(best_record.structure_path)
