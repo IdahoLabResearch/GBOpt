@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBMinimizer import (
     GBMinimizerError,
@@ -76,6 +77,24 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
             seed=0,
         )
 
+    def _make_sequence_energy_func(self, energies, root):
+        """Return an evaluator writing deterministic relaxed files beneath ``root``."""
+        values = iter(energies)
+        call_count = [0]
+        root.mkdir(parents=True, exist_ok=True)
+
+        def energy_func(GB, manipulator, atom_positions, unique_id):
+            call_count[0] += 1
+            path = root / f"{unique_id}_{call_count[0]}.data"
+            GB.write_lammps(
+                str(path),
+                atom_positions,
+                manipulator.parents[0].box_dims,
+            )
+            return next(values), str(path)
+
+        return energy_func
+
     def test_run_mc_no_checkpoint_no_file_created(self):
         mc = self._make_minimizer(self._make_energy_func())
         mc.run_MC(max_steps=2, unique_id=1)
@@ -83,6 +102,204 @@ class TestMonteCarloMinimizerCheckpointing(unittest.TestCase):
         pkl_files = list(Path(self.tmpdir.name).glob("*.pkl"))
         self.assertEqual(json_files, [])
         self.assertEqual(pkl_files, [])
+        self.assertIsNone(mc.artifact_store)
+        self.assertEqual(list(Path(self.tmpdir.name).glob("*.artifacts")), [])
+
+    def test_mc_retention_prunes_superseded_accepted_source_after_commit(self):
+        managed_root = Path(self.tmpdir.name) / "managed"
+        energy_func = self._make_sequence_energy_func([2.0, 1.0], managed_root)
+        policy = ArtifactRetentionPolicy(
+            rules=(
+                KeepBest(
+                    name="objective_best",
+                    property="objective",
+                    direction="min",
+                    count=1,
+                ),
+            ),
+            prune=True,
+        )
+        mc = MonteCarloMinimizer(
+            self.gb,
+            energy_func,
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=policy,
+            managed_artifact_root=managed_root,
+        )
+        cp = Path(self.tmpdir.name) / "mc_retention.json"
+
+        mc.run_MC(max_steps=1, unique_id=41, checkpoint_file=cp)
+
+        initial_source = managed_root / "initial41_1.data"
+        current_source = managed_root / "41_2.data"
+        archive = (
+            Path(self.tmpdir.name)
+            / "mc_retention.artifacts"
+            / "structures"
+            / "MC_41_s1.data"
+        )
+        self.assertFalse(initial_source.exists())
+        self.assertTrue(current_source.exists())
+        self.assertTrue(archive.is_file())
+        with cp.open() as stream:
+            state = json.load(stream)
+        self.assertEqual(state["best_dump"], str(archive))
+        records = state["state"]["artifact_store"]["records"]
+        by_id = {record["candidate"]["candidate_id"]: record for record in records}
+        self.assertEqual(by_id["MC_41_s1"]["pins"], ["best_result", "run_checkpoint"])
+        self.assertEqual(
+            by_id["MC_41_s1"]["retention_reasons"], ["rule:objective_best"]
+        )
+
+    def test_mc_retains_rejected_scientific_result_and_prunes_its_source(self):
+        managed_root = Path(self.tmpdir.name) / "managed_rejected"
+        energy_func = self._make_sequence_energy_func([1.0, 1000.0], managed_root)
+        policy = ArtifactRetentionPolicy(
+            rules=(
+                KeepBest(
+                    name="largest_objective",
+                    property="objective",
+                    direction="max",
+                    count=1,
+                ),
+            ),
+            prune=True,
+        )
+        mc = MonteCarloMinimizer(
+            self.gb,
+            energy_func,
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=policy,
+            managed_artifact_root=managed_root,
+        )
+        cp = Path(self.tmpdir.name) / "mc_rejected.json"
+
+        mc.run_MC(max_steps=1, unique_id=42, checkpoint_file=cp)
+
+        rejected_source = managed_root / "42_2.data"
+        rejected_archive = (
+            Path(self.tmpdir.name)
+            / "mc_rejected.artifacts"
+            / "structures"
+            / "MC_42_s1.data"
+        )
+        self.assertFalse(rejected_source.exists())
+        self.assertTrue(rejected_archive.is_file())
+        with cp.open() as stream:
+            state = json.load(stream)
+        records = state["state"]["artifact_store"]["records"]
+        rejected = next(
+            record
+            for record in records
+            if record["candidate"]["candidate_id"] == "MC_42_s1"
+        )
+        self.assertEqual(rejected["pins"], [])
+        self.assertEqual(rejected["retention_reasons"], ["rule:largest_objective"])
+        manifest = Path(self.tmpdir.name) / "mc_rejected.artifacts" / "manifest.json"
+        history = Path(self.tmpdir.name) / "mc_rejected.artifacts" / "history.jsonl"
+        self.assertTrue(manifest.is_file())
+        self.assertTrue(history.is_file())
+
+    def test_mc_resume_rejects_retention_policy_mismatch(self):
+        managed_root = Path(self.tmpdir.name) / "managed_mismatch"
+        energy_func = self._make_sequence_energy_func([2.0, 1.0], managed_root)
+        first_policy = ArtifactRetentionPolicy(
+            rules=(
+                KeepBest(
+                    name="objective_best",
+                    property="objective",
+                    direction="min",
+                    count=1,
+                ),
+            ),
+        )
+        cp = Path(self.tmpdir.name) / "mc_mismatch.json"
+        MonteCarloMinimizer(
+            self.gb,
+            energy_func,
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=first_policy,
+        ).run_MC(max_steps=1, unique_id=43, checkpoint_file=cp)
+
+        changed_policy = ArtifactRetentionPolicy(
+            rules=(
+                KeepBest(
+                    name="objective_best",
+                    property="objective",
+                    direction="min",
+                    count=2,
+                ),
+            ),
+        )
+        resumed = MonteCarloMinimizer(
+            self.gb,
+            self._make_energy_func(),
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=changed_policy,
+        )
+        with self.assertRaisesRegex(
+            GBMinimizerError,
+            "artifact retention policy signature mismatch",
+        ):
+            resumed.run_MC(max_steps=2, checkpoint_file=cp)
+
+    def test_mc_pruning_requires_checkpoint_file(self):
+        managed_root = Path(self.tmpdir.name) / "managed_no_checkpoint"
+        policy = ArtifactRetentionPolicy(prune=True)
+        mc = MonteCarloMinimizer(
+            self.gb,
+            self._make_energy_func(),
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=policy,
+            managed_artifact_root=managed_root,
+        )
+        with self.assertRaisesRegex(
+            GBMinimizerValueError,
+            "requires checkpoint_file",
+        ):
+            mc.run_MC(max_steps=1, unique_id=44)
+
+    def test_mc_cleanup_failure_leaks_source_but_checkpoint_resumes(self):
+        managed_root = Path(self.tmpdir.name) / "managed_cleanup_failure"
+        energy_func = self._make_sequence_energy_func([1.0, 1000.0], managed_root)
+        policy = ArtifactRetentionPolicy(prune=True)
+
+        def failing_cleanup(_request):
+            raise OSError("backend cleanup failed")
+
+        cp = Path(self.tmpdir.name) / "mc_cleanup_failure.json"
+        mc = MonteCarloMinimizer(
+            self.gb,
+            energy_func,
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=policy,
+            cleanup_candidate=failing_cleanup,
+        )
+        with self.assertWarnsRegex(RuntimeWarning, "Artifact cleanup failed"):
+            mc.run_MC(max_steps=1, unique_id=45, checkpoint_file=cp)
+
+        leaked_source = managed_root / "45_2.data"
+        self.assertTrue(cp.is_file())
+        self.assertTrue(leaked_source.is_file())
+
+        resumed = MonteCarloMinimizer(
+            self.gb,
+            self._make_sequence_energy_func([1000.0], managed_root),
+            ["translate_right_grain"],
+            seed=0,
+            retention_policy=policy,
+            cleanup_candidate=lambda _request: None,
+        )
+        resumed.run_MC(max_steps=2, checkpoint_file=cp)
+        with cp.open() as stream:
+            state = json.load(stream)
+        self.assertEqual(state["progress_index"], 2)
 
     def test_run_mc_checkpoint_kept_on_completion(self):
         mc = self._make_minimizer(self._make_energy_func())
