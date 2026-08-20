@@ -44,6 +44,9 @@ class CandidateEvaluation:
     :param manipulator: Validated reconstructed candidate, when successful.
     :param success: Whether evaluation and reconstruction both succeeded.
     :param failure_reason: Failure context when ``success`` is false.
+    :raises TypeError: If scalar or path fields have invalid types.
+    :raises ValueError: If energy is non-finite or success/failure fields are
+        internally inconsistent.
     """
 
     candidate_id: str
@@ -109,6 +112,107 @@ class CandidateEvaluation:
             raise ValueError("failed evaluation requires a failure reason")
         if self.manipulator is not None:
             raise ValueError("failed evaluation must not include a manipulator")
+
+
+@dataclass(frozen=True, slots=True)
+class CandidateEvaluationSummary:
+    """Lightweight historical result that does not depend on evaluator artifacts.
+
+    :param candidate_id: Stable logical candidate identity.
+    :param input_index: Candidate position in the submitted population.
+    :param energy: Normalized finite objective value or failure penalty.
+    :param success: Whether evaluation and explicit reconstruction succeeded.
+    :param failure_reason: Failure context when ``success`` is false.
+    :raises TypeError: If identity, index, energy, or success has an invalid type.
+    :raises ValueError: If energy is non-finite or failure context is inconsistent.
+    """
+
+    candidate_id: str
+    input_index: int
+    energy: float
+    success: bool
+    failure_reason: str | None = None
+
+    def __post_init__(self) -> None:
+        """Validate summary state independently of any filesystem artifact.
+
+        :raises TypeError: If identity, index, energy, or success has an invalid type.
+        :raises ValueError: If energy is non-finite or failure context is inconsistent.
+        """
+        if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
+            raise TypeError("candidate_id must be a non-empty string")
+        if isinstance(self.input_index, (bool, np.bool_)) or not isinstance(
+            self.input_index, Integral
+        ):
+            raise TypeError("input_index must be a non-Boolean integer")
+        if isinstance(self.energy, (bool, np.bool_)) or not isinstance(self.energy, Real):
+            raise TypeError("energy must be a non-Boolean real scalar")
+        energy = float(self.energy)
+        if not np.isfinite(energy):
+            raise ValueError("energy must be finite")
+        if type(self.success) is not bool:
+            raise TypeError("success must be a bool")
+        if self.success:
+            if self.failure_reason is not None:
+                raise ValueError("successful summary must not include a failure reason")
+        elif not isinstance(self.failure_reason, str) or not self.failure_reason:
+            raise ValueError("failed summary requires a failure reason")
+        object.__setattr__(self, "input_index", int(self.input_index))
+        object.__setattr__(self, "energy", energy)
+
+    @classmethod
+    def from_evaluation(cls, record: CandidateEvaluation) -> "CandidateEvaluationSummary":
+        """Create a summary from one typed evaluation.
+
+        :param record: Explicit-ownership evaluation to summarize.
+        :return: Artifact-independent historical result.
+        :raises TypeError: If ``record`` is not a ``CandidateEvaluation``.
+        """
+        if not isinstance(record, CandidateEvaluation):
+            raise TypeError("record must be a CandidateEvaluation")
+        # pyraisecontract: ignore=DOC115[ValueError]
+        #   CandidateEvaluation has already enforced the same finite-energy and
+        #   success/failure coherence required by CandidateEvaluationSummary.
+        return cls(
+            candidate_id=record.candidate_id,
+            input_index=record.input_index,
+            energy=record.energy,
+            success=record.success,
+            failure_reason=record.failure_reason,
+        )
+
+    def to_state(self) -> dict[str, object]:
+        """Return deterministic JSON-safe summary state.
+
+        :return: Historical evaluation state without paths or reconstruction objects.
+        """
+        return {
+            "candidate_id": self.candidate_id,
+            "input_index": self.input_index,
+            "energy": self.energy,
+            "success": self.success,
+            "failure_reason": self.failure_reason,
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> "CandidateEvaluationSummary":
+        """Restore one summary from checkpoint state.
+
+        :param state: JSON-decoded summary dictionary.
+        :return: Validated artifact-independent summary.
+        :raises TypeError: If state is not a dictionary or fields have invalid types.
+        :raises ValueError: If state values are inconsistent.
+        :raises KeyError: If required fields are absent.
+        """
+        if not isinstance(state, dict):
+            raise TypeError("evaluation summary state must be a dictionary")
+        return cls(
+            candidate_id=state["candidate_id"],
+            input_index=state["input_index"],
+            energy=state["energy"],
+            success=state["success"],
+            failure_reason=state.get("failure_reason"),
+        )
 
 
 class ExplicitOwnershipEvaluator:
@@ -246,9 +350,13 @@ class ExplicitOwnershipEvaluator:
         :param candidate_id: Stable logical candidate identity.
         :param input_index: Candidate position in the submitted population.
         :param reason: Human-readable failure context.
-        :param mapping: Candidate/file mapping, when construction reached that stage.
-        :param structure_path: Canonical artifact path, when supplied by the evaluator.
+        :param mapping: Optional candidate/file mapping, defaults to ``None``; supplied
+            when construction reached that stage.
+        :param structure_path: Optional canonical artifact path, defaults to ``None``;
+            supplied when available from the evaluator.
         :return: Failed evaluation carrying both penalty and failure context.
+        :raises TypeError: If candidate identity, input index, or path state is invalid.
+        :raises ValueError: If candidate identity, energy, or failure state is inconsistent.
         """
         return CandidateEvaluation(
             candidate_id=candidate_id,
@@ -267,7 +375,8 @@ class ExplicitOwnershipEvaluator:
 
         :param energy: Evaluator-returned energy value.
         :return: Finite Python float.
-        :raises ValueError: If the value is Boolean, non-real, or non-finite.
+        :raises TypeError: If the value is Boolean or non-real.
+        :raises ValueError: If the value is non-finite.
         """
         if isinstance(energy, (bool, np.bool_)) or not isinstance(energy, Real):
             raise TypeError("energy must be a non-Boolean real scalar")
@@ -287,9 +396,10 @@ class ExplicitOwnershipEvaluator:
             resolution error.
         :raises ValueError: If the path value is malformed.
         """
-        if not isinstance(structure_path, (str, Path)):
-            return None
-        return str(Path(structure_path).resolve())
+        diagnostic_path: str | None = None
+        if isinstance(structure_path, (str, Path)):
+            diagnostic_path = str(Path(structure_path).resolve())
+        return diagnostic_path
 
     def _reload_mapping(
         self,
@@ -352,12 +462,13 @@ class ExplicitOwnershipEvaluator:
             population.
         :param mapping: Keyword argument, required. Candidate/file mapping established before
             evaluation.
-        :param energy: Keyword argument, optional, defaults to an internal missing
-            sentinel. Evaluator-returned energy, or an internal missing sentinel.
-        :param structure_path: Keyword argument, optional, defaults to an internal
-            missing sentinel. Evaluator-returned artifact path, or an internal missing
-            sentinel.
+        :param energy: Keyword argument, optional, defaults to ``_MISSING``.
+            Evaluator-returned energy, or the internal missing sentinel.
+        :param structure_path: Keyword argument, optional, defaults to ``_MISSING``.
+            Evaluator-returned artifact path, or the internal missing sentinel.
         :return: Successful reconstructed evaluation or a penalty-bearing failure.
+        :raises TypeError: If candidate identity, input index, or result scalar state is invalid.
+        :raises ValueError: If candidate identity or result state is internally inconsistent.
         """
         missing_fields = []
         if energy is _MISSING or energy is None:
@@ -476,6 +587,8 @@ class ExplicitOwnershipEvaluator:
         :param input_index: Candidate position in population order.
         :param mapping: Fresh candidate-local ownership mapping.
         :return: Restored aligned candidate evaluation.
+        :raises TypeError: If checkpointed candidate identity or scalar state has an invalid type.
+        :raises ValueError: If checkpointed candidate state is internally inconsistent.
         :raises CheckpointError: If the recorded candidate result is unavailable.
         """
         energy, structure_path = checkpoint.get_result(unique_id)
@@ -539,6 +652,8 @@ class ExplicitOwnershipEvaluator:
         :param unique_id: Evaluator invocation identifier.
         :param input_index: Candidate position in the population.
         :return: Normalized candidate evaluation.
+        :raises TypeError: If candidate identity, index, or normalized result state has an invalid type.
+        :raises ValueError: If normalized candidate result state is internally inconsistent.
         """
         try:
             mapping = self._candidate_file_mapping(manipulator, atoms)
@@ -594,6 +709,7 @@ class ExplicitOwnershipEvaluator:
             Successful evaluations aligned to unchanged carryover candidates. ``None``
             entries are evaluated normally.
         :return: One aligned typed evaluation per input candidate.
+        :raises TypeError: If candidate identity, index, or normalized result state has an invalid type.
         :raises ValueError: If population arrays or batch results are not aligned, or
             if a batch result is not a dictionary.
         :raises RuntimeError: If an internal alignment invariant is lost.
@@ -638,6 +754,9 @@ class ExplicitOwnershipEvaluator:
                 )
             except GrainOwnershipError:
                 continue
+            # pyraisecontract: ignore=DOC115[TypeError]
+            #   Cached CandidateEvaluation instances were already type-validated; only
+            #   the population index changes here, and enumerate always supplies an int.
             records[index] = CandidateEvaluation(
                 candidate_id=cached.candidate_id,
                 input_index=index,

@@ -3,6 +3,7 @@
 import copy as copy_module
 import inspect
 import math
+import os
 import shutil
 import uuid
 import warnings
@@ -22,8 +23,12 @@ from GBOpt._candidate_admissibility import (
 )
 from GBOpt._explicit_ownership_evaluation import (
     CandidateEvaluation,
+    CandidateEvaluationSummary,
     ExplicitOwnershipEvaluator,
 )
+from GBOpt.artifacts.policy import ArtifactPolicyError, ArtifactRetentionPolicy
+from GBOpt.artifacts.store import ArtifactStore, ArtifactStoreError
+from GBOpt.artifacts.types import ArtifactPin, ArtifactValueError, CandidatePropertyContext
 from GBOpt.Checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     CandidateCheckpoint,
@@ -529,6 +534,7 @@ class GeneticAlgorithmMinimizer:
         crossover_surface: str = "periodic_wave",
         crossover_max_tilt_degrees: float = 5.0,
         crossover_attempts: int = 8,
+        retention_policy: ArtifactRetentionPolicy | None = None,
     ):
         """
         :param GB: GBMaker object to perform minimization on.
@@ -577,9 +583,13 @@ class GeneticAlgorithmMinimizer:
         :param crossover_attempts: Keyword argument, optional, defaults to ``8``.
             Maximum parent-pair attempts before one crossover slot falls back to
             mutation.
+        :param retention_policy: Keyword argument, optional, defaults to ``None``.
+            Scientific artifact-retention policy for explicit-ownership GA execution.
+            ``None`` preserves keep-all artifact behavior.
         :raises TypeError: If ``initial_ownership`` is not GrainOwnership, accompanies
-            a non-file initial structure, ``allow_variable_cell`` is not Boolean, or a
-            crossover policy argument has an invalid type.
+            a non-file initial structure, ``allow_variable_cell`` is not Boolean, a
+            crossover policy argument has an invalid type, or ``retention_policy`` is
+            not an ``ArtifactRetentionPolicy``.
         :raises ValueError: If ownership is supplied without an initial structure or
             variable-cell execution is requested without explicit ownership.
         """
@@ -597,6 +607,16 @@ class GeneticAlgorithmMinimizer:
                 )
         elif allow_variable_cell:
             raise ValueError("allow_variable_cell requires initial_ownership")
+        if retention_policy is not None and not isinstance(
+            retention_policy, ArtifactRetentionPolicy
+        ):
+            raise GBMinimizerTypeError(
+                "retention_policy must be an ArtifactRetentionPolicy or None"
+            )
+        if retention_policy is not None and initial_ownership is None:
+            raise GBMinimizerValueError(
+                "retention_policy currently requires explicit ownership"
+            )
         if (
             isinstance(slice_and_merge_pct, (bool, np.bool_))
             or not isinstance(slice_and_merge_pct, Real)
@@ -686,6 +706,16 @@ class GeneticAlgorithmMinimizer:
         self.initial_structure = initial_structure
         self.initial_ownership = initial_ownership
         self.allow_variable_cell = allow_variable_cell
+        self.retention_policy = retention_policy
+        # pyraisecontract: ignore=DOC115[ArtifactStoreError]
+        #   retention_policy was type-validated above, which is the only condition
+        #   under which ArtifactStore construction raises ArtifactStoreError.
+        self.artifact_store = (
+            ArtifactStore(policy=retention_policy)
+            if retention_policy is not None
+            else None
+        )
+        self._retention_archive_mappings: dict[str, dict] = {}
         self.local_random = np.random.default_rng(int(time()) if seed is None else seed)
         self._owned_evaluator = (
             ExplicitOwnershipEvaluator(
@@ -771,6 +801,278 @@ class GeneticAlgorithmMinimizer:
         manipulator = copy_module.copy(record.manipulator)
         manipulator.rng = self.local_random
         return manipulator
+
+    def _register_owned_retention_candidate(
+        self,
+        record: CandidateEvaluation,
+        *,
+        generation: int,
+        lineage: tuple[str, ...],
+    ) -> None:
+        """Register one newly evaluated relaxed candidate with the artifact subsystem.
+
+        Property acquisition runs only after explicit-ownership reconstruction succeeds,
+        so callbacks receive validated relaxed physical state rather than submitted input.
+
+        :param record: Successful newly evaluated candidate.
+        :param generation: Keyword argument, required. Generation where evaluation occurred.
+        :param lineage: Keyword argument, required. Stable logical parent identities.
+        :raises GBMinimizerError: If candidate physical state or retention policy evaluation
+            is invalid.
+        """
+        if self.artifact_store is None or self.retention_policy is None:
+            return
+        if record.candidate_id in self.artifact_store:
+            return
+        if not record.success or record.manipulator is None or record.structure_path is None:
+            raise GBMinimizerError(
+                "only successful explicit-ownership evaluations may enter retention"
+            )
+        parent = record.manipulator.parents[0]
+        try:
+            context = CandidatePropertyContext(
+                candidate_id=record.candidate_id,
+                generation=generation,
+                objective=record.energy,
+                atoms=parent.whole_system,
+                box_dims=parent.box_dims,
+                grain_labels=parent.grain_labels,
+                gb_plane_x=parent.gb_plane_x,
+            )
+            candidate = self.retention_policy.candidate_from_context(
+                context,
+                lineage=lineage,
+            )
+            self.artifact_store.register_candidate(
+                candidate,
+                source_path=record.structure_path,
+            )
+        except (ArtifactPolicyError, ArtifactStoreError, ArtifactValueError) as exc:
+            raise GBMinimizerError(
+                f"artifact retention failed for candidate {record.candidate_id!r}: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _owned_archive_root(checkpoint_file: Path | None, unique_id: str) -> Path:
+        """Return the canonical archive root for one GA run.
+
+        :param checkpoint_file: Run checkpoint path, or ``None`` when checkpointing is
+            disabled.
+        :param unique_id: Stable run identifier.
+        :return: Run-specific artifact archive root.
+        """
+        if checkpoint_file is not None:
+            return checkpoint_file.parent / f"{checkpoint_file.stem}.artifacts"
+        return Path.cwd() / f"GA_{unique_id}.artifacts"
+
+    def _materialize_owned_archive(
+        self,
+        record: CandidateEvaluation,
+        archive_root: Path,
+    ) -> str:
+        """Create one canonical retained structure without changing candidate identity.
+
+        The source representation is already validated by the explicit-ownership
+        evaluator. A hard link is preferred and an ordinary copy is used when linking is
+        unavailable. Explicit reconstruction metadata remains checkpoint state rather than
+        being inferred from the archived coordinates.
+
+        :param record: Successful candidate whose structure must be retained.
+        :param archive_root: Run-owned archive root.
+        :return: Canonical retained structure path.
+        :raises GBMinimizerError: If the candidate or filesystem state cannot be archived
+            safely.
+        """
+        if self.artifact_store is None or self._owned_evaluator is None:
+            raise GBMinimizerError("owned archive materialization requires artifact state")
+        if (
+            not record.success
+            or record.structure_path is None
+            or record.mapping is None
+            or record.manipulator is None
+        ):
+            raise GBMinimizerError("cannot archive an incomplete owned evaluation")
+        candidate_id = record.candidate_id
+        if Path(candidate_id).name != candidate_id or any(
+            separator in candidate_id for separator in ("/", "\\")
+        ):
+            raise GBMinimizerError("candidate identity is unsafe for archive naming")
+        source = Path(record.structure_path)
+        destination = archive_root / "structures" / f"{candidate_id}.data"
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if source.resolve() != destination.resolve():
+                temporary = destination.with_name(destination.name + ".tmp")
+                temporary.unlink(missing_ok=True)
+                if destination.exists():
+                    destination.unlink()
+                try:
+                    os.link(source, temporary)
+                except OSError:
+                    shutil.copy2(source, temporary)
+                temporary.replace(destination)
+            self._owned_evaluator._reload_mapping(str(destination), record.mapping)
+        except (OSError, LammpsDataError, GrainOwnershipError) as exc:
+            raise GBMinimizerError(
+                f"could not materialize retained candidate {candidate_id!r}"
+            ) from exc
+        self.artifact_store.set_archive_path(candidate_id, destination)
+        self._retention_archive_mappings[candidate_id] = _candidate_mapping_to_state(
+            record.mapping
+        )
+        return str(destination)
+
+    @staticmethod
+    def _rebase_owned_evaluation(
+        record: CandidateEvaluation,
+        *,
+        structure_path: str,
+        mapping: CandidateFileMapping,
+        manipulator: GBManipulator,
+    ) -> CandidateEvaluation:
+        """Return one successful evaluation rebased onto an equivalent durable artifact.
+
+        :param record: Successful evaluation whose identity and objective are preserved.
+        :param structure_path: Keyword argument, required. Equivalent durable structure.
+        :param mapping: Keyword argument, required. Explicit reconstruction mapping for the
+            durable structure.
+        :param manipulator: Keyword argument, required. Aligned in-memory candidate.
+        :return: Rebased successful evaluation.
+        :raises TypeError: If the durable structure path has an invalid type.
+        :raises ValueError: If ``record`` is not successful or durable reconstruction
+            state is incomplete.
+        """
+        if not record.success:
+            raise ValueError("cannot rebase a failed owned evaluation")
+        return CandidateEvaluation(
+            candidate_id=record.candidate_id,
+            input_index=record.input_index,
+            energy=record.energy,
+            structure_path=structure_path,
+            mapping=mapping,
+            manipulator=manipulator,
+            success=True,
+        )
+
+    def _rebase_owned_carryover_cache(
+        self,
+        cached_evaluations: list[CandidateEvaluation | None],
+        snapshots: list[dict],
+        manipulators: list[GBManipulator],
+    ) -> list[CandidateEvaluation | None]:
+        """Rebase reusable carryover evaluations onto next-population snapshots.
+
+        :param cached_evaluations: Carryover cache aligned to the next population.
+        :param snapshots: Newly written ``.owned.pending`` population state.
+        :param manipulators: Next-population manipulators aligned to ``snapshots``.
+        :return: Cache entries that no longer depend on evaluator source artifacts.
+        :raises GBMinimizerError: If checkpoint population state is malformed.
+        """
+        if not (
+            len(cached_evaluations) == len(snapshots) == len(manipulators)
+        ):
+            raise GBMinimizerError("owned carryover cache lost population alignment")
+        rebased: list[CandidateEvaluation | None] = []
+        for cached, snapshot, manipulator in zip(
+            cached_evaluations, snapshots, manipulators, strict=True
+        ):
+            if cached is None:
+                rebased.append(None)
+                continue
+            try:
+                path = snapshot["structure_path"]
+                mapping = _candidate_mapping_from_state(snapshot["mapping"])
+                rebased_record = self._rebase_owned_evaluation(
+                    cached,
+                    structure_path=path,
+                    mapping=mapping,
+                    manipulator=manipulator,
+                )
+            except (KeyError, TypeError, ValueError, GrainOwnershipError) as exc:
+                raise GBMinimizerError(
+                    "owned carryover cache cannot be rebased onto checkpoint population"
+                ) from exc
+            rebased.append(rebased_record)
+        return rebased
+
+    def _prepare_owned_archive_state(
+        self,
+        records_by_id: dict[str, CandidateEvaluation],
+        archive_root: Path,
+    ) -> list[str]:
+        """Materialize required archives and detach entries eligible for eviction.
+
+        The returned paths are deleted only after the main checkpoint commits. Store state
+        is updated before serialization so a cleanup failure leaks an unreferenced file
+        instead of making the checkpoint depend on a deletion succeeding.
+
+        :param records_by_id: Successful live evaluations available for new archive copies.
+        :param archive_root: Run-owned canonical archive root.
+        :return: Superseded archive paths eligible for post-commit deletion.
+        :raises GBMinimizerError: If a required archive cannot be materialized or restored.
+        """
+        if self.artifact_store is None:
+            return []
+        required_ids = []
+        for artifact in self.artifact_store.records():
+            if artifact.retention_reasons or ArtifactPin.BEST_RESULT in artifact.pins:
+                required_ids.append(artifact.candidate_id)
+        for candidate_id in required_ids:
+            archive_path = self.artifact_store.archive_path(candidate_id)
+            if archive_path is not None:
+                if not Path(archive_path).is_file():
+                    raise GBMinimizerError(
+                        f"retained archive path {archive_path} is missing"
+                    )
+                continue
+            record = records_by_id.get(candidate_id)
+            if record is None:
+                raise GBMinimizerError(
+                    f"retained candidate {candidate_id!r} lacks materializable state"
+                )
+            self._materialize_owned_archive(record, archive_root)
+
+        evictions: list[str] = []
+        for artifact in self.artifact_store.records():
+            if artifact.archive_path is None:
+                continue
+            if artifact.retention_reasons or artifact.pins:
+                continue
+            evictions.append(artifact.archive_path)
+            self.artifact_store.set_archive_path(artifact.candidate_id, None)
+            self._retention_archive_mappings.pop(artifact.candidate_id, None)
+        return evictions
+
+    def _cleanup_committed_owned_artifacts(self, archive_evictions: list[str]) -> None:
+        """Best-effort exact-file cleanup after a durable checkpoint commit.
+
+        Stage B removes only evaluator-returned structure files and superseded canonical
+        archive files. Recursive evaluator work-directory cleanup remains a separate
+        backend-owned concern.
+
+        :param archive_evictions: Canonical archive files detached before checkpoint save.
+        """
+        if self.artifact_store is None:
+            return
+        paths: list[Path] = []
+        for artifact in self.artifact_store.records():
+            if self.artifact_store.source_is_prunable(artifact.candidate_id):
+                if artifact.source_path is not None:
+                    paths.append(Path(artifact.source_path))
+        paths.extend(Path(path) for path in archive_evictions)
+        seen: set[Path] = set()
+        for path in paths:
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                warnings.warn(
+                    f"Artifact cleanup failed for {path}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
 
     def _make_next_owned_generation(
         self,
@@ -1294,6 +1596,10 @@ class GeneticAlgorithmMinimizer:
                 raise GBMinimizerError(
                     "failed owned evaluation does not carry the configured penalty"
                 )
+            # pyraisecontract: ignore=DOC115[TypeError]
+            # pyraisecontract: ignore=DOC115[ValueError]
+            #   All CandidateEvaluation scalar and failure-state invariants are
+            #   explicitly validated above before reconstruction.
             return CandidateEvaluation(
                 candidate_id=candidate_id,
                 input_index=input_index,
@@ -1324,6 +1630,10 @@ class GeneticAlgorithmMinimizer:
                 "Checkpoint owned evaluation artifact is missing, unreadable, or "
                 f"inconsistent: {structure_path}"
             ) from exc
+        # pyraisecontract: ignore=DOC115[TypeError]
+        # pyraisecontract: ignore=DOC115[ValueError]
+        #   Successful checkpoint scalar state is validated above, and the reload
+        #   path proves that the required mapping/manipulator state is present.
         return CandidateEvaluation(
             candidate_id=candidate_id,
             input_index=input_index,
@@ -1731,6 +2041,7 @@ class GeneticAlgorithmMinimizer:
                 next_manipulators = []
                 next_structures = []
                 next_lineages = []
+                next_retention_lineages = []
                 next_cached_evaluations = []
                 for j in lowest_valid_idxs:
                     old_idx = valid_old_idxs[j]
@@ -1847,6 +2158,14 @@ class GeneticAlgorithmMinimizer:
             ) from exc
 
         self._owned_evaluator.begin_run()
+        if (
+            self.retention_policy is not None
+            and self.retention_policy.prune
+            and not checkpoint.enabled
+        ):
+            raise GBMinimizerValueError(
+                "retention_policy prune=True requires checkpoint_file for durable cleanup"
+            )
 
         population_snapshots: list[dict] = []
         if state is not None:
@@ -1926,6 +2245,55 @@ class GeneticAlgorithmMinimizer:
                         "owned checkpoint energy/history progress is inconsistent"
                     )
                 self.local_random.bit_generator.state = state["rng_state"]
+                retention_state = owned_state.get("artifact_store")
+                if retention_state is None:
+                    if self.retention_policy is not None:
+                        raise GBMinimizerError(
+                            "checkpoint retention policy does not match the minimizer configuration"
+                        )
+                    self.artifact_store = None
+                    self._retention_archive_mappings = {}
+                else:
+                    try:
+                        self.artifact_store = ArtifactStore.from_state(
+                            retention_state,
+                            policy=self.retention_policy,
+                        )
+                    except ArtifactStoreError as exc:
+                        raise GBMinimizerError(str(exc)) from exc
+                    raw_archive_mappings = owned_state.get(
+                        "retention_archive_mappings", {}
+                    )
+                    if not isinstance(raw_archive_mappings, dict):
+                        raise GBMinimizerError(
+                            "checkpoint retention archive mappings are invalid"
+                        )
+                    self._retention_archive_mappings = {}
+                    for candidate_id, mapping_state in sorted(
+                        raw_archive_mappings.items()
+                    ):
+                        if not isinstance(candidate_id, str):
+                            raise GBMinimizerError(
+                                "checkpoint retention archive candidate identity is invalid"
+                            )
+                        try:
+                            _candidate_mapping_from_state(mapping_state)
+                        except GrainOwnershipError as exc:
+                            raise GBMinimizerError(
+                                f"checkpoint retained ownership for {candidate_id!r} is invalid"
+                            ) from exc
+                        self._retention_archive_mappings[candidate_id] = mapping_state
+                    for artifact in self.artifact_store.records():
+                        if artifact.archive_path is None:
+                            continue
+                        if artifact.candidate_id not in self._retention_archive_mappings:
+                            raise GBMinimizerError(
+                                f"checkpoint retained candidate {artifact.candidate_id!r} lacks ownership metadata"
+                            )
+                        if not Path(artifact.archive_path).is_file():
+                            raise GBMinimizerError(
+                                f"retained archive path {artifact.archive_path} is missing"
+                            )
                 _start_gen = int(progress_index) + 1
                 best_record = self._owned_evaluation_from_state(
                     owned_state["best_evaluation"]
@@ -1952,6 +2320,24 @@ class GeneticAlgorithmMinimizer:
                     raise GBMinimizerError(
                         "owned checkpoint population lineages are invalid"
                     )
+                population_retention_lineages_state = owned_state.get(
+                    "population_retention_lineages"
+                )
+                if (
+                    not isinstance(population_retention_lineages_state, list)
+                    or len(population_retention_lineages_state) != self.population_size
+                    or not all(
+                        isinstance(lineage, list)
+                        and all(isinstance(parent_id, str) for parent_id in lineage)
+                        for lineage in population_retention_lineages_state
+                    )
+                ):
+                    raise GBMinimizerError(
+                        "owned checkpoint retention lineages are invalid"
+                    )
+                population_retention_lineages = [
+                    tuple(lineage) for lineage in population_retention_lineages_state
+                ]
                 population_snapshots = owned_state["population_candidates"]
                 population_manipulators, population_structures = (
                     self._restore_owned_population(population_snapshots)
@@ -1979,7 +2365,7 @@ class GeneticAlgorithmMinimizer:
                         "owned checkpoint generation evaluations are invalid"
                     )
                 self.last_generation_evaluations = [
-                    self._owned_evaluation_from_state(record_state)
+                    CandidateEvaluationSummary.from_state(record_state)
                     for record_state in last_states
                 ]
                 self._owned_evaluator.restore_claimed_paths(
@@ -2022,10 +2408,18 @@ class GeneticAlgorithmMinimizer:
             self.GBE_vals.append([initial_record.energy])
             best_record = initial_record
             self.best_evaluation = best_record
+            if self.artifact_store is not None:
+                self._register_owned_retention_candidate(
+                    initial_record, generation=0, lineage=()
+                )
+                self.artifact_store.replace_pin(
+                    ArtifactPin.BEST_RESULT, initial_record.candidate_id
+                )
 
             population_manipulators = []
             population_structures = []
             population_lineages = []
+            population_retention_lineages: list[tuple[str, ...]] = []
             population_cached_evaluations: list[
                 CandidateEvaluation | None
             ] = []
@@ -2035,6 +2429,7 @@ class GeneticAlgorithmMinimizer:
                 np.array(seed_manipulator.parents[0].whole_system, copy=True)
             )
             population_lineages.append(["START", initial_record.structure_path])
+            population_retention_lineages.append((initial_record.candidate_id,))
             population_cached_evaluations.append(None)
 
             for _ in range(self.population_size - 1):
@@ -2047,6 +2442,7 @@ class GeneticAlgorithmMinimizer:
                 population_manipulators.append(candidate_manipulator)
                 population_structures.append(candidate_structure)
                 population_lineages.append([mutation, initial_record.structure_path])
+                population_retention_lineages.append((initial_record.candidate_id,))
                 population_cached_evaluations.append(None)
             _start_gen = 0
 
@@ -2086,6 +2482,9 @@ class GeneticAlgorithmMinimizer:
                     "GBE_vals": self.GBE_vals,
                     "history": self.history,
                     "population_lineages": population_lineages,
+                    "population_retention_lineages": [
+                        list(lineage) for lineage in population_retention_lineages
+                    ],
                     "population_candidates": population_snapshots,
                     "population_cached_evaluations": [
                         None
@@ -2095,9 +2494,20 @@ class GeneticAlgorithmMinimizer:
                     ],
                     "best_evaluation": self._owned_evaluation_to_state(best_record),
                     "last_generation_evaluations": [
-                        self._owned_evaluation_to_state(record)
+                        CandidateEvaluationSummary.from_evaluation(record).to_state()
+                        if isinstance(record, CandidateEvaluation)
+                        else record.to_state()
                         for record in self.last_generation_evaluations
                     ],
+                    "artifact_store": (
+                        None
+                        if self.artifact_store is None
+                        else self.artifact_store.to_state()
+                    ),
+                    "retention_archive_mappings": {
+                        candidate_id: self._retention_archive_mappings[candidate_id]
+                        for candidate_id in sorted(self._retention_archive_mappings)
+                    },
                     "claimed_paths": self._owned_evaluator.claimed_paths_state(),
                 },
             }
@@ -2137,6 +2547,20 @@ class GeneticAlgorithmMinimizer:
             except CheckpointError as exc:
                 raise GBMinimizerError(str(exc)) from exc
             self.last_generation_evaluations = records
+            if self.artifact_store is not None:
+                for record, lineage in zip(
+                    records, population_retention_lineages, strict=True
+                ):
+                    if record.success:
+                        self._register_owned_retention_candidate(
+                            record, generation=gen, lineage=lineage
+                        )
+                        if gen_checkpoint is not None and record.candidate_id == (
+                            f"GA_{unique_id}_g{gen}_c{record.input_index}"
+                        ):
+                            self.artifact_store.pin(
+                                record.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
+                            )
             generation_energies = [record.energy for record in records]
             self.GBE_vals.append(generation_energies)
             self.history.append(list(zip(population_lineages, generation_energies)))
@@ -2146,6 +2570,7 @@ class GeneticAlgorithmMinimizer:
                 next_manipulators: list[GBManipulator] = []
                 next_structures: list[np.ndarray] = []
                 next_lineages: list[list[str]] = []
+                next_retention_lineages: list[tuple[str, ...]] = []
                 next_cached_evaluations: list[
                     CandidateEvaluation | None
                 ] = []
@@ -2159,6 +2584,7 @@ class GeneticAlgorithmMinimizer:
                     next_manipulators.append(candidate_manipulator)
                     next_structures.append(candidate_structure)
                     next_lineages.append([mutation, best_record.structure_path])
+                    next_retention_lineages.append((best_record.candidate_id,))
                     next_cached_evaluations.append(None)
                 population_manipulators = next_manipulators
                 population_structures = next_structures
@@ -2169,6 +2595,10 @@ class GeneticAlgorithmMinimizer:
                     if record.energy < best_record.energy:
                         best_record = record
                         self.best_evaluation = record
+                        if self.artifact_store is not None:
+                            self.artifact_store.replace_pin(
+                                ArtifactPin.BEST_RESULT, record.candidate_id
+                            )
 
                 valid_energies = [record.energy for record in valid_records]
                 lowest_indices, intermediate_indices = self._select_indices_by_energy(
@@ -2177,6 +2607,7 @@ class GeneticAlgorithmMinimizer:
                 next_manipulators = []
                 next_structures = []
                 next_lineages = []
+                next_retention_lineages = []
                 next_cached_evaluations = []
                 for index in lowest_indices:
                     record = valid_records[index]
@@ -2186,6 +2617,7 @@ class GeneticAlgorithmMinimizer:
                         np.array(carryover.parents[0].whole_system, copy=True)
                     )
                     next_lineages.append(["carryover", record.structure_path])
+                    next_retention_lineages.append((record.candidate_id,))
                     next_cached_evaluations.append(
                         record if self.reuse_carryover_evaluations else None
                     )
@@ -2201,11 +2633,25 @@ class GeneticAlgorithmMinimizer:
                 next_manipulators.extend(new_manipulators)
                 next_structures.extend(new_structures)
                 next_lineages.extend(new_lineages)
+                path_to_candidate_id = {
+                    str(record.structure_path): record.candidate_id
+                    for record in valid_records
+                    if record.structure_path is not None
+                }
+                for lineage in new_lineages:
+                    next_retention_lineages.append(
+                        tuple(
+                            path_to_candidate_id[value]
+                            for value in lineage[1:]
+                            if value in path_to_candidate_id
+                        )
+                    )
                 next_cached_evaluations.extend([None] * len(new_lineages))
             if not (
                 len(next_manipulators)
                 == len(next_structures)
                 == len(next_lineages)
+                == len(next_retention_lineages)
                 == self.population_size
             ):
                 raise GBMinimizerError(
@@ -2214,10 +2660,15 @@ class GeneticAlgorithmMinimizer:
             population_manipulators = next_manipulators
             population_structures = next_structures
             population_lineages = next_lineages
+            population_retention_lineages = next_retention_lineages
             population_cached_evaluations = next_cached_evaluations
 
             is_final_gen = gen == self.generations - 1
-            if checkpoint.enabled and (checkpoint.is_due(gen + 1) or is_final_gen):
+            committed = checkpoint.enabled and (
+                checkpoint.is_due(gen + 1) or is_final_gen
+            )
+            archive_evictions: list[str] = []
+            if committed:
                 new_snapshots = self._write_owned_population_checkpoint(
                     checkpoint_file,
                     str(unique_id),
@@ -2226,17 +2677,78 @@ class GeneticAlgorithmMinimizer:
                     population_structures,
                 )
                 population_snapshots = new_snapshots
+                population_cached_evaluations = self._rebase_owned_carryover_cache(
+                    population_cached_evaluations,
+                    new_snapshots,
+                    population_manipulators,
+                )
+                if self.artifact_store is not None:
+                    for artifact in self.artifact_store.records():
+                        self.artifact_store.release_pin(
+                            artifact.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
+                        )
+                    records_by_id = {
+                        record.candidate_id: record
+                        for record in records
+                        if record.success
+                    }
+                    records_by_id[best_record.candidate_id] = best_record
+                    archive_root = self._owned_archive_root(
+                        checkpoint_file, str(unique_id)
+                    )
+                    archive_evictions = self._prepare_owned_archive_state(
+                        records_by_id, archive_root
+                    )
+                    best_archive = self.artifact_store.archive_path(
+                        best_record.candidate_id
+                    )
+                    if best_archive is None or best_record.mapping is None:
+                        raise GBMinimizerError(
+                            "current best candidate lacks a durable archive"
+                        )
+                    # pyraisecontract: ignore=DOC115[TypeError]
+                    #   BEST_RESULT archives are normalized to string paths by the
+                    #   artifact store, and best_record is a validated successful result.
+                    best_record = self._rebase_owned_evaluation(
+                        best_record,
+                        structure_path=best_archive,
+                        mapping=best_record.mapping,
+                        manipulator=best_record.manipulator,
+                    )
+                    self.best_evaluation = best_record
                 try:
                     checkpoint.save_final(_build_owned_state(gen))
                 except CheckpointError as exc:
                     raise GBMinimizerError(str(exc)) from exc
                 for path in current_pending:
-                    Path(path).unlink(missing_ok=True)
+                    try:
+                        Path(path).unlink(missing_ok=True)
+                    except OSError as exc:
+                        warnings.warn(
+                            f"Artifact cleanup failed for {path}: {exc}",
+                            RuntimeWarning,
+                            stacklevel=2,
+                        )
 
             # Candidate sidecars are transient once the generation boundary is safely
             # represented by the main checkpoint (or checkpointing is disabled).
             if gen_checkpoint is not None:
-                gen_checkpoint.delete()
+                try:
+                    gen_checkpoint.delete()
+                except OSError as exc:
+                    warnings.warn(
+                        f"Candidate-sidecar cleanup failed: {exc}",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                if self.artifact_store is not None and not committed:
+                    for record in records:
+                        if record.success and record.candidate_id in self.artifact_store:
+                            self.artifact_store.release_pin(
+                                record.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
+                            )
+            if committed and self.artifact_store is not None:
+                self._cleanup_committed_owned_artifacts(archive_evictions)
 
         self.best_evaluation = best_record
         return best_record.energy, str(best_record.structure_path)

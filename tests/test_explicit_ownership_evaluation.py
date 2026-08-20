@@ -114,6 +114,18 @@ def test_candidate_evaluation_normalizes_python_scalar_fields():
     ("kwargs", "error", "match"),
     [
         pytest.param(
+            {"candidate_id": ""},
+            TypeError,
+            "candidate_id must be a non-empty string",
+            id="empty-candidate-id",
+        ),
+        pytest.param(
+            {"candidate_id": None},
+            TypeError,
+            "candidate_id must be a non-empty string",
+            id="non-string-candidate-id",
+        ),
+        pytest.param(
             {"input_index": True},
             TypeError,
             "input_index must be a non-Boolean integer",

@@ -12,6 +12,7 @@ import numpy as np
 import pytest
 
 from GBOpt.BoundarySpec import CSLExactSpec
+from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
@@ -1664,6 +1665,7 @@ def _make_owned_checkpoint_minimizer(
     reuse_carryover_evaluations=False,
     allow_variable_cell=False,
     batch_energy=None,
+    retention_policy=None,
 ):
     gb, seed_path, ownership, _labels = owned_ga
     return GeneticAlgorithmMinimizer(
@@ -1681,6 +1683,7 @@ def _make_owned_checkpoint_minimizer(
         slice_and_merge_pct=slice_and_merge_pct,
         reuse_carryover_evaluations=reuse_carryover_evaluations,
         gb_batch_energy_func=batch_energy,
+        retention_policy=retention_policy,
     )
 
 
@@ -2426,3 +2429,423 @@ def test_mutator_fails_when_all_mutations_are_infeasible():
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _objective_retention_policy(*, count=1, prune=True):
+    return ArtifactRetentionPolicy(
+        rules=(
+            KeepBest(
+                name="objective_elite",
+                property="objective",
+                direction="min",
+                count=count,
+            ),
+        ),
+        prune=prune,
+    )
+
+
+def test_owned_retention_prunes_sources_only_after_checkpoint_commit(owned_ga, tmp_path):
+    checkpoint = tmp_path / "retained.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(),
+    )
+
+    _energy, best_path = minimizer.run_GA(unique_id=301, checkpoint_file=checkpoint)
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    store_state = state["state"]["artifact_store"]
+    assert store_state["policy_signature"] == minimizer.retention_policy.signature
+    assert state["state"]["last_generation_evaluations"]
+    assert all(
+        "structure_path" not in summary and "mapping" not in summary
+        for summary in state["state"]["last_generation_evaluations"]
+    )
+    assert Path(best_path).is_file()
+    assert Path(best_path).parent == checkpoint.with_suffix(".artifacts") / "structures"
+    assert len(list(tmp_path.glob("*.owned.pending"))) == minimizer.population_size
+
+    records = store_state["records"]
+    assert records
+    assert any(record["retention_reasons"] for record in records)
+    assert any("best_result" in record["pins"] for record in records)
+    for record in records:
+        source_path = record["source_path"]
+        if source_path is not None:
+            assert not Path(source_path).exists()
+        archive_path = record["archive_path"]
+        if archive_path is not None:
+            assert Path(archive_path).is_file()
+
+
+def test_owned_retention_archive_preserves_explicit_reconstruction_metadata(
+    owned_ga,
+    tmp_path,
+):
+    checkpoint = tmp_path / "ownership-retained.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+
+    _energy, best_path = minimizer.run_GA(unique_id=302, checkpoint_file=checkpoint)
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    best_state = state["state"]["best_evaluation"]
+    candidate_id = best_state["candidate_id"]
+    assert candidate_id in state["state"]["retention_archive_mappings"]
+    assert best_state["structure_path"] == best_path
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+    resumed.run_GA(unique_id=302, checkpoint_file=checkpoint)
+    restored = resumed.best_evaluation.manipulator.parents[0]
+    np.testing.assert_array_equal(restored.grain_labels, owned_ga[3])
+    assert restored.gb_plane_x == pytest.approx(best_state["mapping"]["gb_plane_x"])
+
+
+def test_owned_retention_property_provider_receives_relaxed_candidate_state(
+    owned_ga,
+    tmp_path,
+):
+    observed = []
+
+    def provider(context):
+        observed.append((context.candidate_id, context.atoms.flags.writeable))
+        return {"x_mean": float(np.mean(context.atoms["x"]))}
+
+    policy = ArtifactRetentionPolicy(
+        rules=(
+            KeepBest(
+                name="lowest_x_mean",
+                property="x_mean",
+                direction="min",
+                count=1,
+            ),
+        ),
+        property_provider=provider,
+        property_provider_version="1",
+        prune=False,
+    )
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=policy,
+    )
+
+    minimizer.run_GA(unique_id=303, checkpoint_file=tmp_path / "provider.json")
+
+    assert observed[0][0] == "GA_initial303"
+    assert any(candidate_id.startswith("GA_303_g0_c") for candidate_id, _ in observed)
+    assert all(writeable is False for _candidate_id, writeable in observed)
+
+
+def test_owned_retention_policy_mismatch_on_resume_fails_explicitly(owned_ga, tmp_path):
+    checkpoint = tmp_path / "policy-mismatch.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(count=1),
+    )
+    partial.run_GA(unique_id=304, checkpoint_file=checkpoint)
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=2,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(count=2),
+    )
+
+    with pytest.raises(GBMinimizerError, match="policy signature mismatch"):
+        resumed.run_GA(unique_id=304, checkpoint_file=checkpoint)
+
+
+def test_owned_retention_checkpoint_contains_no_callback_object(owned_ga, tmp_path):
+    def provider(context):
+        return {"x_mean": float(np.mean(context.atoms["x"]))}
+
+    policy = ArtifactRetentionPolicy(
+        rules=(
+            KeepBest(
+                name="lowest_x_mean",
+                property="x_mean",
+                direction="min",
+                count=1,
+            ),
+        ),
+        property_provider=provider,
+        property_provider_version="callback-v1",
+        prune=False,
+    )
+    checkpoint = tmp_path / "callback.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=policy,
+    )
+
+    minimizer.run_GA(unique_id=305, checkpoint_file=checkpoint)
+
+    text = checkpoint.read_text(encoding="utf-8")
+    state = json.loads(text)
+    assert "function provider" not in text
+    assert state["state"]["artifact_store"]["policy_signature"] == policy.signature
+
+
+def test_owned_carryover_cache_is_rebased_before_source_pruning(owned_ga, tmp_path):
+    checkpoint = tmp_path / "rebased-cache.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(),
+    )
+    partial.run_GA(unique_id=306, checkpoint_file=checkpoint)
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    cached = [
+        item
+        for item in state["state"]["population_cached_evaluations"]
+        if item is not None
+    ]
+    assert len(cached) == 1
+    assert cached[0]["structure_path"].endswith(".owned.pending")
+    assert Path(cached[0]["structure_path"]).is_file()
+    for record in state["state"]["artifact_store"]["records"]:
+        if record["source_path"] is not None:
+            assert not Path(record["source_path"]).exists()
+
+    resumed_ids = []
+    energy = _owned_checkpoint_energy(tmp_path)
+
+    def tracking_energy(GB, manipulator, atom_positions, unique_id):
+        resumed_ids.append(str(unique_id))
+        return energy(GB, manipulator, atom_positions, unique_id)
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        tracking_energy,
+        generations=2,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(),
+    )
+    resumed.run_GA(unique_id=306, checkpoint_file=checkpoint)
+
+    assert "GA_306_g1_c0" not in resumed_ids
+
+
+def test_owned_pruning_requires_durable_checkpoint(owned_ga, tmp_path):
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+
+    with pytest.raises(GBMinimizerValueError, match="requires checkpoint_file"):
+        minimizer.run_GA(unique_id=307)
+
+
+
+def test_owned_retention_none_preserves_evaluator_sources(owned_ga, tmp_path):
+    checkpoint = tmp_path / "keep-all.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=None,
+    )
+
+    _energy, best_path = minimizer.run_GA(unique_id=309, checkpoint_file=checkpoint)
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert state["state"]["artifact_store"] is None
+    assert Path(best_path).parent == tmp_path
+    assert not checkpoint.with_suffix(".artifacts").exists()
+    evaluator_sources = sorted(tmp_path.glob("GA_*.data"))
+    assert evaluator_sources
+    assert all(path.is_file() for path in evaluator_sources)
+
+
+def test_owned_prune_resume_matches_continuous_run(owned_ga, tmp_path):
+    continuous_dir = tmp_path / "continuous-retention"
+    resumed_dir = tmp_path / "resumed-retention"
+    continuous_dir.mkdir()
+    resumed_dir.mkdir()
+
+    continuous_checkpoint = continuous_dir / "run.json"
+    continuous = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(continuous_dir),
+        generations=3,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(count=2),
+    )
+    continuous_energy, _continuous_best_path = continuous.run_GA(
+        unique_id=310,
+        checkpoint_file=continuous_checkpoint,
+    )
+
+    resumed_checkpoint = resumed_dir / "run.json"
+    partial = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(resumed_dir),
+        generations=1,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(count=2),
+    )
+    partial.run_GA(unique_id=310, checkpoint_file=resumed_checkpoint)
+    partial_state = json.loads(resumed_checkpoint.read_text(encoding="utf-8"))
+    assert all(
+        record["source_path"] is None or not Path(record["source_path"]).exists()
+        for record in partial_state["state"]["artifact_store"]["records"]
+    )
+
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(resumed_dir),
+        generations=3,
+        population_size=4,
+        keep_top_pct=25,
+        reuse_carryover_evaluations=True,
+        retention_policy=_objective_retention_policy(count=2),
+    )
+    resumed_energy, _resumed_best_path = resumed.run_GA(
+        unique_id=310,
+        checkpoint_file=resumed_checkpoint,
+    )
+
+    assert resumed_energy == pytest.approx(continuous_energy)
+    assert len(resumed.GBE_vals) == len(continuous.GBE_vals)
+    for expected, actual in zip(continuous.GBE_vals, resumed.GBE_vals, strict=True):
+        np.testing.assert_allclose(actual, expected)
+
+    continuous_state = json.loads(continuous_checkpoint.read_text(encoding="utf-8"))[
+        "state"
+    ]
+    resumed_state = json.loads(resumed_checkpoint.read_text(encoding="utf-8"))["state"]
+    assert resumed_state["population_retention_lineages"] == continuous_state[
+        "population_retention_lineages"
+    ]
+    assert resumed_state["last_generation_evaluations"] == continuous_state[
+        "last_generation_evaluations"
+    ]
+    assert resumed_state["best_evaluation"]["candidate_id"] == continuous_state[
+        "best_evaluation"
+    ]["candidate_id"]
+    assert resumed_state["best_evaluation"]["energy"] == pytest.approx(
+        continuous_state["best_evaluation"]["energy"]
+    )
+
+    def normalized_store_records(state):
+        return [
+            {
+                "candidate": record["candidate"],
+                "pins": record["pins"],
+                "retention_reasons": record["retention_reasons"],
+                "has_archive": record["archive_path"] is not None,
+            }
+            for record in state["artifact_store"]["records"]
+        ]
+
+    assert normalized_store_records(resumed_state) == normalized_store_records(
+        continuous_state
+    )
+    retained_ids = {
+        record["candidate"]["candidate_id"]
+        for record in resumed_state["artifact_store"]["records"]
+        if record["archive_path"] is not None
+    }
+    assert retained_ids == {
+        record["candidate"]["candidate_id"]
+        for record in continuous_state["artifact_store"]["records"]
+        if record["archive_path"] is not None
+    }
+    assert retained_ids
+    assert all(
+        Path(record["archive_path"]).is_file()
+        for record in resumed_state["artifact_store"]["records"]
+        if record["archive_path"] is not None
+    )
+
+def test_owned_cleanup_failure_leaks_source_but_checkpoint_remains_resumable(
+    owned_ga,
+    tmp_path,
+    monkeypatch,
+):
+    checkpoint = tmp_path / "cleanup-failure.json"
+    original_unlink = Path.unlink
+
+    def fail_evaluator_source_unlink(path, *args, **kwargs):
+        if (
+            path.suffix == ".data"
+            and path.parent == tmp_path
+            and path.name.startswith("GA_")
+        ):
+            raise OSError("simulated source cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=1,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+    with monkeypatch.context() as patch_context:
+        patch_context.setattr(Path, "unlink", fail_evaluator_source_unlink)
+        with pytest.warns(RuntimeWarning, match="Artifact cleanup failed"):
+            minimizer.run_GA(unique_id=308, checkpoint_file=checkpoint)
+
+    assert checkpoint.is_file()
+    resumed = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        _owned_checkpoint_energy(tmp_path),
+        generations=2,
+        population_size=2,
+        keep_top_pct=50,
+        retention_policy=_objective_retention_policy(),
+    )
+    resumed.run_GA(unique_id=308, checkpoint_file=checkpoint)
+    assert len(resumed.history) == 2
