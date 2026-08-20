@@ -14,30 +14,106 @@ from uuid import UUID
 
 import numpy as np
 
+from GBOpt._candidate_admissibility import (
+    CandidateAdmissibilityError,
+    validate_formula_composition,
+)
+from GBOpt.Checkpoint import CandidateCheckpoint
 from GBOpt.FileGrainOwnership import (
     CandidateFileMapping,
     GrainOwnershipError,
     LammpsDataError,
     reload_explicit_manipulator,
 )
-from GBOpt.Checkpoint import CandidateCheckpoint, CheckpointError
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import GBManipulator, GBManipulatorError, ParentError
-from GBOpt._candidate_admissibility import (
-    CandidateAdmissibilityError,
-    validate_formula_composition,
-)
 
 _MISSING = object()
+
+
+def _normalize_candidate_id(candidate_id: object) -> str:
+    """Validate one stable candidate identity.
+
+    :param candidate_id: Candidate identity to validate.
+    :return: Validated non-empty identity.
+    :raises TypeError: If ``candidate_id`` is not a non-empty string.
+    """
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise TypeError("candidate_id must be a non-empty string")
+    return candidate_id
+
+
+def _normalize_input_index(input_index: object) -> int:
+    """Normalize one candidate population index.
+
+    :param input_index: Candidate position to normalize.
+    :return: Python integer candidate index.
+    :raises TypeError: If ``input_index`` is Boolean or non-integral.
+    """
+    if isinstance(input_index, (bool, np.bool_)) or not isinstance(
+        input_index, Integral
+    ):
+        raise TypeError("input_index must be a non-Boolean integer")
+    return int(input_index)
+
+
+def _normalize_objective(objective: object) -> float:
+    """Normalize one finite candidate objective.
+
+    :param objective: Candidate objective to normalize.
+    :return: Finite Python float.
+    :raises TypeError: If ``objective`` is Boolean or non-real.
+    :raises ValueError: If ``objective`` is non-finite.
+    """
+    if isinstance(objective, (bool, np.bool_)) or not isinstance(objective, Real):
+        raise TypeError("objective must be a non-Boolean real scalar")
+    normalized = float(objective)
+    if not np.isfinite(normalized):
+        raise ValueError("objective must be finite")
+    return normalized
+
+
+def _validate_success(success: object) -> bool:
+    """Validate one evaluation success flag.
+
+    :param success: Candidate success flag.
+    :return: Validated Python Boolean.
+    :raises TypeError: If ``success`` is not exactly a Python ``bool``.
+    """
+    if type(success) is not bool:
+        raise TypeError("success must be a bool")
+    return success
+
+
+def _validate_failure_reason(
+    success: bool,
+    failure_reason: object,
+    *,
+    context: str,
+) -> None:
+    """Validate failure context for one evaluation-like result.
+
+    :param success: Whether the result succeeded.
+    :param failure_reason: Failure diagnostic supplied with the result.
+    :param context: Keyword argument, required. Result noun used in diagnostics.
+    :raises ValueError: If failure context conflicts with ``success``.
+    """
+    if success:
+        if failure_reason is not None:
+            raise ValueError(f"successful {context} must not include a failure reason")
+        return
+    if not isinstance(failure_reason, str) or not failure_reason:
+        raise ValueError(f"failed {context} requires a failure reason")
 
 
 @dataclass(frozen=True, slots=True)
 class CandidateEvaluation:
     """Aligned result for one explicit-ownership candidate evaluation.
 
-    :param candidate_id: Stable logical candidate identity independent of artifact paths.
+    :param candidate_id: Stable logical candidate identity independent of artifact
+        paths.
     :param input_index: Candidate position in the submitted population.
-    :param energy: Normalized finite energy, or the optimizer-supplied penalty on
+    :param objective: Normalized finite objective, or the optimizer-supplied penalty on
         failure.
     :param structure_path: Canonical evaluator artifact path, when available.
     :param mapping: Candidate-to-file ownership mapping, when available.
@@ -45,13 +121,13 @@ class CandidateEvaluation:
     :param success: Whether evaluation and reconstruction both succeeded.
     :param failure_reason: Failure context when ``success`` is false.
     :raises TypeError: If scalar or path fields have invalid types.
-    :raises ValueError: If energy is non-finite or success/failure fields are
+    :raises ValueError: If objective is non-finite or success/failure fields are
         internally inconsistent.
     """
 
     candidate_id: str
     input_index: int
-    energy: float
+    objective: float
     structure_path: str | None
     mapping: CandidateFileMapping | None
     manipulator: GBManipulator | None
@@ -62,24 +138,13 @@ class CandidateEvaluation:
         """Normalize scalar fields and enforce coherent result state.
 
         :raises TypeError: If scalar or path fields have invalid types.
-        :raises ValueError: If energy is non-finite or success/failure fields are
+        :raises ValueError: If objective is non-finite or success/failure fields are
             internally inconsistent.
         """
-        if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
-            raise TypeError("candidate_id must be a non-empty string")
-        if isinstance(self.input_index, (bool, np.bool_)) or not isinstance(
-            self.input_index, Integral
-        ):
-            raise TypeError("input_index must be a non-Boolean integer")
-        if isinstance(self.energy, (bool, np.bool_)) or not isinstance(
-            self.energy, Real
-        ):
-            raise TypeError("energy must be a non-Boolean real scalar")
-        energy = float(self.energy)
-        if not np.isfinite(energy):
-            raise ValueError("energy must be finite")
-        if type(self.success) is not bool:
-            raise TypeError("success must be a bool")
+        candidate_id = _normalize_candidate_id(self.candidate_id)
+        input_index = _normalize_input_index(self.input_index)
+        objective = _normalize_objective(self.objective)
+        success = _validate_success(self.success)
 
         structure_path = self.structure_path
         if structure_path is not None:
@@ -87,12 +152,12 @@ class CandidateEvaluation:
                 raise TypeError("structure_path must be a path-like string or None")
             structure_path = str(structure_path)
 
-        object.__setattr__(self, "candidate_id", self.candidate_id)
-        object.__setattr__(self, "input_index", int(self.input_index))
-        object.__setattr__(self, "energy", energy)
+        object.__setattr__(self, "candidate_id", candidate_id)
+        object.__setattr__(self, "input_index", input_index)
+        object.__setattr__(self, "objective", objective)
         object.__setattr__(self, "structure_path", structure_path)
 
-        if self.success:
+        if success:
             if (
                 structure_path is None
                 or self.mapping is None
@@ -102,14 +167,10 @@ class CandidateEvaluation:
                     "successful evaluation requires a structure path, mapping, and "
                     "manipulator"
                 )
-            if self.failure_reason is not None:
-                raise ValueError(
-                    "successful evaluation must not include a failure reason"
-                )
+            _validate_failure_reason(success, self.failure_reason, context="evaluation")
             return
 
-        if not isinstance(self.failure_reason, str) or not self.failure_reason:
-            raise ValueError("failed evaluation requires a failure reason")
+        _validate_failure_reason(success, self.failure_reason, context="evaluation")
         if self.manipulator is not None:
             raise ValueError("failed evaluation must not include a manipulator")
 
@@ -120,48 +181,40 @@ class CandidateEvaluationSummary:
 
     :param candidate_id: Stable logical candidate identity.
     :param input_index: Candidate position in the submitted population.
-    :param energy: Normalized finite objective value or failure penalty.
+    :param objective: Normalized finite objective value or failure penalty.
     :param success: Whether evaluation and explicit reconstruction succeeded.
     :param failure_reason: Failure context when ``success`` is false.
-    :raises TypeError: If identity, index, energy, or success has an invalid type.
-    :raises ValueError: If energy is non-finite or failure context is inconsistent.
+    :raises TypeError: If identity, index, objective, or success has an invalid type.
+    :raises ValueError: If objective is non-finite or failure context is inconsistent.
     """
 
     candidate_id: str
     input_index: int
-    energy: float
+    objective: float
     success: bool
     failure_reason: str | None = None
 
     def __post_init__(self) -> None:
         """Validate summary state independently of any filesystem artifact.
 
-        :raises TypeError: If identity, index, energy, or success has an invalid type.
-        :raises ValueError: If energy is non-finite or failure context is inconsistent.
+        :raises TypeError: If identity, index, objective, or success has an invalid
+            type.
+        :raises ValueError: If objective is non-finite or failure context is
+            inconsistent.
         """
-        if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
-            raise TypeError("candidate_id must be a non-empty string")
-        if isinstance(self.input_index, (bool, np.bool_)) or not isinstance(
-            self.input_index, Integral
-        ):
-            raise TypeError("input_index must be a non-Boolean integer")
-        if isinstance(self.energy, (bool, np.bool_)) or not isinstance(self.energy, Real):
-            raise TypeError("energy must be a non-Boolean real scalar")
-        energy = float(self.energy)
-        if not np.isfinite(energy):
-            raise ValueError("energy must be finite")
-        if type(self.success) is not bool:
-            raise TypeError("success must be a bool")
-        if self.success:
-            if self.failure_reason is not None:
-                raise ValueError("successful summary must not include a failure reason")
-        elif not isinstance(self.failure_reason, str) or not self.failure_reason:
-            raise ValueError("failed summary requires a failure reason")
-        object.__setattr__(self, "input_index", int(self.input_index))
-        object.__setattr__(self, "energy", energy)
+        candidate_id = _normalize_candidate_id(self.candidate_id)
+        input_index = _normalize_input_index(self.input_index)
+        objective = _normalize_objective(self.objective)
+        success = _validate_success(self.success)
+        _validate_failure_reason(success, self.failure_reason, context="summary")
+        object.__setattr__(self, "candidate_id", candidate_id)
+        object.__setattr__(self, "input_index", input_index)
+        object.__setattr__(self, "objective", objective)
 
     @classmethod
-    def from_evaluation(cls, record: CandidateEvaluation) -> "CandidateEvaluationSummary":
+    def from_evaluation(
+        cls, record: CandidateEvaluation
+    ) -> "CandidateEvaluationSummary":
         """Create a summary from one typed evaluation.
 
         :param record: Explicit-ownership evaluation to summarize.
@@ -170,26 +223,23 @@ class CandidateEvaluationSummary:
         """
         if not isinstance(record, CandidateEvaluation):
             raise TypeError("record must be a CandidateEvaluation")
-        # pyraisecontract: ignore=DOC115[ValueError]
-        #   CandidateEvaluation has already enforced the same finite-energy and
-        #   success/failure coherence required by CandidateEvaluationSummary.
+        # pyraisecontract: ignore=DOC115[ValueError] CandidateEvaluation has already
+        #   enforced the same finite-objective and success/failure coherence required by
+        #   CandidateEvaluationSummary.
         return cls(
             candidate_id=record.candidate_id,
             input_index=record.input_index,
-            energy=record.energy,
+            objective=record.objective,
             success=record.success,
             failure_reason=record.failure_reason,
         )
 
     def to_state(self) -> dict[str, object]:
-        """Return deterministic JSON-safe summary state.
-
-        :return: Historical evaluation state without paths or reconstruction objects.
-        """
+        """Return deterministic JSON-safe summary state."""
         return {
             "candidate_id": self.candidate_id,
             "input_index": self.input_index,
-            "energy": self.energy,
+            "objective": self.objective,
             "success": self.success,
             "failure_reason": self.failure_reason,
         }
@@ -209,7 +259,7 @@ class CandidateEvaluationSummary:
         return cls(
             candidate_id=state["candidate_id"],
             input_index=state["input_index"],
-            energy=state["energy"],
+            objective=state["objective"],
             success=state["success"],
             failure_reason=state.get("failure_reason"),
         )
@@ -223,7 +273,7 @@ class ExplicitOwnershipEvaluator:
     :param batch_energy_func: Optional ordered batch evaluator callback.
     :param local_random: Optimizer-owned random-number generator.
     :param allow_variable_cell: Allow validated orthogonal variable-cell relaxation.
-    :param penalty: Energy assigned to failed calculations.
+    :param penalty: Objective value assigned to failed calculations.
     """
 
     def __init__(
@@ -245,8 +295,8 @@ class ExplicitOwnershipEvaluator:
             callback; may be ``None``.
         :param local_random: Keyword argument, required. Optimizer-owned random-number
             generator.
-        :param penalty: Keyword argument, required. Optimizer-owned energy assigned to
-            failed calculations.
+        :param penalty: Keyword argument, required. Optimizer-owned objective value
+            assigned to failed calculations.
         :param allow_variable_cell: Keyword argument, optional, defaults to ``False``.
             Allow validated orthogonal evaluator-returned box relaxation.
         :raises TypeError: If a callback, random generator, penalty, or Boolean option
@@ -356,12 +406,13 @@ class ExplicitOwnershipEvaluator:
             supplied when available from the evaluator.
         :return: Failed evaluation carrying both penalty and failure context.
         :raises TypeError: If candidate identity, input index, or path state is invalid.
-        :raises ValueError: If candidate identity, energy, or failure state is inconsistent.
+        :raises ValueError: If candidate identity, objective, or failure state is
+            inconsistent.
         """
         return CandidateEvaluation(
             candidate_id=candidate_id,
             input_index=input_index,
-            energy=self.penalty,
+            objective=self.penalty,
             structure_path=structure_path,
             mapping=mapping,
             manipulator=None,
@@ -370,20 +421,15 @@ class ExplicitOwnershipEvaluator:
         )
 
     @staticmethod
-    def _normalize_energy(energy: object) -> float:
-        """Normalize one evaluator energy.
+    def _normalize_objective(objective: object) -> float:
+        """Normalize one evaluator objective.
 
-        :param energy: Evaluator-returned energy value.
+        :param objective: Evaluator-returned objective value.
         :return: Finite Python float.
         :raises TypeError: If the value is Boolean or non-real.
         :raises ValueError: If the value is non-finite.
         """
-        if isinstance(energy, (bool, np.bool_)) or not isinstance(energy, Real):
-            raise TypeError("energy must be a non-Boolean real scalar")
-        normalized = float(energy)
-        if not np.isfinite(normalized):
-            raise ValueError("energy must be finite")
-        return normalized
+        return _normalize_objective(objective)
 
     @staticmethod
     def _diagnostic_path(structure_path: object) -> str | None:
@@ -447,32 +493,35 @@ class ExplicitOwnershipEvaluator:
         candidate_id: str,
         input_index: int,
         mapping: CandidateFileMapping,
-        energy: object = _MISSING,
+        objective: object = _MISSING,
         structure_path: object = _MISSING,
     ) -> CandidateEvaluation:
         """Normalize and validate one callback result.
 
-        Missing energy or structure output is treated as a failed calculation and
+        Missing objective or structure output is treated as a failed calculation and
         receives the optimizer penalty. Differentiating structural failures from other
         evaluator failures is intentionally deferred until evaluators expose a typed
         failure classification.
 
-        :param candidate_id: Keyword argument, required. Stable logical candidate identity.
-        :param input_index: Keyword argument, required. Candidate position in the submitted
-            population.
-        :param mapping: Keyword argument, required. Candidate/file mapping established before
-            evaluation.
-        :param energy: Keyword argument, optional, defaults to ``_MISSING``.
-            Evaluator-returned energy, or the internal missing sentinel.
+        :param candidate_id: Keyword argument, required. Stable logical candidate
+            identity.
+        :param input_index: Keyword argument, required. Candidate position in the
+            submitted population.
+        :param mapping: Keyword argument, required. Candidate/file mapping established
+            before evaluation.
+        :param objective: Keyword argument, optional, defaults to ``_MISSING``.
+            Evaluator-returned objective, or the internal missing sentinel.
         :param structure_path: Keyword argument, optional, defaults to ``_MISSING``.
             Evaluator-returned artifact path, or the internal missing sentinel.
         :return: Successful reconstructed evaluation or a penalty-bearing failure.
-        :raises TypeError: If candidate identity, input index, or result scalar state is invalid.
-        :raises ValueError: If candidate identity or result state is internally inconsistent.
+        :raises TypeError: If candidate identity, input index, or result scalar state is
+            invalid.
+        :raises ValueError: If candidate identity or result state is internally
+            inconsistent.
         """
         missing_fields = []
-        if energy is _MISSING or energy is None:
-            missing_fields.append("energy")
+        if objective is _MISSING or objective is None:
+            missing_fields.append("objective")
         if structure_path is _MISSING or structure_path is None:
             missing_fields.append("final_dump")
         try:
@@ -494,12 +543,12 @@ class ExplicitOwnershipEvaluator:
             )
 
         try:
-            numeric_energy = self._normalize_energy(energy)
+            numeric_objective = self._normalize_objective(objective)
         except (TypeError, ValueError) as exc:
             return self._failed_evaluation(
                 candidate_id,
                 input_index,
-                f"invalid energy: {exc}",
+                f"invalid objective: {exc}",
                 mapping,
                 diagnostic_path,
             )
@@ -525,7 +574,10 @@ class ExplicitOwnershipEvaluator:
             return self._failed_evaluation(
                 candidate_id,
                 input_index,
-                f"evaluator reused a structure path already assigned in this run: {path}",
+                (
+                    "evaluator reused a structure path already assigned in this run: "
+                    f"{path}"
+                ),
                 mapping,
                 diagnostic_path,
             )
@@ -549,7 +601,7 @@ class ExplicitOwnershipEvaluator:
         return CandidateEvaluation(
             candidate_id=candidate_id,
             input_index=input_index,
-            energy=numeric_energy,
+            objective=numeric_objective,
             structure_path=diagnostic_path,
             mapping=mapping,
             manipulator=manipulator,
@@ -587,11 +639,12 @@ class ExplicitOwnershipEvaluator:
         :param input_index: Candidate position in population order.
         :param mapping: Fresh candidate-local ownership mapping.
         :return: Restored aligned candidate evaluation.
-        :raises TypeError: If checkpointed candidate identity or scalar state has an invalid type.
+        :raises TypeError: If checkpointed candidate identity or scalar state has an
+            invalid type.
         :raises ValueError: If checkpointed candidate state is internally inconsistent.
         :raises CheckpointError: If the recorded candidate result is unavailable.
         """
-        energy, structure_path = checkpoint.get_result(unique_id)
+        objective, structure_path = checkpoint.get_result(unique_id)
         metadata = checkpoint.get_metadata(unique_id)
         if (
             metadata is not None
@@ -612,7 +665,7 @@ class ExplicitOwnershipEvaluator:
             candidate_id=unique_id,
             input_index=input_index,
             mapping=mapping,
-            energy=energy,
+            objective=objective,
             structure_path=structure_path,
         )
 
@@ -624,7 +677,8 @@ class ExplicitOwnershipEvaluator:
     ) -> None:
         """Persist one validated owned evaluation when checkpointing is enabled.
 
-        :param checkpoint: Candidate sidecar, or ``None`` when checkpointing is disabled.
+        :param checkpoint: Candidate sidecar, or ``None`` when checkpointing is
+            disabled.
         :param unique_id: Candidate identifier in the checkpoint.
         :param record: Validated explicit-ownership evaluation.
         :raises CheckpointError: If the sidecar cannot be persisted.
@@ -633,7 +687,7 @@ class ExplicitOwnershipEvaluator:
             return
         checkpoint.record(
             unique_id,
-            record.energy,
+            record.objective,
             record.structure_path,
             metadata=ExplicitOwnershipEvaluator._checkpoint_metadata(record),
         )
@@ -652,8 +706,10 @@ class ExplicitOwnershipEvaluator:
         :param unique_id: Evaluator invocation identifier.
         :param input_index: Candidate position in the population.
         :return: Normalized candidate evaluation.
-        :raises TypeError: If candidate identity, index, or normalized result state has an invalid type.
-        :raises ValueError: If normalized candidate result state is internally inconsistent.
+        :raises TypeError: If candidate identity, index, or normalized result state has
+            an invalid type.
+        :raises ValueError: If normalized candidate result state is internally
+            inconsistent.
         """
         try:
             mapping = self._candidate_file_mapping(manipulator, atoms)
@@ -667,7 +723,7 @@ class ExplicitOwnershipEvaluator:
                 atoms,
                 unique_id,
             )
-            energy, structure_path = result
+            objective, structure_path = result
         except Exception as exc:
             # The external evaluator callback is a deliberate recovery boundary.
             return self._failed_evaluation(
@@ -681,7 +737,7 @@ class ExplicitOwnershipEvaluator:
             candidate_id=unique_id,
             input_index=input_index,
             mapping=mapping,
-            energy=energy,
+            objective=objective,
             structure_path=structure_path,
         )
 
@@ -709,11 +765,13 @@ class ExplicitOwnershipEvaluator:
             Successful evaluations aligned to unchanged carryover candidates. ``None``
             entries are evaluated normally.
         :return: One aligned typed evaluation per input candidate.
-        :raises TypeError: If candidate identity, index, or normalized result state has an invalid type.
-        :raises ValueError: If population arrays or batch results are not aligned, or
-            if a batch result is not a dictionary.
+        :raises TypeError: If candidate identity, index, or normalized result state has
+            an invalid type.
+        :raises ValueError: If population arrays or batch results are not aligned, or if
+            a batch result is not a dictionary.
         :raises RuntimeError: If an internal alignment invariant is lost.
-        :raises CheckpointError: If candidate checkpoint state cannot be read or written.
+        :raises CheckpointError: If candidate checkpoint state cannot be read or
+            written.
         """
         population_length = len(population_structures)
         if not (
@@ -722,8 +780,8 @@ class ExplicitOwnershipEvaluator:
             == population_length
         ):
             raise ValueError(
-                "explicit-ownership population manipulators, structures, and "
-                "lineages must remain index-aligned"
+                "explicit-ownership population manipulators, structures, and lineages "
+                "must remain index-aligned"
             )
         if cached_evaluations is None:
             cached_evaluations = [None] * population_length
@@ -754,22 +812,20 @@ class ExplicitOwnershipEvaluator:
                 )
             except GrainOwnershipError:
                 continue
-            # pyraisecontract: ignore=DOC115[TypeError]
-            #   Cached CandidateEvaluation instances were already type-validated; only
-            #   the population index changes here, and enumerate always supplies an int.
+            # pyraisecontract: ignore=DOC115[TypeError] Cached CandidateEvaluation
+            #   instances were already type-validated; only the population index changes
+            #   here, and enumerate always supplies an int.
             records[index] = CandidateEvaluation(
                 candidate_id=cached.candidate_id,
                 input_index=index,
-                energy=cached.energy,
+                objective=cached.objective,
                 structure_path=cached.structure_path,
                 mapping=mapping,
                 manipulator=population_manipulators[index],
                 success=True,
             )
 
-        unique_ids = [
-            f"GA_{unique_id}_g{gen}_c{i}" for i in range(population_length)
-        ]
+        unique_ids = [f"GA_{unique_id}_g{gen}_c{i}" for i in range(population_length)]
         if self.batch_energy_func is None:
             for index, (manipulator, atoms, candidate_id) in enumerate(
                 zip(population_manipulators, population_structures, unique_ids)
@@ -781,9 +837,8 @@ class ExplicitOwnershipEvaluator:
                 except GrainOwnershipError as exc:
                     record = self._failed_evaluation(candidate_id, index, str(exc))
                 else:
-                    if (
-                        gen_checkpoint is not None
-                        and gen_checkpoint.is_done(candidate_id)
+                    if gen_checkpoint is not None and gen_checkpoint.is_done(
+                        candidate_id
                     ):
                         record = self._restore_checkpointed_result(
                             gen_checkpoint,
@@ -816,7 +871,9 @@ class ExplicitOwnershipEvaluator:
             try:
                 mapping = self._candidate_file_mapping(manipulator, atoms)
             except GrainOwnershipError as exc:
-                records[index] = self._failed_evaluation(unique_ids[index], index, str(exc))
+                records[index] = self._failed_evaluation(
+                    unique_ids[index], index, str(exc)
+                )
                 continue
             valid_indices.append(index)
             valid_mappings.append(mapping)
@@ -828,7 +885,9 @@ class ExplicitOwnershipEvaluator:
                 if gen_checkpoint is None
                 or not gen_checkpoint.is_done(unique_ids[input_index])
             ]
-            pending_indices = [valid_indices[position] for position in pending_positions]
+            pending_indices = [
+                valid_indices[position] for position in pending_positions
+            ]
             pending_mappings = [
                 valid_mappings[position] for position in pending_positions
             ]
@@ -882,7 +941,7 @@ class ExplicitOwnershipEvaluator:
                         candidate_id=unique_ids[input_index],
                         input_index=input_index,
                         mapping=mapping,
-                        energy=result.get("energy", _MISSING),
+                        objective=result.get("energy", _MISSING),
                         structure_path=result.get("final_dump", _MISSING),
                     )
                     records[input_index] = record

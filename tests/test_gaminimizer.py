@@ -11,8 +11,8 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.artifacts import ArtifactRetentionPolicy, KeepBest, remove_managed_path
+from GBOpt.BoundarySpec import CSLExactSpec
 from GBOpt.Checkpoint import CheckpointStore
 from GBOpt.GBMaker import GBMaker
 from GBOpt.GBManipulator import (
@@ -32,6 +32,8 @@ from GBOpt.GrainOwnership import (
     RIGHT_GRAIN_LABEL,
     GrainOwnership,
 )
+
+_TEST_CALCULATION_CONTEXT = {"calculator": {"name": "test-evaluator"}}
 
 
 pytestmark = pytest.mark.filterwarnings(
@@ -1209,7 +1211,7 @@ def test_owned_evaluator_rejects_inadmissible_candidate_before_callback(owned_ga
 
     assert callback_calls == 0
     assert not record.success
-    assert record.energy == pytest.approx(1.0e30)
+    assert record.objective == pytest.approx(1.0e30)
     assert "composition is inadmissible" in record.failure_reason
 
 
@@ -1468,7 +1470,7 @@ def test_owned_scalar_evaluator_species_swap_is_failed(owned_ga, tmp_path):
 
     failed, valid = minimizer.last_generation_evaluations
     assert not failed.success
-    assert failed.energy == pytest.approx(1.0e30)
+    assert failed.objective == pytest.approx(1.0e30)
     assert failed.manipulator is None
     assert "changed species" in failed.failure_reason
     assert valid.success
@@ -1523,10 +1525,10 @@ def test_owned_batch_evaluator_keeps_failure_alignment(owned_ga, tmp_path):
 
     assert [record.input_index for record in records] == [0, 1]
     assert not records[0].success
-    assert records[0].energy == pytest.approx(1.0e30)
+    assert records[0].objective == pytest.approx(1.0e30)
     assert records[0].manipulator is None
     assert records[1].success
-    assert records[1].energy == pytest.approx(2.0)
+    assert records[1].objective == pytest.approx(2.0)
     assert best_energy == pytest.approx(2.0)
 
 
@@ -1666,6 +1668,8 @@ def _make_owned_checkpoint_minimizer(
     allow_variable_cell=False,
     batch_energy=None,
     retention_policy=None,
+    calculation_context=None,
+    failure_diagnostic_count=3,
     managed_artifact_root=None,
     cleanup_candidate=None,
 ):
@@ -1677,6 +1681,12 @@ def _make_owned_checkpoint_minimizer(
         and retention_policy.prune
     ):
         managed_artifact_root = Path(seed_path).parent
+    if (
+        calculation_context is None
+        and retention_policy is not None
+        and retention_policy.prune
+    ):
+        calculation_context = _TEST_CALCULATION_CONTEXT
     return GeneticAlgorithmMinimizer(
         gb,
         energy,
@@ -1693,6 +1703,8 @@ def _make_owned_checkpoint_minimizer(
         reuse_carryover_evaluations=reuse_carryover_evaluations,
         gb_batch_energy_func=batch_energy,
         retention_policy=retention_policy,
+        calculation_context=calculation_context,
+        failure_diagnostic_count=failure_diagnostic_count,
         managed_artifact_root=managed_artifact_root,
         cleanup_candidate=cleanup_candidate,
     )
@@ -1832,7 +1844,7 @@ def test_owned_ga_checkpoint_json_contains_reconstruction_state(owned_ga, tmp_pa
 
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
     assert state["state"]["ga_mode"] == "explicit_ownership"
-    assert state["state"]["owned_checkpoint_version"] == 3
+    assert state["state"]["owned_checkpoint_version"] == 4
     assert state["run_params"]["crossover_surface"] == "periodic_wave"
     assert state["run_params"]["crossover_max_tilt_degrees"] == pytest.approx(5.0)
     assert state["run_params"]["crossover_attempts"] == 8
@@ -2473,6 +2485,24 @@ def test_owned_pruning_requires_explicit_cleanup_owner(owned_ga):
         )
 
 
+def test_owned_pruning_requires_calculation_context(owned_ga, tmp_path):
+    gb, seed_path, ownership, _labels = owned_ga
+
+    with pytest.raises(
+        GBMinimizerValueError,
+        match="requires a non-empty calculation_context",
+    ):
+        GeneticAlgorithmMinimizer(
+            gb,
+            lambda *_args: (0.0, str(seed_path)),
+            ["translate_right_grain"],
+            initial_structure=seed_path,
+            initial_ownership=ownership,
+            retention_policy=_objective_retention_policy(),
+            managed_artifact_root=tmp_path,
+        )
+
+
 def test_owned_cleanup_configuration_requires_pruning_policy(owned_ga, tmp_path):
     gb, seed_path, ownership, _labels = owned_ga
 
@@ -2581,6 +2611,7 @@ def test_owned_retention_writes_manifest_and_lifecycle_history(owned_ga, tmp_pat
     ]
     checkpoint_state = json.loads(checkpoint.read_text(encoding="utf-8"))["state"]
 
+    assert manifest["calculation_context"] == _TEST_CALCULATION_CONTEXT
     expected_ids = sorted(
         record["candidate"]["candidate_id"]
         for record in checkpoint_state["artifact_store"]["records"]
@@ -2628,7 +2659,95 @@ def test_owned_provenance_failure_does_not_invalidate_checkpoint(
 
     assert checkpoint.is_file()
     state = json.loads(checkpoint.read_text(encoding="utf-8"))
-    assert state["state"]["artifact_store"] is not None
+    store_state = state["state"]["artifact_store"]
+    assert store_state is not None
+    source_paths = [
+        record["source_path"]
+        for record in store_state["records"]
+        if record["source_path"] is not None
+    ]
+    assert source_paths
+    assert all(Path(path).exists() for path in source_paths)
+
+
+def test_owned_failed_evaluations_use_bounded_diagnostic_lifecycle(
+    owned_ga,
+    tmp_path,
+):
+    def scalar_energy(GB, manipulator, atom_positions, unique_id):
+        output = tmp_path / f"{unique_id}.data"
+        _write_owned_evaluator_output(
+            output,
+            atom_positions,
+            manipulator.parents[0].box_dims,
+        )
+        return 5.0, str(output)
+
+    failed_paths = []
+
+    def batch_energy(
+        GB, manipulators, structures, lineages, unique_ids, checkpoint=None
+    ):
+        results = []
+        for index, (manipulator, atoms, candidate_id) in enumerate(
+            zip(manipulators, structures, unique_ids, strict=True)
+        ):
+            output = tmp_path / f"{candidate_id}.data"
+            _write_owned_evaluator_output(
+                output,
+                atoms,
+                manipulator.parents[0].box_dims,
+                change_species_row=0 if index == 0 else None,
+            )
+            if index == 0:
+                failed_paths.append(output)
+            results.append(
+                {"energy": float(index + 1), "final_dump": str(output)}
+            )
+        return results
+
+    checkpoint = tmp_path / "failure-diagnostics.json"
+    minimizer = _make_owned_checkpoint_minimizer(
+        owned_ga,
+        scalar_energy,
+        generations=2,
+        population_size=2,
+        keep_top_pct=50,
+        batch_energy=batch_energy,
+        retention_policy=_objective_retention_policy(),
+        failure_diagnostic_count=1,
+    )
+
+    minimizer.run_GA(unique_id=315, checkpoint_file=checkpoint)
+
+    assert len(failed_paths) == 2
+    assert not failed_paths[0].exists()
+    assert failed_paths[1].is_file()
+
+    state = json.loads(checkpoint.read_text(encoding="utf-8"))["state"]
+    diagnostics = state["failure_diagnostics"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["candidate_id"] == "GA_315_g1_c0"
+    assert diagnostics[0]["source_path"] == str(failed_paths[1])
+
+    artifact_root = checkpoint.with_suffix(".artifacts")
+    manifest = json.loads((artifact_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["failure_diagnostics"] == diagnostics
+    history = [
+        json.loads(line)
+        for line in (artifact_root / "history.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    failed_events = [event for event in history if event["event"]
+                     == "evaluation_failed"]
+    assert {event["candidate_id"] for event in failed_events} == {
+        "GA_315_g0_c0",
+        "GA_315_g1_c0",
+    }
+    assert any(
+        event["event"] == "failure_diagnostic_pruned"
+        and event["candidate_id"] == "GA_315_g0_c0"
+        for event in history
+    )
 
 
 def test_owned_retention_archive_preserves_explicit_reconstruction_metadata(
@@ -2827,7 +2946,6 @@ def test_owned_pruning_requires_durable_checkpoint(owned_ga, tmp_path):
         minimizer.run_GA(unique_id=307)
 
 
-
 def test_owned_retention_none_preserves_evaluator_sources(owned_ga, tmp_path):
     checkpoint = tmp_path / "keep-all.json"
     minimizer = _make_owned_checkpoint_minimizer(
@@ -2954,6 +3072,7 @@ def test_owned_prune_resume_matches_continuous_run(owned_ga, tmp_path):
         for record in resumed_state["artifact_store"]["records"]
         if record["archive_path"] is not None
     )
+
 
 def test_owned_managed_root_rejects_evaluator_path_escape_without_invalidating_checkpoint(
     owned_ga,

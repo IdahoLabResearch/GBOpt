@@ -6,11 +6,11 @@ import numpy as np
 import pytest
 
 from GBOpt.artifacts.types import (
+    BUILTIN_PROPERTY_NAMES,
     ArtifactPin,
     ArtifactRecord,
     ArtifactStatus,
     ArtifactValueError,
-    BUILTIN_PROPERTY_NAMES,
     CandidatePropertyContext,
     RetentionCandidate,
     normalize_property_mapping,
@@ -18,7 +18,6 @@ from GBOpt.artifacts.types import (
     retention_value_from_state,
     retention_value_to_state,
 )
-
 
 _ATOM_DTYPE = np.dtype([("name", "U2"), ("x", float), ("y", float), ("z", float)])
 
@@ -65,7 +64,7 @@ def test_property_mapping_is_read_only_and_lexically_ordered():
 
     assert list(properties) == ["a", "z"]
     with pytest.raises(TypeError):
-        properties["x"] = 3  # type: ignore[index]
+        properties["x"] = 3  # ty: ignore[invalid-assignment]
 
 
 def test_property_provider_namespace_rejects_reserved_names():
@@ -93,15 +92,12 @@ def test_retention_candidate_injects_identity_objective_and_generation_propertie
     assert candidate.properties["mass_density"] == 10.9
 
 
-
 @pytest.mark.parametrize(
     ("generation", "objective"),
     [(True, 1.0), (0, True)],
     ids=("boolean-generation", "boolean-objective"),
 )
-def test_retention_candidate_rejects_booleans_for_numeric_fields(
-    generation, objective
-):
+def test_retention_candidate_rejects_booleans_for_numeric_fields(generation, objective):
     with pytest.raises(ArtifactValueError, match="non-Boolean"):
         RetentionCandidate(
             candidate_id="candidate-a",
@@ -176,7 +172,6 @@ def test_candidate_property_context_rejects_misaligned_labels():
         )
 
 
-
 def test_candidate_property_context_rejects_incomplete_or_nonfinite_atom_rows():
     missing_coordinate = np.array(
         [("U", 1.0, 2.0)],
@@ -236,7 +231,6 @@ def test_candidate_property_context_rejects_unknown_grain_label():
         )
 
 
-
 def test_candidate_property_context_rejects_boolean_box_bounds():
     with pytest.raises(ArtifactValueError, match="real numeric"):
         CandidatePropertyContext(
@@ -262,6 +256,7 @@ def test_candidate_property_context_requires_plane_strictly_inside_box():
                 box_dims=np.array([[0.0, 10.0], [0.0, 8.0], [0.0, 6.0]]),
                 gb_plane_x=plane,
             )
+
 
 def test_artifact_record_status_preserves_independent_pin_and_rule_reasons():
     candidate = RetentionCandidate("candidate-a", 0, 1.0)

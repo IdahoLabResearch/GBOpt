@@ -17,6 +17,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from GBOpt.artifacts._paths import _normalize_path
 from GBOpt.artifacts.types import ArtifactError
 
 __all__ = [
@@ -28,29 +29,6 @@ __all__ = [
 
 class ArtifactCleanupError(ArtifactError):
     """Raised when artifact cleanup configuration or execution is unsafe or invalid."""
-
-
-def _normalize_path(value: object, *, name: str) -> Path:
-    """Normalize one non-empty filesystem path without resolving symlinks.
-
-    :param value: Path-like value to normalize.
-    :param name: Keyword argument, required. Argument name used in diagnostics.
-    :return: Absolute lexical path.
-    :raises ArtifactCleanupError: If ``value`` is not a non-empty path-like value.
-    """
-    if not isinstance(value, (str, os.PathLike)):
-        raise ArtifactCleanupError(f"{name} must be a non-empty path-like value")
-    try:
-        raw = os.fspath(value)
-    except TypeError as exc:
-        raise ArtifactCleanupError(
-            f"{name} must be a non-empty path-like value"
-        ) from exc
-    if isinstance(raw, bytes):
-        raise ArtifactCleanupError(f"{name} must use a text filesystem path")
-    if not raw.strip():
-        raise ArtifactCleanupError(f"{name} must be a non-empty path-like value")
-    return Path(os.path.abspath(raw))
 
 
 def _canonical_path(path: Path, *, name: str) -> Path:
@@ -86,12 +64,16 @@ def _validated_managed_target(
     :raises ArtifactCleanupError: If either path is malformed, the target resolves
         outside ``managed_root``, or the target resolves to the managed root itself.
     """
-    root = _normalize_path(managed_root, name="managed_root")
-    target = _normalize_path(path, name="path")
+    root = _normalize_path(
+        managed_root, name="managed_root", error_type=ArtifactCleanupError
+    )
+    target = _normalize_path(path, name="path", error_type=ArtifactCleanupError)
     canonical_root = _canonical_path(root, name="managed_root")
     canonical_target = _canonical_path(target, name="path")
     if canonical_target == canonical_root:
-        raise ArtifactCleanupError("refusing to remove the managed artifact root itself")
+        raise ArtifactCleanupError(
+            "refusing to remove the managed artifact root itself"
+        )
     try:
         canonical_target.relative_to(canonical_root)
     except ValueError as exc:
@@ -126,7 +108,9 @@ def remove_managed_path(
         else:
             target.unlink(missing_ok=True)
     except OSError as exc:
-        raise ArtifactCleanupError(f"failed to remove managed artifact {target}") from exc
+        raise ArtifactCleanupError(
+            f"failed to remove managed artifact {target}"
+        ) from exc
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,10 +138,14 @@ class ArtifactCleanupRequest:
         """
         if not isinstance(self.candidate_id, str) or not self.candidate_id.strip():
             raise ArtifactCleanupError("candidate_id must be a non-empty string")
-        source_path = _normalize_path(self.source_path, name="source_path")
+        source_path = _normalize_path(
+            self.source_path, name="source_path", error_type=ArtifactCleanupError
+        )
         archive_path = None
         if self.archive_path is not None:
-            archive_path = _normalize_path(self.archive_path, name="archive_path")
+            archive_path = _normalize_path(
+                self.archive_path, name="archive_path", error_type=ArtifactCleanupError
+            )
         object.__setattr__(self, "source_path", source_path)
         object.__setattr__(self, "archive_path", archive_path)
 
@@ -170,7 +158,8 @@ class _ArtifactCleaner:
     semantics to the evaluator/application. The modes are mutually exclusive so there is
     one unambiguous owner for evaluator-source deletion.
 
-    :param managed_artifact_root: Optional root containing GBOpt-managed evaluator paths.
+    :param managed_artifact_root: Optional root containing GBOpt-managed evaluator
+        paths.
     :param cleanup_candidate: Optional evaluator-owned cleanup callback.
     :raises ArtifactCleanupError: If configuration is malformed or ambiguous.
     """
@@ -199,16 +188,17 @@ class _ArtifactCleaner:
         self._managed_root = (
             None
             if managed_artifact_root is None
-            else _normalize_path(managed_artifact_root, name="managed_artifact_root")
+            else _normalize_path(
+                managed_artifact_root,
+                name="managed_artifact_root",
+                error_type=ArtifactCleanupError,
+            )
         )
         self._cleanup_candidate = cleanup_candidate
 
     @property
     def enabled(self) -> bool:
-        """Return whether evaluator-source cleanup has an explicit owner.
-
-        :return: Whether a managed root or cleanup callback is configured.
-        """
+        """Return whether evaluator-source cleanup has an explicit owner."""
         return self._managed_root is not None or self._cleanup_candidate is not None
 
     def cleanup_source(self, request: ArtifactCleanupRequest) -> None:
@@ -225,8 +215,9 @@ class _ArtifactCleaner:
             try:
                 self._cleanup_candidate(request)
             except Exception as exc:
-                # External cleanup callbacks are a deliberate fault-containment boundary:
-                # any backend failure must become a recoverable storage leak upstream.
+                # External cleanup callbacks are a deliberate fault-containment
+                # boundary: any backend failure must become a recoverable storage leak
+                # upstream.
                 raise ArtifactCleanupError(
                     f"cleanup callback failed for candidate {request.candidate_id!r}"
                 ) from exc

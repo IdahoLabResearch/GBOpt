@@ -9,11 +9,7 @@ helpers remain available from their defining modules for GBOpt integration but a
 promoted as user-facing API.
 """
 
-from .cleanup import (
-    ArtifactCleanupError,
-    ArtifactCleanupRequest,
-    remove_managed_path,
-)
+from .cleanup import ArtifactCleanupError, ArtifactCleanupRequest, remove_managed_path
 from .policy import ArtifactPolicyError, ArtifactRetentionPolicy
 from .rules import (
     ArtifactRuleError,

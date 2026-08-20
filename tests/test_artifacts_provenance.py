@@ -1,7 +1,5 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-"""Focused tests for derived artifact manifests and append-only lifecycle history."""
-
 import json
 
 import pytest
@@ -26,14 +24,18 @@ def _candidate(candidate_id, objective, *, generation=1):
 
 
 def _history_events(path):
-    return [
-        json.loads(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-    ]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
 
 
 def test_manifest_is_deterministic_and_contains_current_artifact_state(tmp_path):
-    provenance = _ArtifactProvenance(tmp_path / "run.artifacts")
+    calculation_context = {
+        "calculator": {"name": "LAMMPS", "version": "test"},
+        "potential": {"sha256": "abc123"},
+    }
+    provenance = _ArtifactProvenance(
+        tmp_path / "run.artifacts",
+        calculation_context=calculation_context,
+    )
     retained = ArtifactRecord(
         candidate=_candidate("b", 2.0),
         source_path=tmp_path / "b-source.data",
@@ -60,7 +62,9 @@ def test_manifest_is_deterministic_and_contains_current_artifact_state(tmp_path)
 
     assert second == first
     manifest = json.loads(second)
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
+    assert manifest["calculation_context"] == calculation_context
+    assert manifest["failure_diagnostics"] == []
     assert [record["candidate_id"] for record in manifest["records"]] == ["a", "b"]
     retained_state = manifest["records"][1]
     assert retained_state["status"] == "pinned_and_retained"
@@ -80,11 +84,19 @@ def test_history_records_lifecycle_events_and_replay_is_idempotent(tmp_path):
 
     provenance.record_candidate_evaluated(candidate)
     provenance.record_properties_calculated(candidate)
+    provenance.record_evaluation_failed(
+        "GA_1_g2_c4",
+        2,
+        "simulated calculator failure",
+        diagnostic_path=source_path,
+        metadata={"input_index": 4},
+    )
     provenance.record_retention_reason_added(candidate.candidate_id, "rule:elite")
     provenance.record_retention_reason_removed(candidate.candidate_id, "rule:elite")
     provenance.record_archive_created(candidate.candidate_id, archive_path)
     provenance.record_source_pruned(candidate.candidate_id, source_path)
     provenance.record_archive_evicted(candidate.candidate_id, archive_path)
+    provenance.record_failure_diagnostic_pruned("GA_1_g2_c4", source_path)
     provenance.record_cleanup_failed(
         "source_prune",
         source_path,
@@ -97,20 +109,79 @@ def test_history_records_lifecycle_events_and_replay_is_idempotent(tmp_path):
     replay.record_archive_created(candidate.candidate_id, archive_path)
 
     events = _history_events(provenance.history_path)
-    assert len(events) == 8
+    assert len(events) == 10
     assert [event["event"] for event in events] == [
         "candidate_evaluated",
         "properties_calculated",
+        "evaluation_failed",
         "retention_reason_added",
         "retention_reason_removed",
         "archive_created",
         "source_pruned",
         "archive_evicted",
+        "failure_diagnostic_pruned",
         "cleanup_failed",
     ]
     assert all(event["version"] == 1 for event in events)
     assert events[0]["evaluation_status"] == "success"
     assert events[1]["properties"]["mass_density"] == pytest.approx(12.4)
+    assert events[2]["evaluation_status"] == "failure"
+    assert events[2]["failure_reason"] == "simulated calculator failure"
+    assert events[2]["metadata"] == {"input_index": 4}
+
+
+def test_calculation_context_and_failure_diagnostics_are_json_safe(tmp_path):
+    provenance = _ArtifactProvenance(
+        tmp_path / "run.artifacts",
+        calculation_context={
+            "calculator": {"name": "LAMMPS"},
+            "evaluation": {"ranks": 8},
+        },
+    )
+    record = ArtifactRecord(candidate=_candidate("candidate", 1.0))
+
+    provenance.write_manifest(
+        (record,),
+        failure_diagnostics=(
+            {
+                "candidate_id": "failed",
+                "generation": 3,
+                "failure_reason": "bad output",
+                "source_path": tmp_path / "failed.data",
+            },
+        ),
+    )
+
+    manifest = json.loads(provenance.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["calculation_context"]["evaluation"]["ranks"] == 8
+    assert manifest["failure_diagnostics"][0]["candidate_id"] == "failed"
+    assert manifest["failure_diagnostics"][0]["source_path"] == str(
+        tmp_path / "failed.data"
+    )
+
+    with pytest.raises(ArtifactProvenanceError, match="unsupported type"):
+        _ArtifactProvenance(
+            tmp_path / "bad.artifacts",
+            calculation_context={"bad": object()},
+        )
+
+
+def test_existing_manifest_rejects_calculation_context_replacement(tmp_path):
+    root = tmp_path / "run.artifacts"
+    provenance = _ArtifactProvenance(
+        root,
+        calculation_context={"calculator": {"name": "LAMMPS", "version": "one"}},
+    )
+    provenance.write_manifest(())
+
+    with pytest.raises(
+        ArtifactProvenanceError,
+        match="calculation_context does not match",
+    ):
+        _ArtifactProvenance(
+            root,
+            calculation_context={"calculator": {"name": "LAMMPS", "version": "two"}},
+        )
 
 
 def test_existing_malformed_history_is_rejected(tmp_path):

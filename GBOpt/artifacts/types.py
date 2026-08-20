@@ -29,9 +29,7 @@ class ArtifactValueError(ArtifactError, ValueError):
     """Raised when artifact-domain state is malformed."""
 
 
-RetentionValue: TypeAlias = (
-    int | float | str | bool | tuple["RetentionValue", ...]
-)
+RetentionValue: TypeAlias = int | float | str | bool | tuple["RetentionValue", ...]
 
 BUILTIN_PROPERTY_NAMES = frozenset(
     {
@@ -43,18 +41,6 @@ BUILTIN_PROPERTY_NAMES = frozenset(
         "generation",
     }
 )
-
-__all__ = [
-    "ArtifactError",
-    "ArtifactPin",
-    "ArtifactRecord",
-    "ArtifactStatus",
-    "ArtifactValueError",
-    "BUILTIN_PROPERTY_NAMES",
-    "CandidatePropertyContext",
-    "RetentionCandidate",
-    "RetentionValue",
-]
 
 
 def _require_nonempty_string(value: object, name: str) -> str:
@@ -105,7 +91,11 @@ def _require_finite_real(value: object, name: str) -> float:
     return normalized
 
 
-def normalize_retention_value(value: object, *, name: str = "retention value") -> RetentionValue:
+def normalize_retention_value(
+    value: object,
+    *,
+    name: str = "retention value"
+) -> RetentionValue:
     """Normalize one supported retention-property value.
 
     Supported values are immutable scalar values and recursively nested tuples. NumPy
@@ -144,8 +134,8 @@ def normalize_retention_value(value: object, *, name: str = "retention value") -
 def retention_value_to_state(value: RetentionValue) -> object:
     """Convert one normalized retention value to plain JSON-safe state.
 
-    Tuples are encoded as lists. Restore paths use :func:`retention_value_from_state`
-    so provider-facing normalization can continue to reject mutable lists.
+    Tuples are encoded as lists. Restore paths use :func:`retention_value_from_state` so
+    provider-facing normalization can continue to reject mutable lists.
 
     :param value: Normalized retention value.
     :return: JSON-safe scalar or list state.
@@ -155,7 +145,11 @@ def retention_value_to_state(value: RetentionValue) -> object:
     return value
 
 
-def retention_value_from_state(value: object, *, name: str = "retention value") -> RetentionValue:
+def retention_value_from_state(
+    value: object,
+    *,
+    name: str = "retention value"
+) -> RetentionValue:
     """Restore one retention value from JSON-decoded state.
 
     :param value: JSON-decoded scalar or list.
@@ -235,7 +229,8 @@ def _readonly_finite_real_array(value: object, *, name: str) -> np.ndarray:
     try:
         result = np.array(raw, dtype=float, copy=True)
     except (TypeError, ValueError, OverflowError) as exc:
-        raise ArtifactValueError(f"{name} must contain finite real numeric values") from exc
+        raise ArtifactValueError(
+            f"{name} must contain finite real numeric values") from exc
     if not np.all(np.isfinite(result)):
         raise ArtifactValueError(f"{name} must contain only finite values")
     result.setflags(write=False)
@@ -258,7 +253,8 @@ def _normalize_grain_labels(value: object, *, expected_count: int) -> np.ndarray
     if raw.dtype.kind not in ("i", "u"):
         raise ArtifactValueError("grain_labels must use an integer dtype")
     if not np.all(np.isin(raw, (0, 1))):
-        raise ArtifactValueError("grain_labels must contain only left/right labels 0 and 1")
+        raise ArtifactValueError(
+            "grain_labels must contain only left/right labels 0 and 1")
     result = np.array(raw, dtype=np.int8, copy=True)
     result.setflags(write=False)
     return result
@@ -269,7 +265,8 @@ def _validate_atom_rows(value: object) -> np.ndarray:
 
     :param value: Relaxed structured atom array.
     :return: Read-only structured array with the caller's field layout preserved.
-    :raises ArtifactValueError: If required fields, coordinate values, or names are invalid.
+    :raises ArtifactValueError: If required fields, coordinate values, or names are
+        invalid.
     """
     atoms = _readonly_array(value, name="atoms")
     if atoms.ndim != 1 or atoms.dtype.names is None:
@@ -283,7 +280,9 @@ def _validate_atom_rows(value: object) -> np.ndarray:
     names = atoms["name"]
     if names.dtype.kind not in ("U", "O"):
         raise ArtifactValueError("atoms 'name' field must contain strings")
-    if any(not isinstance(name, (str, np.str_)) or not str(name).strip() for name in names):
+    if any(
+        not isinstance(name, (str, np.str_)) or not str(name).strip() for name in names
+    ):
         raise ArtifactValueError("atoms 'name' values must be non-empty strings")
     for coordinate in ("x", "y", "z"):
         values = atoms[coordinate]
@@ -538,7 +537,8 @@ class ArtifactRecord:
                 not isinstance(archive_path, (str, Path))
                 or not str(archive_path).strip()
             ):
-                raise ArtifactValueError("archive_path must be a non-empty path or None")
+                raise ArtifactValueError(
+                    "archive_path must be a non-empty path or None")
             archive_path = str(archive_path)
 
         pins: set[ArtifactPin] = set()
@@ -559,18 +559,12 @@ class ArtifactRecord:
 
     @property
     def candidate_id(self) -> str:
-        """Return the stable logical candidate identity.
-
-        :return: Candidate identity independent of artifact paths.
-        """
+        """Return the stable logical candidate identity."""
         return self.candidate.candidate_id
 
     @property
     def status(self) -> ArtifactStatus:
-        """Return status derived from independent operational and scientific refs.
-
-        :return: Reference-derived artifact status.
-        """
+        """Return status derived from independent operational and scientific refs."""
         if self.pins and self.retention_reasons:
             return ArtifactStatus.PINNED_AND_RETAINED
         if self.pins:
@@ -578,3 +572,16 @@ class ArtifactRecord:
         if self.retention_reasons:
             return ArtifactStatus.RETAINED
         return ArtifactStatus.UNREFERENCED
+
+
+__all__ = [
+    "ArtifactError",
+    "ArtifactPin",
+    "ArtifactRecord",
+    "ArtifactStatus",
+    "ArtifactValueError",
+    "BUILTIN_PROPERTY_NAMES",
+    "CandidatePropertyContext",
+    "RetentionCandidate",
+    "RetentionValue",
+]

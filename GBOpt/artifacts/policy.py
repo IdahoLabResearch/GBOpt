@@ -11,11 +11,11 @@ lifecycle operations belong to the artifact store and later cleanup layers.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-import hashlib
-import json
 
 import numpy as np
 
@@ -31,8 +31,6 @@ from GBOpt.artifacts.types import (
 )
 
 _POLICY_VERSION = 1
-
-__all__ = ["ArtifactPolicyError", "ArtifactRetentionPolicy"]
 
 
 class ArtifactPolicyError(ArtifactError):
@@ -72,8 +70,8 @@ def _provider_identity(provider: Callable, explicit_name: str | None) -> str:
         or "<lambda>" in qualname
     ):
         raise ArtifactPolicyError(
-            "property_provider_name is required when callback identity cannot be derived "
-            "uniquely"
+            "property_provider_name is required when callback identity cannot be "
+            "derived uniquely"
         )
     return f"{module}.{qualname}"
 
@@ -109,8 +107,8 @@ class ArtifactRetentionPolicy:
         version used for checkpoint compatibility.
     :param property_provider_name: Optional stable callback identity override. When
         omitted, ``module.qualname`` is used.
-    :param property_provider_config: Optional declarative callback configuration included
-        in the deterministic policy signature.
+    :param property_provider_config: Optional declarative callback configuration
+        included in the deterministic policy signature.
     :param prune: Whether unreferenced candidates may eventually be pruned. Stage A does
         not perform filesystem deletion.
     :raises ArtifactPolicyError: If rule, provider, configuration, or pruning settings
@@ -118,9 +116,9 @@ class ArtifactRetentionPolicy:
     """
 
     rules: tuple[RetentionRule, ...] = ()
-    property_provider: Callable[[CandidatePropertyContext], Mapping[object, object]] | None = field(
-        default=None, repr=False, compare=False
-    )
+    property_provider: (
+        Callable[[CandidatePropertyContext], Mapping[object, object]] | None
+    ) = field(default=None, repr=False, compare=False)
     property_provider_version: str | None = None
     property_provider_name: str | None = None
     property_provider_config: Mapping[str, RetentionValue] = field(default_factory=dict)
@@ -136,20 +134,20 @@ class ArtifactRetentionPolicy:
         try:
             rules = tuple(self.rules)
         except TypeError as exc:
-            raise ArtifactPolicyError("rules must be an iterable of RetentionRule values") from exc
+            raise ArtifactPolicyError(
+                "rules must be an iterable of RetentionRule values"
+            ) from exc
         for rule in rules:
             if not isinstance(rule, RetentionRule):
-                raise ArtifactPolicyError("rules must contain only RetentionRule values")
-        names = [
-            _require_nonempty_string(rule.name, "rule name")
-            for rule in rules
-        ]
-        duplicates = sorted(
-            name for name, count in Counter(names).items() if count > 1
-        )
+                raise ArtifactPolicyError(
+                    "rules must contain only RetentionRule values"
+                )
+        names = [_require_nonempty_string(rule.name, "rule name") for rule in rules]
+        duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
         if duplicates:
             raise ArtifactPolicyError(
-                "retention rule names must be unique; duplicates: " + ", ".join(duplicates)
+                "retention rule names must be unique; duplicates: "
+                + ", ".join(duplicates)
             )
         rules = tuple(sorted(rules, key=lambda rule: rule.name))
 
@@ -174,7 +172,9 @@ class ArtifactRetentionPolicy:
             provider_version = _require_nonempty_string(
                 provider_version, "property_provider_version"
             )
-            provider_identity = _provider_identity(provider, self.property_provider_name)
+            provider_identity = _provider_identity(
+                provider, self.property_provider_name
+            )
 
         try:
             provider_config = normalize_property_mapping(self.property_provider_config)
@@ -195,34 +195,22 @@ class ArtifactRetentionPolicy:
 
     @classmethod
     def keep_all(cls) -> "ArtifactRetentionPolicy":
-        """Return the explicit keep-all/default-compatible policy.
-
-        :return: Non-pruning policy with no scientific rules.
-        """
+        """Return the explicit keep-all/default-compatible policy."""
         return cls(rules=(), prune=False)
 
     @property
     def signature(self) -> str:
-        """Return the deterministic callback-free policy signature.
-
-        :return: SHA-256 hexadecimal digest of declarative policy state.
-        """
+        """Return the deterministic callback-free policy signature."""
         return self._signature
 
     @property
     def rule_names(self) -> tuple[str, ...]:
-        """Return rule names in deterministic lexical order.
-
-        :return: Persistent rule names.
-        """
+        """Return rule names in deterministic lexical order."""
         return tuple(rule.name for rule in self.rules)
 
     @property
     def required_properties(self) -> frozenset[str]:
-        """Return declaratively known rule property dependencies.
-
-        :return: Union of property names required by configured rules.
-        """
+        """Return declaratively known rule property dependencies."""
         required: set[str] = set()
         for rule in self.rules:
             required.update(rule.required_properties)
@@ -237,8 +225,8 @@ class ArtifactRetentionPolicy:
         """Acquire built-in/user properties and create the narrow rule candidate view.
 
         :param context: Validated relaxed physical candidate state.
-        :param lineage: Keyword argument, optional, defaults to ``()``. Stable logical parent
-            identities.
+        :param lineage: Keyword argument, optional, defaults to ``()``. Stable logical
+            parent identities.
         :return: Immutable retention candidate with normalized properties.
         :raises ArtifactPolicyError: If provider output is malformed, collides with the
             reserved built-in namespace, or lacks a property needed by an active rule.
@@ -267,7 +255,9 @@ class ArtifactRetentionPolicy:
                 lineage=lineage,
             )
         except ArtifactValueError as exc:
-            raise ArtifactPolicyError(f"retention candidate state is invalid: {exc}") from exc
+            raise ArtifactPolicyError(
+                f"retention candidate state is invalid: {exc}"
+            ) from exc
         missing = sorted(
             property_name
             for property_name in self.required_properties
@@ -287,8 +277,8 @@ class ArtifactRetentionPolicy:
 
         :param candidates: Current set of evaluated scientific candidates.
         :return: Rule-name to current retained candidate IDs.
-        :raises ArtifactPolicyError: If the population container is invalid or a configured
-            rule cannot evaluate it.
+        :raises ArtifactPolicyError: If the population container is invalid or a
+            configured rule cannot evaluate it.
         """
         if not isinstance(candidates, (tuple, list)):
             raise ArtifactPolicyError(
@@ -306,10 +296,7 @@ class ArtifactRetentionPolicy:
         return memberships
 
     def to_state(self) -> dict[str, object]:
-        """Return deterministic JSON-safe policy state without callback objects.
-
-        :return: Declarative policy state used for signatures and checkpoint compatibility.
-        """
+        """Return deterministic JSON-safe policy state without callback objects."""
         provider_state: dict[str, object] | None
         if self.property_provider is None:
             provider_state = None
@@ -328,3 +315,6 @@ class ArtifactRetentionPolicy:
             "rules": [rule.to_state() for rule in self.rules],
             "property_provider": provider_state,
         }
+
+
+__all__ = ["ArtifactPolicyError", "ArtifactRetentionPolicy"]

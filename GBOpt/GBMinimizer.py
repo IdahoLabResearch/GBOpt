@@ -7,7 +7,7 @@ import os
 import shutil
 import uuid
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from numbers import Integral, Real
 from pathlib import Path
@@ -33,9 +33,17 @@ from GBOpt.artifacts.cleanup import (
     remove_managed_path,
 )
 from GBOpt.artifacts.policy import ArtifactPolicyError, ArtifactRetentionPolicy
-from GBOpt.artifacts.provenance import ArtifactProvenanceError, _ArtifactProvenance
+from GBOpt.artifacts.provenance import (
+    ArtifactProvenanceError,
+    _ArtifactProvenance,
+    _normalize_calculation_context,
+)
 from GBOpt.artifacts.store import ArtifactStore, ArtifactStoreError
-from GBOpt.artifacts.types import ArtifactPin, ArtifactValueError, CandidatePropertyContext
+from GBOpt.artifacts.types import (
+    ArtifactPin,
+    ArtifactValueError,
+    CandidatePropertyContext,
+)
 from GBOpt.Checkpoint import (
     CHECKPOINT_SCHEMA_VERSION,
     CandidateCheckpoint,
@@ -60,7 +68,7 @@ from GBOpt.GBManipulator import (
 ENERGY_PENALTY: float = 1.0e30
 """Optimizer policy for ranking failed candidate evaluations."""
 
-_OWNED_GA_CHECKPOINT_VERSION = 3
+_OWNED_GA_CHECKPOINT_VERSION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +77,124 @@ class _CachedEvaluation:
 
     energy: float
     structure_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class _FailureDiagnostic:
+    """Persist bounded failed-evaluation diagnostic source metadata.
+
+    :param candidate_id: Stable logical candidate identity.
+    :param generation: GA generation where the evaluation failed.
+    :param input_index: Candidate position within the submitted generation.
+    :param failure_reason: Durable evaluator/reconstruction failure context.
+    :param source_path: Evaluator-returned diagnostic source path, when available.
+    """
+
+    candidate_id: str
+    generation: int
+    input_index: int
+    failure_reason: str
+    source_path: str | None
+
+    @classmethod
+    def from_evaluation(
+        cls,
+        record: CandidateEvaluation,
+        *,
+        generation: int,
+    ) -> "_FailureDiagnostic":
+        """Build one diagnostic record from a failed typed evaluation.
+
+        :param record: Failed explicit-ownership evaluation.
+        :param generation: Keyword argument, required. GA generation index.
+        :return: Detached failed-evaluation diagnostic metadata.
+        :raises GBMinimizerValueError: If ``record`` succeeded or generation is invalid.
+        """
+        if not isinstance(record, CandidateEvaluation) or record.success:
+            raise GBMinimizerValueError(
+                "failure diagnostics require a failed CandidateEvaluation"
+            )
+        if (
+            isinstance(generation, (bool, np.bool_))
+            or not isinstance(generation, Integral)
+            or generation < 0
+        ):
+            raise GBMinimizerValueError(
+                "failure diagnostic generation must be a non-negative integer"
+            )
+        return cls(
+            candidate_id=record.candidate_id,
+            generation=int(generation),
+            input_index=record.input_index,
+            failure_reason=record.failure_reason or "unknown evaluation failure",
+            source_path=record.structure_path,
+        )
+
+    def to_state(self) -> dict[str, object]:
+        """Return deterministic JSON-safe diagnostic state."""
+        return {
+            "candidate_id": self.candidate_id,
+            "generation": self.generation,
+            "input_index": self.input_index,
+            "failure_reason": self.failure_reason,
+            "source_path": self.source_path,
+        }
+
+    @classmethod
+    def from_state(cls, state: object) -> "_FailureDiagnostic":
+        """Restore one diagnostic record from checkpoint state.
+
+        :param state: JSON-decoded diagnostic state.
+        :return: Validated failed-evaluation diagnostic metadata.
+        :raises GBMinimizerError: If state is malformed.
+        """
+        if not isinstance(state, dict):
+            raise GBMinimizerError(
+                "failure diagnostic checkpoint state must be a dictionary"
+            )
+        try:
+            candidate_id = state["candidate_id"]
+            generation = state["generation"]
+            input_index = state["input_index"]
+            failure_reason = state["failure_reason"]
+            source_path = state.get("source_path")
+        except KeyError as exc:
+            raise GBMinimizerError(
+                "failure diagnostic checkpoint state is incomplete"
+            ) from exc
+        if not isinstance(candidate_id, str) or not candidate_id.strip():
+            raise GBMinimizerError(
+                "failure diagnostic candidate_id must be a non-empty string"
+            )
+        for value, name in (
+            (generation, "generation"),
+            (input_index, "input_index"),
+        ):
+            if (
+                isinstance(value, (bool, np.bool_))
+                or not isinstance(value, Integral)
+                or value < 0
+            ):
+                raise GBMinimizerError(
+                    f"failure diagnostic {name} must be a non-negative integer"
+                )
+        if not isinstance(failure_reason, str) or not failure_reason:
+            raise GBMinimizerError(
+                "failure diagnostic failure_reason must be a non-empty string"
+            )
+        if source_path is not None and (
+            not isinstance(source_path, str) or not source_path.strip()
+        ):
+            raise GBMinimizerError(
+                "failure diagnostic source_path must be a non-empty string or None"
+            )
+        return cls(
+            candidate_id=candidate_id,
+            generation=int(generation),
+            input_index=int(input_index),
+            failure_reason=failure_reason,
+            source_path=source_path,
+        )
 
 
 def _candidate_mapping_to_state(mapping: CandidateFileMapping) -> dict:
@@ -135,6 +261,62 @@ class GBMinimizerValueError(GBMinimizerError, ValueError):
     """Raised when an argument has an invalid value."""
 
 
+def _normalize_calculation_context_config(
+    calculation_context: object,
+    *,
+    retention_policy: ArtifactRetentionPolicy | None,
+) -> dict[str, object] | None:
+    """Validate run-level calculation provenance at the minimizer boundary.
+
+    :param calculation_context: Evaluator/campaign provenance mapping or ``None``.
+    :param retention_policy: Keyword argument, required. Configured retention policy.
+    :return: Detached normalized calculation context, or ``None``.
+    :raises GBMinimizerTypeError: If ``calculation_context`` is not a mapping or
+        ``None``.
+    :raises GBMinimizerValueError: If provenance values are invalid or pruning lacks a
+        non-empty calculation context.
+    """
+    if calculation_context is not None and not isinstance(
+        calculation_context, Mapping
+    ):
+        raise GBMinimizerTypeError(
+            "calculation_context must be a mapping or None"
+        )
+    try:
+        normalized = _normalize_calculation_context(calculation_context)
+    except ArtifactProvenanceError as exc:
+        raise GBMinimizerValueError(str(exc)) from exc
+    if (
+        retention_policy is not None
+        and retention_policy.prune
+        and not normalized
+    ):
+        raise GBMinimizerValueError(
+            "retention_policy prune=True requires a non-empty calculation_context"
+        )
+    return normalized
+
+
+def _normalize_failure_diagnostic_count(value: object) -> int:
+    """Validate the bounded failed-evaluation diagnostic count.
+
+    :param value: Maximum number of recent failed evaluator sources to retain.
+    :return: Non-negative Python integer bound.
+    :raises GBMinimizerTypeError: If ``value`` is Boolean or non-integral.
+    :raises GBMinimizerValueError: If ``value`` is negative.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise GBMinimizerTypeError(
+            "failure_diagnostic_count must be a non-Boolean integer"
+        )
+    normalized = int(value)
+    if normalized < 0:
+        raise GBMinimizerValueError(
+            "failure_diagnostic_count must be non-negative"
+        )
+    return normalized
+
+
 def _configure_artifact_runtime(
     retention_policy: ArtifactRetentionPolicy | None,
     managed_artifact_root: str | Path | None,
@@ -147,7 +329,8 @@ def _configure_artifact_runtime(
     :param managed_artifact_root: Optional evaluator path root owned by GBOpt.
     :param cleanup_candidate: Optional evaluator-owned cleanup callback.
     :return: Configured cleanup dispatcher and optional artifact store.
-    :raises GBMinimizerTypeError: If policy, path, or cleanup callback types are invalid.
+    :raises GBMinimizerTypeError: If policy, path, or cleanup callback types are
+        invalid.
     :raises GBMinimizerValueError: If cleanup ownership is ambiguous or inconsistent
         with pruning configuration.
     """
@@ -205,14 +388,15 @@ def _configure_artifact_runtime(
 def _run_artifact_provenance(
     provenance: _ArtifactProvenance | None,
     action: Callable[[], None],
-) -> None:
+) -> bool:
     """Run one non-authoritative provenance write with warning-only failure policy.
 
     :param provenance: Active provenance writer, or ``None`` when disabled.
     :param action: Zero-argument provenance operation to execute.
+    :return: Whether the provenance operation completed successfully.
     """
     if provenance is None:
-        return
+        return False
     try:
         action()
     except ArtifactProvenanceError as exc:
@@ -221,6 +405,8 @@ def _run_artifact_provenance(
             RuntimeWarning,
             stacklevel=2,
         )
+        return False
+    return True
 
 
 def _register_retention_candidate(
@@ -239,9 +425,10 @@ def _register_retention_candidate(
         acquire candidate properties.
     :param context: Keyword argument, required. Validated relaxed physical candidate
         state.
-    :param source_path: Keyword argument, required. Evaluator-returned candidate artifact
-        path.
-    :param lineage: Keyword argument, required. Stable logical parent candidate identities.
+    :param source_path: Keyword argument, required. Evaluator-returned candidate
+        artifact path.
+    :param lineage: Keyword argument, required. Stable logical parent candidate
+        identities.
     :param provenance: Keyword argument, required. Optional non-authoritative provenance
         writer.
     :raises ArtifactPolicyError: If property acquisition or rule evaluation fails.
@@ -286,11 +473,7 @@ def _register_retention_candidate(
             )
 
 
-def _artifact_archive_root(
-    checkpoint_file: Path | None,
-    *,
-    fallback_stem: str,
-) -> Path:
+def _artifact_archive_root(checkpoint_file: Path | None, *, fallback_stem: str) -> Path:
     """Return the run-owned artifact archive root.
 
     :param checkpoint_file: Run checkpoint path, or ``None`` when disabled.
@@ -395,7 +578,8 @@ def _remove_archive_evictions(
 ) -> None:
     """Best-effort removal of canonical archives detached before checkpoint commit.
 
-    :param archive_evictions: Candidate IDs and canonical paths detached from store state.
+    :param archive_evictions: Candidate IDs and canonical paths detached from store
+        state.
     :param archive_root: Keyword argument, required. Run-owned containment root.
     :param provenance: Keyword argument, required. Optional provenance writer.
     """
@@ -432,21 +616,111 @@ def _remove_archive_evictions(
             )
 
 
+def _prepare_archive_state(
+    artifact_store: ArtifactStore | None,
+    materialize_archive: Callable[[str], None],
+    *,
+    archive_detached: Callable[[str], None] | None = None,
+) -> list[tuple[str, str]]:
+    """Materialize required archives and detach unreferenced archive paths.
+
+    Store state is updated before checkpoint serialization. Detached archive files are
+    returned to the caller for deletion only after the checkpoint commits successfully.
+
+    :param artifact_store: Runtime artifact store, or ``None`` when tracking is
+        disabled.
+    :param materialize_archive: Callback that materializes the required archive for one
+        candidate and updates ``artifact_store`` with its canonical path.
+    :param archive_detached: Keyword argument, optional, defaults to ``None``. Callback
+        invoked after an unreferenced archive is detached from store state.
+    :return: Candidate IDs and archive paths eligible for post-commit deletion.
+    :raises ArtifactStoreError: If artifact-store state is invalid.
+    :raises GBMinimizerError: If an already-materialized retained archive is missing.
+    """
+    if artifact_store is None:
+        return []
+    records = artifact_store.records()
+    required_ids = [
+        artifact.candidate_id
+        for artifact in records
+        if artifact.retention_reasons
+        or ArtifactPin.BEST_RESULT in artifact.pins
+    ]
+    for candidate_id in required_ids:
+        archive_path = artifact_store.archive_path(candidate_id)
+        if archive_path is None:
+            materialize_archive(candidate_id)
+        elif not Path(archive_path).is_file():
+            raise GBMinimizerError(
+                f"retained archive path {archive_path} is missing"
+            )
+
+    evictions: list[tuple[str, str]] = []
+    for artifact in artifact_store.records():
+        if artifact.archive_path is None:
+            continue
+        if artifact.retention_reasons or artifact.pins:
+            continue
+        evictions.append((artifact.candidate_id, artifact.archive_path))
+        artifact_store.set_archive_path(artifact.candidate_id, None)
+        if archive_detached is not None:
+            archive_detached(artifact.candidate_id)
+    return evictions
+
+
+def _cleanup_committed_artifacts(
+    artifact_store: ArtifactStore | None,
+    cleaner: _ArtifactCleaner,
+    provenance: _ArtifactProvenance | None,
+    archive_evictions: list[tuple[str, str]],
+    *,
+    archive_root: Path,
+) -> None:
+    """Best-effort evaluator/archive cleanup after a durable checkpoint commit.
+
+    :param artifact_store: Runtime artifact store, or ``None`` when tracking is
+        disabled.
+    :param cleaner: Explicit evaluator-source cleanup dispatcher.
+    :param provenance: Optional non-authoritative provenance writer.
+    :param archive_evictions: Candidate IDs and detached canonical archive paths.
+    :param archive_root: Keyword argument, required. Run-owned containment root.
+    """
+    if artifact_store is None:
+        return
+    _cleanup_prunable_sources(artifact_store, cleaner, provenance)
+    _remove_archive_evictions(
+        archive_evictions,
+        archive_root=archive_root,
+        provenance=provenance,
+    )
+
+
 def _write_artifact_manifest(
     artifact_store: ArtifactStore | None,
     provenance: _ArtifactProvenance | None,
     *,
     ownership_metadata: dict[str, dict] | None = None,
-) -> None:
+    failure_diagnostics: tuple[dict[str, object], ...] = (),
+) -> bool:
     """Best-effort persistence of current artifact state for observability.
 
-    :param artifact_store: Runtime store, or ``None`` when artifact tracking is disabled.
+    A successful write is also the destructive-cleanup gate: callers may remove
+    evaluator/archive artifacts only after the current manifest, including required
+    run-level calculation provenance, has been persisted.
+
+    :param artifact_store: Runtime store, or ``None`` when artifact tracking is
+        disabled.
     :param provenance: Provenance writer, or ``None`` when output is disabled.
     :param ownership_metadata: Keyword argument, optional, defaults to ``None``.
         Candidate reconstruction metadata for ownership-aware archives.
+    :param failure_diagnostics: Keyword argument, optional. Current bounded failed
+        evaluator-source diagnostics retained outside ``ArtifactStore``.
+    :return: Whether required current-state provenance was persisted successfully.
     """
-    if provenance is None or artifact_store is None:
-        return
+    if artifact_store is None:
+        return True
+    if provenance is None:
+        return False
     try:
         records = artifact_store.records()
     except ArtifactStoreError as exc:
@@ -455,12 +729,13 @@ def _write_artifact_manifest(
             RuntimeWarning,
             stacklevel=2,
         )
-        return
-    _run_artifact_provenance(
+        return False
+    return _run_artifact_provenance(
         provenance,
         lambda: provenance.write_manifest(
             records,
             ownership_metadata=ownership_metadata,
+            failure_diagnostics=failure_diagnostics,
         ),
     )
 
@@ -606,6 +881,7 @@ class MonteCarloMinimizer:
         *,
         initial_structure: Any = None,
         retention_policy: ArtifactRetentionPolicy | None = None,
+        calculation_context: Mapping[str, object] | None = None,
         managed_artifact_root: str | Path | None = None,
         cleanup_candidate: Callable[[ArtifactCleanupRequest], None] | None = None,
     ):
@@ -622,6 +898,9 @@ class MonteCarloMinimizer:
         :param retention_policy: Keyword argument, optional, defaults to ``None``.
             Scientific artifact-retention policy. ``None`` preserves legacy keep-all
             artifact behavior.
+        :param calculation_context: Keyword argument, optional, defaults to ``None``.
+            JSON-safe run-level calculator/campaign provenance. A non-empty mapping is
+            required when pruning is enabled.
         :param managed_artifact_root: Keyword argument, optional, defaults to ``None``.
             Root beneath which GBOpt may remove evaluator-returned source paths after a
             durable checkpoint commit. Mutually exclusive with ``cleanup_candidate``.
@@ -642,6 +921,10 @@ class MonteCarloMinimizer:
             retention_policy,
             managed_artifact_root,
             cleanup_candidate,
+        )
+        self.calculation_context = _normalize_calculation_context_config(
+            calculation_context,
+            retention_policy=retention_policy,
         )
         self._artifact_provenance: _ArtifactProvenance | None = None
         self.manipulator = self._make_initial_manipulator()
@@ -717,14 +1000,20 @@ class MonteCarloMinimizer:
         """
         if not isinstance(unique_id, str) or not unique_id:
             raise GBMinimizerValueError("MC unique_id must be a non-empty string")
-        if isinstance(step, (bool, np.bool_)) or not isinstance(step, Integral) or step < 0:
-            raise GBMinimizerValueError("MC candidate step must be a non-negative integer")
+        if (
+            isinstance(step, (bool, np.bool_))
+            or not isinstance(step, Integral)
+            or step < 0
+        ):
+            raise GBMinimizerValueError(
+                "MC candidate step must be a non-negative integer")
         candidate_id = f"MC_{unique_id}_s{int(step)}"
         if Path(candidate_id).name != candidate_id or any(
             separator in candidate_id for separator in ("/", "\\")
         ):
             raise GBMinimizerValueError(
-                "MC unique_id contains path separators that are unsafe for artifact identity"
+                "MC unique_id contains path separators that are unsafe for artifact "
+                "identity"
             )
         return candidate_id
 
@@ -743,11 +1032,13 @@ class MonteCarloMinimizer:
         Property callbacks receive the relaxed evaluator output even when the trial is
         subsequently rejected by MC selection.
 
-        :param candidate_id: Keyword argument, required. Stable logical candidate identity.
+        :param candidate_id: Keyword argument, required. Stable logical candidate
+            identity.
         :param step: Keyword argument, required. MC step where evaluation occurred.
         :param objective: Keyword argument, required. Evaluated grain-boundary energy.
         :param structure_path: Keyword argument, required. Relaxed evaluator output.
-        :param lineage: Keyword argument, required. Accepted-current parent identity.
+        :param lineage: Keyword argument, required. Currently accepted MC parent
+            identity.
         :param type_dict: Keyword argument, required. LAMMPS type-to-element mapping.
         :return: Validated file-backed manipulator for the relaxed evaluator output.
         :raises GBMinimizerError: If retention is disabled or relaxed output/retention
@@ -849,70 +1140,19 @@ class MonteCarloMinimizer:
     ) -> list[tuple[str, str]]:
         """Materialize required MC archives and detach eligible archive evictions.
 
-        Store state is updated before checkpoint serialization. Detached archive files
-        are removed only after the checkpoint commits successfully.
-
         :param archive_root: Run-owned canonical archive root.
         :return: Candidate IDs and archive paths eligible for post-commit deletion.
         :raises GBMinimizerError: If required archive state cannot be materialized.
         """
-        if self.artifact_store is None:
-            return []
         try:
-            records = self.artifact_store.records()
+            return _prepare_archive_state(
+                self.artifact_store,
+                lambda candidate_id: self._materialize_mc_archive(
+                    candidate_id, archive_root
+                ),
+            )
         except ArtifactStoreError as exc:
             raise GBMinimizerError(str(exc)) from exc
-        required_ids = [
-            artifact.candidate_id
-            for artifact in records
-            if artifact.retention_reasons or ArtifactPin.BEST_RESULT in artifact.pins
-        ]
-        for candidate_id in required_ids:
-            try:
-                archive_path = self.artifact_store.archive_path(candidate_id)
-            except ArtifactStoreError as exc:
-                raise GBMinimizerError(str(exc)) from exc
-            if archive_path is None:
-                self._materialize_mc_archive(candidate_id, archive_root)
-            elif not Path(archive_path).is_file():
-                raise GBMinimizerError(f"retained archive path {archive_path} is missing")
-
-        evictions: list[tuple[str, str]] = []
-        try:
-            for artifact in self.artifact_store.records():
-                if artifact.archive_path is None:
-                    continue
-                if artifact.retention_reasons or artifact.pins:
-                    continue
-                evictions.append((artifact.candidate_id, artifact.archive_path))
-                self.artifact_store.set_archive_path(artifact.candidate_id, None)
-        except ArtifactStoreError as exc:
-            raise GBMinimizerError(str(exc)) from exc
-        return evictions
-
-    def _cleanup_committed_mc_artifacts(
-        self,
-        archive_evictions: list[tuple[str, str]],
-        *,
-        archive_root: Path,
-    ) -> None:
-        """Best-effort MC source/archive cleanup after durable checkpoint commit.
-
-        :param archive_evictions: Candidate IDs and detached canonical archive paths.
-        :param archive_root: Keyword argument, required. Run-owned containment root.
-        """
-        if self.artifact_store is None:
-            return
-        _cleanup_prunable_sources(
-            self.artifact_store,
-            self._artifact_cleaner,
-            self._artifact_provenance,
-        )
-        _remove_archive_evictions(
-            archive_evictions,
-            archive_root=archive_root,
-            provenance=self._artifact_provenance,
-        )
 
     def _mc_pin_owner(self, pin: ArtifactPin) -> str:
         """Return the unique MC candidate carrying one singleton operational pin.
@@ -957,32 +1197,34 @@ class MonteCarloMinimizer:
         """Run Monte Carlo iterations until a configured convergence criterion is met.
 
         When artifact retention is configured, every successful relaxed evaluator result
-        is classified before MC acceptance. Accepted-current and global-best structures
-        receive independent operational pins. Pruning occurs only after a durable
-        checkpoint commit.
+        is classified before MC acceptance. Currently accepted and global-best
+        structures receive independent operational pins. Pruning occurs only after a
+        durable checkpoint commit.
 
         :param E_accept: Optional, defaults to ``1e-1``. Energy increase with a 50%
             acceptance probability at the initial MC temperature, in J/m^2.
-        :param min_steps: Optional, defaults to ``None``. Minimum number of MC iterations
-            before the energy-tolerance termination criterion may stop the run.
+        :param min_steps: Optional, defaults to ``None``. Minimum number of MC
+            iterations before the energy-tolerance termination criterion may stop the
+            run.
         :param max_steps: Optional, defaults to ``50``. Maximum MC iteration index.
-        :param E_tol: Optional, defaults to ``1e-4``. Positive best-energy decrease at or
-            below which the run may terminate, in J/m^2.
-        :param max_rejections: Optional, defaults to ``20``. Maximum consecutive rejected
-            trials before termination.
+        :param E_tol: Optional, defaults to ``1e-4``. Positive best-energy decrease at
+            or below which the run may terminate, in J/m^2.
+        :param max_rejections: Optional, defaults to ``20``. Maximum consecutive
+            rejected trials before termination.
         :param cooldown_rate: Optional, defaults to ``1.0``. Finite factor in ``(0, 1]``
             applied to the MC temperature after each completed iteration.
-        :param unique_id: Optional, defaults to ``None``. Output label for a fresh run; a
-            UUID is generated when omitted and checkpoint resume restores the saved label.
+        :param unique_id: Optional, defaults to ``None``. Output label for a fresh run;
+            a UUID is generated when omitted and checkpoint resume restores the saved
+            label.
         :param checkpoint_file: Keyword argument, optional, defaults to ``None``. Run
             checkpoint path. Resume restores current structure, RNG state, temperature,
             accepted history, stable run identity, retention state, ``min_steps``, and
             ``cooldown_rate``. ``max_steps`` may be increased on resume.
         :param checkpoint_format: Keyword argument, optional, defaults to ``"json"``.
             Checkpoint serialization format, ``"json"`` or ``"pickle"``.
-        :param checkpoint_interval: Keyword argument, optional, defaults to ``1``. Save a
-            periodic checkpoint every N completed steps; final state is always saved when
-            checkpointing is enabled.
+        :param checkpoint_interval: Keyword argument, optional, defaults to ``1``. Save
+            a periodic checkpoint every N completed steps; final state is always saved
+            when checkpointing is enabled.
         :param **kwargs: Keyword arguments forwarded to ``gb_energy_func``.
         :return: Minimum grain-boundary energy encountered.
         :raises GBMinimizerTypeError: If ``cooldown_rate`` is not a non-Boolean real
@@ -990,8 +1232,9 @@ class MonteCarloMinimizer:
         :raises GBMinimizerValueError: If ``cooldown_rate`` is non-finite/out of range,
             checkpoint configuration is invalid, or pruning is requested without a
             durable checkpoint.
-        :raises GBMinimizerError: If checkpoint load/save, relaxed-result reconstruction,
-            retention compatibility, archive materialization, or artifact state is invalid.
+        :raises GBMinimizerError: If checkpoint load/save, relaxed-result
+            reconstruction, retention compatibility, archive materialization, or
+            artifact state is invalid.
         """
 
         if isinstance(cooldown_rate, (bool, np.bool_)) or not isinstance(
@@ -1012,7 +1255,8 @@ class MonteCarloMinimizer:
             and checkpoint_path is None
         ):
             raise GBMinimizerValueError(
-                "retention_policy prune=True requires checkpoint_file for durable cleanup"
+                "retention_policy prune=True requires checkpoint_file for durable "
+                "cleanup"
             )
 
         try:
@@ -1056,7 +1300,8 @@ class MonteCarloMinimizer:
             if retention_state is None:
                 if self.retention_policy is not None:
                     raise GBMinimizerError(
-                        "checkpoint retention policy does not match the minimizer configuration"
+                        "checkpoint retention policy does not match the minimizer "
+                        "configuration"
                     )
                 self.artifact_store = None
             else:
@@ -1073,7 +1318,8 @@ class MonteCarloMinimizer:
                             artifact.archive_path
                         ).is_file():
                             raise GBMinimizerError(
-                                f"retained archive path {artifact.archive_path} is missing"
+                                f"retained archive path {artifact.archive_path} is "
+                                "missing"
                             )
                 except ArtifactStoreError as exc:
                     raise GBMinimizerError(str(exc)) from exc
@@ -1102,7 +1348,10 @@ class MonteCarloMinimizer:
         self._artifact_provenance = None
         if self.artifact_store is not None:
             try:
-                self._artifact_provenance = _ArtifactProvenance(archive_root)
+                self._artifact_provenance = _ArtifactProvenance(
+                    archive_root,
+                    calculation_context=self.calculation_context,
+                )
             except ArtifactProvenanceError as exc:
                 warnings.warn(
                     f"Artifact provenance initialization failed: {exc}",
@@ -1183,10 +1432,10 @@ class MonteCarloMinimizer:
             """Persist one durable MC boundary and clean only after commit.
 
             :param step: Completed MC step to persist.
-            :param final: Keyword argument, required. Bypass periodic interval gating when
-                ``True``.
-            :raises GBMinimizerError: If archive preparation, artifact state, or checkpoint
-                persistence fails.
+            :param final: Keyword argument, required. Bypass periodic interval gating
+                when ``True``.
+            :raises GBMinimizerError: If archive preparation, artifact state, or
+                checkpoint persistence fails.
             """
             nonlocal best_dump
             if not checkpoint.enabled:
@@ -1217,10 +1466,25 @@ class MonteCarloMinimizer:
             except CheckpointError as exc:
                 raise GBMinimizerError(str(exc)) from exc
             if self.artifact_store is not None:
-                self._cleanup_committed_mc_artifacts(
-                    archive_evictions,
-                    archive_root=archive_root,
+                provenance_ready = _write_artifact_manifest(
+                    self.artifact_store,
+                    self._artifact_provenance,
                 )
+                if provenance_ready:
+                    _cleanup_committed_artifacts(
+                        self.artifact_store,
+                        self._artifact_cleaner,
+                        self._artifact_provenance,
+                        archive_evictions,
+                        archive_root=archive_root,
+                    )
+                else:
+                    warnings.warn(
+                        "Artifact cleanup deferred because required calculation "
+                        "provenance could not be persisted",
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
             _write_artifact_manifest(self.artifact_store, self._artifact_provenance)
 
         _last_completed_step = state["progress_index"] if state is not None else -1
@@ -1364,6 +1628,8 @@ class GeneticAlgorithmMinimizer:
         crossover_max_tilt_degrees: float = 5.0,
         crossover_attempts: int = 8,
         retention_policy: ArtifactRetentionPolicy | None = None,
+        calculation_context: Mapping[str, object] | None = None,
+        failure_diagnostic_count: int = 3,
         managed_artifact_root: str | Path | None = None,
         cleanup_candidate: Callable[[ArtifactCleanupRequest], None] | None = None,
     ):
@@ -1381,8 +1647,8 @@ class GeneticAlgorithmMinimizer:
         :param initial_ownership: Keyword argument, optional, defaults to ``None``.
             Explicit ownership aligned to atom IDs in a file-backed initial structure.
         :param allow_variable_cell: Keyword argument, optional, defaults to ``False``.
-            Allow orthogonal box dimensions returned by explicit-ownership evaluators
-            to evolve between GA generations. Requires ``initial_ownership``.
+            Allow orthogonal box dimensions returned by explicit-ownership evaluators to
+            evolve between GA generations. Requires ``initial_ownership``.
         :param population_size: Number of candidates per generation. Keyword argument,
             optional, defaults to 20.
         :param generations: Number of generations to iterate. Keyword argument,
@@ -1399,14 +1665,13 @@ class GeneticAlgorithmMinimizer:
             the evaluator again. Keyword argument, optional, defaults to ``False``.
         :param gb_batch_energy_func: Keyword argument, optional, defaults to ``None``.
             Batch-evaluation function for processing a population in one call. It should
-            accept (GBMaker, manipulators,
-            atom_positions_list, lineages, unique_ids) and return a list of dictionaries
-            containing at least ``"energy"`` and ``"final_dump"`` keys. If not provided,
-            fall back to calling ``gb_energy_func`` per candidate. If the function does
-            not declare a ``checkpoint`` keyword argument it is automatically wrapped so
-            that checkpointing still occurs at batch-return granularity; a
-            ``UserWarning`` is emitted in that case. Declare a
-            ``checkpoint=None`` parameter and call
+            accept (GBMaker, manipulators, atom_positions_list, lineages, unique_ids)
+            and return a list of dictionaries containing at least ``"energy"`` and
+            ``"final_dump"`` keys. If not provided, fall back to calling
+            ``gb_energy_func`` per candidate. If the function does not declare a
+            ``checkpoint`` keyword argument it is automatically wrapped so that
+            checkpointing still occurs at batch-return granularity; a ``UserWarning`` is
+            emitted in that case. Declare a ``checkpoint=None`` parameter and call
             ``checkpoint.record(unique_id, energy, dump)`` per job to get per-job
             recovery granularity.
         :param crossover_surface: Keyword argument, optional, defaults to
@@ -1420,6 +1685,12 @@ class GeneticAlgorithmMinimizer:
         :param retention_policy: Keyword argument, optional, defaults to ``None``.
             Scientific artifact-retention policy for explicit-ownership GA execution.
             ``None`` preserves keep-all artifact behavior.
+        :param calculation_context: Keyword argument, optional, defaults to ``None``.
+            JSON-safe run-level calculator/campaign provenance. A non-empty mapping is
+            required when pruning is enabled.
+        :param failure_diagnostic_count: Keyword argument, optional, defaults to ``3``.
+            Maximum number of most-recent failed evaluator sources preserved for
+            diagnostics when pruning is enabled.
         :param managed_artifact_root: Keyword argument, optional, defaults to ``None``.
             Root beneath which GBOpt may remove evaluator-returned source paths after a
             durable checkpoint commit. Mutually exclusive with ``cleanup_candidate``.
@@ -1427,10 +1698,10 @@ class GeneticAlgorithmMinimizer:
             Backend-owned callback invoked after a durable checkpoint commit for each
             evaluator source that has become transient. Mutually exclusive with
             ``managed_artifact_root``.
-        :raises TypeError: If ``initial_ownership`` is not GrainOwnership, accompanies
-            a non-file initial structure, ``allow_variable_cell`` is not Boolean, a
-            crossover/cleanup policy argument has an invalid type, or ``retention_policy``
-            is not an ``ArtifactRetentionPolicy``.
+        :raises TypeError: If ``initial_ownership`` is not GrainOwnership, accompanies a
+            non-file initial structure, ``allow_variable_cell`` is not Boolean, a
+            crossover/cleanup policy argument has an invalid type, or
+            ``retention_policy`` is not an ``ArtifactRetentionPolicy``.
         :raises ValueError: If ownership is supplied without an initial structure,
             variable-cell execution is requested without explicit ownership, cleanup
             ownership is ambiguous, or pruning lacks an explicit cleanup owner.
@@ -1453,6 +1724,13 @@ class GeneticAlgorithmMinimizer:
             retention_policy,
             managed_artifact_root,
             cleanup_candidate,
+        )
+        calculation_context = _normalize_calculation_context_config(
+            calculation_context,
+            retention_policy=retention_policy,
+        )
+        failure_diagnostic_count = _normalize_failure_diagnostic_count(
+            failure_diagnostic_count
         )
         if retention_policy is not None and initial_ownership is None:
             raise GBMinimizerValueError(
@@ -1538,16 +1816,19 @@ class GeneticAlgorithmMinimizer:
                 gb_batch_energy_func = _wrap_batch_func_with_checkpoint(
                     gb_batch_energy_func, penalty=ENERGY_PENALTY
                 )
-            except TypeError:
+            except TypeError as exc:
                 raise GBMinimizerTypeError(
                     "gb_batch_energy_func must be callable."
-                )
+                ) from exc
         self.gb_batch_energy_func = gb_batch_energy_func
         self.history = []
         self.initial_structure = initial_structure
         self.initial_ownership = initial_ownership
         self.allow_variable_cell = allow_variable_cell
         self.retention_policy = retention_policy
+        self.calculation_context = calculation_context
+        self.failure_diagnostic_count = failure_diagnostic_count
+        self._failure_diagnostics: list[_FailureDiagnostic] = []
         self._artifact_cleaner = artifact_cleaner
         self.artifact_store = artifact_store
         self._retention_archive_mappings: dict[str, dict] = {}
@@ -1658,21 +1939,26 @@ class GeneticAlgorithmMinimizer:
         """Register one newly evaluated relaxed candidate with the artifact subsystem.
 
         Property acquisition runs only after explicit-ownership reconstruction succeeds,
-        so callbacks receive validated relaxed physical state rather than submitted input.
-        Provenance records the successful evaluation, normalized properties, and any
-        scientific-retention membership deltas caused by the new candidate.
+        so callbacks receive validated relaxed physical state rather than submitted
+        input. Provenance records the successful evaluation, normalized properties, and
+        any scientific-retention membership deltas caused by the new candidate.
 
         :param record: Successful newly evaluated candidate.
-        :param generation: Keyword argument, required. Generation where evaluation occurred.
+        :param generation: Keyword argument, required. Generation where evaluation
+            occurred.
         :param lineage: Keyword argument, required. Stable logical parent identities.
-        :raises GBMinimizerError: If candidate physical state or retention policy evaluation
-            is invalid.
+        :raises GBMinimizerError: If candidate physical state or retention policy
+            evaluation is invalid.
         """
         if self.artifact_store is None or self.retention_policy is None:
             return
         if record.candidate_id in self.artifact_store:
             return
-        if not record.success or record.manipulator is None or record.structure_path is None:
+        if (
+            not record.success
+            or record.manipulator is None
+            or record.structure_path is None
+        ):
             raise GBMinimizerError(
                 "only successful explicit-ownership evaluations may enter retention"
             )
@@ -1681,7 +1967,7 @@ class GeneticAlgorithmMinimizer:
             context = CandidatePropertyContext(
                 candidate_id=record.candidate_id,
                 generation=generation,
-                objective=record.energy,
+                objective=record.objective,
                 atoms=parent.whole_system,
                 box_dims=parent.box_dims,
                 grain_labels=parent.grain_labels,
@@ -1697,7 +1983,8 @@ class GeneticAlgorithmMinimizer:
             )
         except (ArtifactPolicyError, ArtifactStoreError, ArtifactValueError) as exc:
             raise GBMinimizerError(
-                f"artifact retention failed for candidate {record.candidate_id!r}: {exc}"
+                f"artifact retention failed for candidate {record.candidate_id!r}: "
+                f"{exc}"
             ) from exc
 
     @staticmethod
@@ -1723,17 +2010,18 @@ class GeneticAlgorithmMinimizer:
 
         The source representation is already validated by the explicit-ownership
         evaluator. A hard link is preferred and an ordinary copy is used when linking is
-        unavailable. Explicit reconstruction metadata remains checkpoint state rather than
-        being inferred from the archived coordinates.
+        unavailable. Explicit reconstruction metadata remains checkpoint state rather
+        than being inferred from the archived coordinates.
 
         :param record: Successful candidate whose structure must be retained.
         :param archive_root: Run-owned archive root.
         :return: Canonical retained structure path.
-        :raises GBMinimizerError: If the candidate or filesystem state cannot be archived
-            safely.
+        :raises GBMinimizerError: If the candidate or filesystem state cannot be
+            archived safely.
         """
         if self.artifact_store is None or self._owned_evaluator is None:
-            raise GBMinimizerError("owned archive materialization requires artifact state")
+            raise GBMinimizerError(
+                "owned archive materialization requires artifact state")
         if (
             not record.success
             or record.structure_path is None
@@ -1779,8 +2067,8 @@ class GeneticAlgorithmMinimizer:
 
         :param record: Successful evaluation whose identity and objective are preserved.
         :param structure_path: Keyword argument, required. Equivalent durable structure.
-        :param mapping: Keyword argument, required. Explicit reconstruction mapping for the
-            durable structure.
+        :param mapping: Keyword argument, required. Explicit reconstruction mapping for
+            the durable structure.
         :param manipulator: Keyword argument, required. Aligned in-memory candidate.
         :return: Rebased successful evaluation.
         :raises TypeError: If the durable structure path has an invalid type.
@@ -1792,7 +2080,7 @@ class GeneticAlgorithmMinimizer:
         return CandidateEvaluation(
             candidate_id=record.candidate_id,
             input_index=record.input_index,
-            energy=record.energy,
+            objective=record.objective,
             structure_path=structure_path,
             mapping=mapping,
             manipulator=manipulator,
@@ -1845,31 +2133,20 @@ class GeneticAlgorithmMinimizer:
         records_by_id: dict[str, CandidateEvaluation],
         archive_root: Path,
     ) -> list[tuple[str, str]]:
-        """Materialize required archives and detach entries eligible for eviction.
+        """Materialize required owned archives and detach eligible evictions.
 
-        The returned paths are deleted only after the main checkpoint commits. Store state
-        is updated before serialization so a cleanup failure leaks an unreferenced file
-        instead of making the checkpoint depend on a deletion succeeding.
-
-        :param records_by_id: Successful live evaluations available for new archive copies.
+        :param records_by_id: Successful live evaluations available for new archive
+            copies.
         :param archive_root: Run-owned canonical archive root.
-        :return: Superseded archive paths eligible for post-commit deletion.
-        :raises GBMinimizerError: If a required archive cannot be materialized or restored.
+        :return: Candidate IDs and archive paths eligible for post-commit deletion.
+        :raises GBMinimizerError: If a required candidate lacks materializable state.
         """
-        if self.artifact_store is None:
-            return []
-        required_ids = []
-        for artifact in self.artifact_store.records():
-            if artifact.retention_reasons or ArtifactPin.BEST_RESULT in artifact.pins:
-                required_ids.append(artifact.candidate_id)
-        for candidate_id in required_ids:
-            archive_path = self.artifact_store.archive_path(candidate_id)
-            if archive_path is not None:
-                if not Path(archive_path).is_file():
-                    raise GBMinimizerError(
-                        f"retained archive path {archive_path} is missing"
-                    )
-                continue
+        def _materialize(candidate_id: str) -> None:
+            """Materialize one required owned candidate archive.
+
+            :param candidate_id: Stable logical candidate identity.
+            :raises GBMinimizerError: If no live evaluation can materialize the archive.
+            """
             record = records_by_id.get(candidate_id)
             if record is None:
                 raise GBMinimizerError(
@@ -1877,54 +2154,179 @@ class GeneticAlgorithmMinimizer:
                 )
             self._materialize_owned_archive(record, archive_root)
 
-        evictions: list[tuple[str, str]] = []
-        for artifact in self.artifact_store.records():
-            if artifact.archive_path is None:
-                continue
-            if artifact.retention_reasons or artifact.pins:
-                continue
-            evictions.append((artifact.candidate_id, artifact.archive_path))
-            self.artifact_store.set_archive_path(artifact.candidate_id, None)
-            self._retention_archive_mappings.pop(artifact.candidate_id, None)
-        return evictions
-
-    def _cleanup_committed_owned_artifacts(
-        self,
-        archive_evictions: list[tuple[str, str]],
-        *,
-        archive_root: Path,
-    ) -> None:
-        """Best-effort evaluator/archive cleanup after a durable checkpoint commit.
-
-        Evaluator sources are removed only through the explicitly configured managed
-        root or backend callback. Canonical archive evictions are removed only after
-        containment validation against the GBOpt-owned archive root. Any cleanup failure
-        produces a warning and leaves the committed optimizer state authoritative.
-
-        :param archive_evictions: Candidate IDs and canonical archive files detached
-            before checkpoint save.
-        :param archive_root: Keyword argument, required. GBOpt-owned archive root used to
-            validate canonical archive deletion.
-        """
-        if self.artifact_store is None:
-            return
-        _cleanup_prunable_sources(
+        return _prepare_archive_state(
             self.artifact_store,
-            self._artifact_cleaner,
-            self._artifact_provenance,
-        )
-        _remove_archive_evictions(
-            archive_evictions,
-            archive_root=archive_root,
-            provenance=self._artifact_provenance,
+            _materialize,
+            archive_detached=lambda candidate_id: (
+                self._retention_archive_mappings.pop(candidate_id, None)
+            ),
         )
 
-    def _write_owned_artifact_manifest(self) -> None:
-        """Persist current artifact state without making provenance restart-authoritative."""
-        _write_artifact_manifest(
+    def _failure_diagnostic_states(self) -> tuple[dict[str, object], ...]:
+        """Return current bounded failure diagnostics in deterministic order."""
+        return tuple(
+            diagnostic.to_state()
+            for diagnostic in sorted(
+                self._failure_diagnostics,
+                key=lambda item: (
+                    item.generation,
+                    item.input_index,
+                    item.candidate_id,
+                ),
+            )
+        )
+
+    def _record_failure_provenance(
+        self,
+        diagnostic: _FailureDiagnostic,
+    ) -> bool:
+        """Persist one failed-evaluation event without changing optimizer state.
+
+        :param diagnostic: Failed-evaluation metadata to record.
+        :return: Whether required failure provenance was persisted successfully.
+        """
+        return _run_artifact_provenance(
+            self._artifact_provenance,
+            lambda: self._artifact_provenance.record_evaluation_failed(
+                diagnostic.candidate_id,
+                diagnostic.generation,
+                diagnostic.failure_reason,
+                diagnostic_path=diagnostic.source_path,
+                metadata={"input_index": diagnostic.input_index},
+            ),
+        )
+
+    def _update_failure_diagnostics(
+        self,
+        pending: list[_FailureDiagnostic],
+    ) -> list[_FailureDiagnostic]:
+        """Apply the most-recent-N failure diagnostic bound before checkpointing.
+
+        :param pending: Failed evaluator-source diagnostics accumulated since the last
+            durable generation boundary.
+        :return: Diagnostics detached from checkpoint state and eligible for post-commit
+            cleanup if their required provenance is durable.
+        """
+        by_id = {
+            diagnostic.candidate_id: diagnostic
+            for diagnostic in (*self._failure_diagnostics, *pending)
+        }
+        ordered = sorted(
+            by_id.values(),
+            key=lambda item: (
+                item.generation,
+                item.input_index,
+                item.candidate_id,
+            ),
+        )
+        if self.failure_diagnostic_count == 0:
+            retained: list[_FailureDiagnostic] = []
+            evicted = ordered
+        else:
+            retained = ordered[-self.failure_diagnostic_count:]
+            retained_ids = {item.candidate_id for item in retained}
+            evicted = [
+                item for item in ordered if item.candidate_id not in retained_ids
+            ]
+        self._failure_diagnostics = retained
+        return evicted
+
+    def _cleanup_failure_diagnostics(
+        self,
+        diagnostics: list[_FailureDiagnostic],
+    ) -> None:
+        """Best-effort cleanup of detached failed evaluator sources after commit.
+
+        A failed source is removed only after its lightweight failure event is durable.
+        Paths still referenced by successful artifact-store records or by the current
+        bounded diagnostic set are protected even if an evaluator reused a path.
+
+        :param diagnostics: Failed evaluator diagnostics detached before checkpoint
+            commit.
+        """
+        protected_paths = {
+            diagnostic.source_path
+            for diagnostic in self._failure_diagnostics
+            if diagnostic.source_path is not None
+        }
+        if self.artifact_store is not None:
+            try:
+                protected_paths.update(
+                    artifact.source_path
+                    for artifact in self.artifact_store.records()
+                    if artifact.source_path is not None
+                )
+            except ArtifactStoreError as exc:
+                warnings.warn(
+                    (
+                        "Failure diagnostic cleanup state could not be inspected: "
+                        f"{exc}"
+                    ),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                return
+
+        for diagnostic in diagnostics:
+            source_path = diagnostic.source_path
+            if source_path is None or source_path in protected_paths:
+                continue
+            if not self._record_failure_provenance(diagnostic):
+                warnings.warn(
+                    (
+                        "Artifact cleanup deferred because required failed-evaluation "
+                        "provenance could not be persisted for "
+                        f"{diagnostic.candidate_id!r}"
+                    ),
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                continue
+            try:
+                self._artifact_cleaner.cleanup_source(
+                    ArtifactCleanupRequest(
+                        candidate_id=diagnostic.candidate_id,
+                        source_path=Path(source_path),
+                    )
+                )
+                _run_artifact_provenance(
+                    self._artifact_provenance,
+                    lambda diagnostic=diagnostic: (
+                        self._artifact_provenance.record_failure_diagnostic_pruned(
+                            diagnostic.candidate_id,
+                            diagnostic.source_path,
+                        )
+                    ),
+                )
+            except ArtifactCleanupError as exc:
+                _run_artifact_provenance(
+                    self._artifact_provenance,
+                    lambda diagnostic=diagnostic, exc=exc: (
+                        self._artifact_provenance.record_cleanup_failed(
+                            "failure_diagnostic_prune",
+                            diagnostic.source_path,
+                            str(exc),
+                            candidate_id=diagnostic.candidate_id,
+                        )
+                    ),
+                )
+                warnings.warn(
+                    "Artifact cleanup failed for failed candidate "
+                    f"{diagnostic.candidate_id!r}: {exc}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+    def _write_owned_artifact_manifest(self) -> bool:
+        """Persist current owned-artifact state and required run provenance.
+
+        :return: Whether the manifest was persisted successfully.
+        """
+        return _write_artifact_manifest(
             self.artifact_store,
             self._artifact_provenance,
             ownership_metadata=self._retention_archive_mappings,
+            failure_diagnostics=self._failure_diagnostic_states(),
         )
 
     def _make_next_owned_generation(
@@ -2064,8 +2466,8 @@ class GeneticAlgorithmMinimizer:
     ) -> tuple[list[float], list[str | None], list[GBManipulator | None]]:
         """Evaluate all candidates, optionally using a batch energy function.
 
-        :param gen_checkpoint: If provided, already-evaluated candidates are skipped
-            and new results are recorded after each evaluation.
+        :param gen_checkpoint: If provided, already-evaluated candidates are skipped and
+            new results are recorded after each evaluation.
         :param cached_evaluations: Successful results aligned to unchanged carryover
             candidates. ``None`` entries are evaluated normally.
         :return: Aligned energies, evaluator artifact paths, and manipulators.
@@ -2381,7 +2783,7 @@ class GeneticAlgorithmMinimizer:
         return {
             "candidate_id": record.candidate_id,
             "input_index": record.input_index,
-            "energy": record.energy,
+            "energy": record.objective,
             "structure_path": record.structure_path,
             "mapping": (
                 None
@@ -2456,7 +2858,7 @@ class GeneticAlgorithmMinimizer:
             return CandidateEvaluation(
                 candidate_id=candidate_id,
                 input_index=input_index,
-                energy=energy,
+                objective=energy,
                 structure_path=structure_path,
                 mapping=mapping,
                 manipulator=None,
@@ -2490,7 +2892,7 @@ class GeneticAlgorithmMinimizer:
         return CandidateEvaluation(
             candidate_id=candidate_id,
             input_index=input_index,
-            energy=energy,
+            objective=energy,
             structure_path=structure_path,
             mapping=mapping,
             manipulator=manipulator,
@@ -2967,15 +3369,17 @@ class GeneticAlgorithmMinimizer:
         """Run the GA while preserving explicit ownership through every reload.
 
         :param unique_id: Argument, optional, defaults to ``None``. Run identifier.
-        :param checkpoint_file: Keyword argument, optional, defaults to ``None``. Run-level
-            checkpoint path used for generation-boundary and candidate-sidecar recovery.
+        :param checkpoint_file: Keyword argument, optional, defaults to ``None``.
+            Run-level checkpoint path used for generation-boundary and candidate-sidecar
+            recovery.
         :param checkpoint_format: Keyword argument, optional, defaults to ``"json"``.
             Checkpoint serialization format, either ``"json"`` or ``"pickle"``.
         :param checkpoint_interval: Keyword argument, optional, defaults to 1. Save the
             run-level checkpoint every N completed generations.
         :return: Minimum energy and validated structure path.
-        :raises GBMinimizerError: If evaluation fails initially, aligned population state
-            cannot be maintained, or checkpoint state cannot be reconstructed safely.
+        :raises GBMinimizerError: If evaluation fails initially, aligned population
+            state cannot be maintained, or checkpoint state cannot be reconstructed
+            safely.
         :raises GBMinimizerValueError: If checkpoint configuration is invalid.
         """
         if self._owned_evaluator is None:
@@ -3017,14 +3421,18 @@ class GeneticAlgorithmMinimizer:
             and not checkpoint.enabled
         ):
             raise GBMinimizerValueError(
-                "retention_policy prune=True requires checkpoint_file for durable cleanup"
+                "retention_policy prune=True requires checkpoint_file for durable "
+                "cleanup"
             )
 
         self._artifact_provenance = None
         if self.artifact_store is not None:
             archive_root = self._owned_archive_root(checkpoint_file, str(unique_id))
             try:
-                self._artifact_provenance = _ArtifactProvenance(archive_root)
+                self._artifact_provenance = _ArtifactProvenance(
+                    archive_root,
+                    calculation_context=self.calculation_context,
+                )
             except ArtifactProvenanceError as exc:
                 warnings.warn(
                     f"Artifact provenance initialization failed: {exc}",
@@ -3072,6 +3480,7 @@ class GeneticAlgorithmMinimizer:
                         self.crossover_max_tilt_degrees
                     ),
                     "crossover_attempts": self.crossover_attempts,
+                    "failure_diagnostic_count": self.failure_diagnostic_count,
                     "composition_policy": [
                         [species, coefficient]
                         for species, coefficient in self.composition_policy
@@ -3114,7 +3523,8 @@ class GeneticAlgorithmMinimizer:
                 if retention_state is None:
                     if self.retention_policy is not None:
                         raise GBMinimizerError(
-                            "checkpoint retention policy does not match the minimizer configuration"
+                            "checkpoint retention policy does not match the minimizer "
+                            "configuration"
                         )
                     self.artifact_store = None
                     self._retention_archive_mappings = {}
@@ -3139,26 +3549,48 @@ class GeneticAlgorithmMinimizer:
                     ):
                         if not isinstance(candidate_id, str):
                             raise GBMinimizerError(
-                                "checkpoint retention archive candidate identity is invalid"
+                                "checkpoint retention archive candidate identity is "
+                                "invalid"
                             )
                         try:
                             _candidate_mapping_from_state(mapping_state)
                         except GrainOwnershipError as exc:
                             raise GBMinimizerError(
-                                f"checkpoint retained ownership for {candidate_id!r} is invalid"
+                                f"checkpoint retained ownership for {candidate_id!r} "
+                                "is invalid"
                             ) from exc
                         self._retention_archive_mappings[candidate_id] = mapping_state
                     for artifact in self.artifact_store.records():
                         if artifact.archive_path is None:
                             continue
-                        if artifact.candidate_id not in self._retention_archive_mappings:
+                        if (
+                            artifact.candidate_id
+                            not in self._retention_archive_mappings
+                        ):
                             raise GBMinimizerError(
-                                f"checkpoint retained candidate {artifact.candidate_id!r} lacks ownership metadata"
+                                "checkpoint retained candidate "
+                                f"{artifact.candidate_id!r} lacks ownership metadata"
                             )
                         if not Path(artifact.archive_path).is_file():
                             raise GBMinimizerError(
-                                f"retained archive path {artifact.archive_path} is missing"
+                                f"retained archive path {artifact.archive_path} is "
+                                "missing"
                             )
+                raw_failure_diagnostics = owned_state.get(
+                    "failure_diagnostics", []
+                )
+                if not isinstance(raw_failure_diagnostics, list):
+                    raise GBMinimizerError(
+                        "checkpoint failure diagnostics state is invalid"
+                    )
+                self._failure_diagnostics = [
+                    _FailureDiagnostic.from_state(diagnostic_state)
+                    for diagnostic_state in raw_failure_diagnostics
+                ]
+                if len(self._failure_diagnostics) > self.failure_diagnostic_count:
+                    raise GBMinimizerError(
+                        "checkpoint failure diagnostics exceed the configured bound"
+                    )
                 _start_gen = int(progress_index) + 1
                 best_record = self._owned_evaluation_from_state(
                     owned_state["best_evaluation"]
@@ -3168,7 +3600,7 @@ class GeneticAlgorithmMinimizer:
                         "owned checkpoint best evaluation is not reusable"
                     )
                 if not np.isclose(
-                    best_record.energy,
+                    best_record.objective,
                     float(state["best_energy"]),
                     rtol=0.0,
                     atol=0.0,
@@ -3180,7 +3612,9 @@ class GeneticAlgorithmMinimizer:
                 if (
                     not isinstance(population_lineages, list)
                     or len(population_lineages) != self.population_size
-                    or not all(isinstance(lineage, list) for lineage in population_lineages)
+                    or not all(
+                        isinstance(lineage, list) for lineage in population_lineages
+                    )
                 ):
                     raise GBMinimizerError(
                         "owned checkpoint population lineages are invalid"
@@ -3225,7 +3659,10 @@ class GeneticAlgorithmMinimizer:
                     for cached_state in cached_states
                 ]
                 last_states = owned_state["last_generation_evaluations"]
-                if not isinstance(last_states, list) or len(last_states) != self.population_size:
+                if (
+                    not isinstance(last_states, list)
+                    or len(last_states) != self.population_size
+                ):
                     raise GBMinimizerError(
                         "owned checkpoint generation evaluations are invalid"
                     )
@@ -3270,7 +3707,7 @@ class GeneticAlgorithmMinimizer:
                     "initial explicit-ownership evaluation failed: "
                     f"{initial_record.failure_reason}"
                 )
-            self.GBE_vals.append([initial_record.energy])
+            self.GBE_vals.append([initial_record.objective])
             best_record = initial_record
             self.best_evaluation = best_record
             if self.artifact_store is not None:
@@ -3317,7 +3754,7 @@ class GeneticAlgorithmMinimizer:
                 "minimizer": "GeneticAlgorithmMinimizer",
                 "progress_unit": "generation",
                 "progress_index": gen,
-                "best_energy": best_record.energy,
+                "best_energy": best_record.objective,
                 "best_dump": best_record.structure_path,
                 "rng_state": self.local_random.bit_generator.state,
                 "run_params": {
@@ -3336,6 +3773,7 @@ class GeneticAlgorithmMinimizer:
                         self.crossover_max_tilt_degrees
                     ),
                     "crossover_attempts": self.crossover_attempts,
+                    "failure_diagnostic_count": self.failure_diagnostic_count,
                     "composition_policy": [
                         [species, coefficient]
                         for species, coefficient in self.composition_policy
@@ -3364,6 +3802,10 @@ class GeneticAlgorithmMinimizer:
                         else record.to_state()
                         for record in self.last_generation_evaluations
                     ],
+                    "failure_diagnostics": [
+                        diagnostic.to_state()
+                        for diagnostic in self._failure_diagnostics
+                    ],
                     "artifact_store": (
                         None
                         if self.artifact_store is None
@@ -3376,6 +3818,8 @@ class GeneticAlgorithmMinimizer:
                     "claimed_paths": self._owned_evaluator.claimed_paths_state(),
                 },
             }
+
+        pending_failure_diagnostics: list[_FailureDiagnostic] = []
 
         for gen in range(_start_gen, self.generations):
             current_pending = [
@@ -3413,6 +3857,20 @@ class GeneticAlgorithmMinimizer:
                 raise GBMinimizerError(str(exc)) from exc
             self.last_generation_evaluations = records
             if self.artifact_store is not None:
+                for record in records:
+                    if record.success:
+                        continue
+                    diagnostic = _FailureDiagnostic.from_evaluation(
+                        record, generation=gen
+                    )
+                    self._record_failure_provenance(diagnostic)
+                    if (
+                        self.artifact_store.pruning_enabled
+                        and diagnostic.source_path is not None
+                    ):
+                        pending_failure_diagnostics.append(diagnostic)
+
+            if self.artifact_store is not None:
                 for record, lineage in zip(
                     records, population_retention_lineages, strict=True
                 ):
@@ -3426,7 +3884,7 @@ class GeneticAlgorithmMinimizer:
                             self.artifact_store.pin(
                                 record.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
                             )
-            generation_energies = [record.energy for record in records]
+            generation_energies = [record.objective for record in records]
             self.GBE_vals.append(generation_energies)
             self.history.append(list(zip(population_lineages, generation_energies)))
             valid_records = [record for record in records if record.success]
@@ -3457,7 +3915,7 @@ class GeneticAlgorithmMinimizer:
                 population_cached_evaluations = next_cached_evaluations
             else:
                 for record in valid_records:
-                    if record.energy < best_record.energy:
+                    if record.objective < best_record.objective:
                         best_record = record
                         self.best_evaluation = record
                         if self.artifact_store is not None:
@@ -3465,7 +3923,7 @@ class GeneticAlgorithmMinimizer:
                                 ArtifactPin.BEST_RESULT, record.candidate_id
                             )
 
-                valid_energies = [record.energy for record in valid_records]
+                valid_energies = [record.objective for record in valid_records]
                 lowest_indices, intermediate_indices = self._select_indices_by_energy(
                     valid_energies
                 )
@@ -3533,6 +3991,7 @@ class GeneticAlgorithmMinimizer:
                 checkpoint.is_due(gen + 1) or is_final_gen
             )
             archive_evictions: list[tuple[str, str]] = []
+            failure_evictions: list[_FailureDiagnostic] = []
             if committed:
                 new_snapshots = self._write_owned_population_checkpoint(
                     checkpoint_file,
@@ -3581,6 +4040,10 @@ class GeneticAlgorithmMinimizer:
                         manipulator=best_record.manipulator,
                     )
                     self.best_evaluation = best_record
+                    if self.artifact_store.pruning_enabled:
+                        failure_evictions = self._update_failure_diagnostics(
+                            pending_failure_diagnostics
+                        )
                 try:
                     checkpoint.save_final(_build_owned_state(gen))
                 except CheckpointError as exc:
@@ -3608,16 +4071,37 @@ class GeneticAlgorithmMinimizer:
                     )
                 if self.artifact_store is not None and not committed:
                     for record in records:
-                        if record.success and record.candidate_id in self.artifact_store:
+                        if (
+                            record.success
+                            and record.candidate_id in self.artifact_store
+                        ):
                             self.artifact_store.release_pin(
                                 record.candidate_id, ArtifactPin.CANDIDATE_CHECKPOINT
                             )
             if committed and self.artifact_store is not None:
-                self._cleanup_committed_owned_artifacts(
-                    archive_evictions, archive_root=archive_root
-                )
-            if self.artifact_store is not None:
+                provenance_ready = self._write_owned_artifact_manifest()
+                if provenance_ready:
+                    _cleanup_committed_artifacts(
+                        self.artifact_store,
+                        self._artifact_cleaner,
+                        self._artifact_provenance,
+                        archive_evictions,
+                        archive_root=archive_root,
+                    )
+                    self._cleanup_failure_diagnostics(failure_evictions)
+                else:
+                    warnings.warn(
+                        (
+                            "Artifact cleanup deferred because required calculation "
+                            "provenance could not be persisted"
+                        ),
+                        RuntimeWarning,
+                        stacklevel=2,
+                    )
+                pending_failure_diagnostics.clear()
+                self._write_owned_artifact_manifest()
+            elif self.artifact_store is not None:
                 self._write_owned_artifact_manifest()
 
         self.best_evaluation = best_record
-        return best_record.energy, str(best_record.structure_path)
+        return best_record.objective, str(best_record.structure_path)

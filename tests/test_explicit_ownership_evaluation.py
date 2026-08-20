@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from GBOpt.FileGrainOwnership import GrainOwnershipError
-from GBOpt.GBManipulator import GBManipulatorError, ParentError
 from GBOpt._explicit_ownership_evaluation import (
     CandidateEvaluation,
     ExplicitOwnershipEvaluator,
 )
+from GBOpt.FileGrainOwnership import GrainOwnershipError
+from GBOpt.GBManipulator import GBManipulatorError, ParentError
 
 
 def _evaluator(**overrides):
@@ -84,7 +84,7 @@ def test_evaluator_validates_configuration(overrides, error, match):
 
 def test_evaluator_requires_optimizer_supplied_penalty():
     with pytest.raises(TypeError, match="penalty"):
-        ExplicitOwnershipEvaluator(
+        ExplicitOwnershipEvaluator(  # ty: ignore[missing-argument]
             GB=SimpleNamespace(),
             scalar_energy_func=lambda *args: None,
             batch_energy_func=None,
@@ -96,7 +96,7 @@ def test_candidate_evaluation_normalizes_python_scalar_fields():
     result = CandidateEvaluation(
         candidate_id="GA_initial1",
         input_index=np.int64(-1),
-        energy=np.float64(2.5),
+        objective=np.float64(2.5),
         structure_path=None,
         mapping=None,
         manipulator=None,
@@ -106,8 +106,8 @@ def test_candidate_evaluation_normalizes_python_scalar_fields():
 
     assert result.input_index == -1
     assert type(result.input_index) is int
-    assert result.energy == pytest.approx(2.5)
-    assert type(result.energy) is float
+    assert result.objective == pytest.approx(2.5)
+    assert type(result.objective) is float
 
 
 @pytest.mark.parametrize(
@@ -132,10 +132,10 @@ def test_candidate_evaluation_normalizes_python_scalar_fields():
             id="boolean-index",
         ),
         pytest.param(
-            {"energy": np.nan},
+            {"objective": np.nan},
             ValueError,
-            "energy must be finite",
-            id="nonfinite-energy",
+            "objective must be finite",
+            id="nonfinite-objective",
         ),
         pytest.param(
             {"success": np.bool_(False)},
@@ -161,7 +161,7 @@ def test_failed_candidate_evaluation_rejects_incoherent_state(kwargs, error, mat
     arguments = {
         "candidate_id": "GA_1_g0_c0",
         "input_index": 0,
-        "energy": 1.0e30,
+        "objective": 1.0e30,
         "structure_path": None,
         "mapping": None,
         "manipulator": None,
@@ -203,7 +203,7 @@ def test_successful_candidate_evaluation_rejects_incoherent_state(kwargs, match)
     arguments = {
         "candidate_id": "GA_1_g0_c0",
         "input_index": 0,
-        "energy": 1.25,
+        "objective": 1.25,
         "structure_path": "/tmp/candidate.data",
         "mapping": object(),
         "manipulator": object(),
@@ -223,12 +223,12 @@ def test_invalid_structure_path_becomes_typed_failed_evaluation():
         candidate_id="GA_1_g0_c4",
         input_index=4,
         mapping=object(),
-        energy=1.0,
+        objective=1.0,
         structure_path="invalid\x00path",
     )
 
     assert result.success is False
-    assert result.energy == pytest.approx(123.0)
+    assert result.objective == pytest.approx(123.0)
     assert result.manipulator is None
     assert result.structure_path is None
     assert "invalid structure path" in result.failure_reason

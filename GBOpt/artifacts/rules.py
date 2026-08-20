@@ -30,15 +30,6 @@ from GBOpt.artifacts.types import (
 
 Direction = Literal["min", "max"]
 
-__all__ = [
-    "ArtifactRuleError",
-    "KeepBest",
-    "KeepDistinct",
-    "KeepIf",
-    "KeepRange",
-    "MissingRetentionPropertyError",
-]
-
 
 class ArtifactRuleError(ArtifactError):
     """Raised when retention rule configuration or evaluation is invalid."""
@@ -81,7 +72,7 @@ def _normalize_bound(count: object, allow_unbounded: object) -> int | None:
     :return: Positive Python integer or ``None`` for explicit unbounded retention.
     :raises ArtifactRuleError: If boundedness configuration is invalid.
     """
-    if type(allow_unbounded) is not bool:
+    if not isinstance(allow_unbounded, bool):
         raise ArtifactRuleError("allow_unbounded must be a bool")
     if count is None:
         if not allow_unbounded:
@@ -109,7 +100,8 @@ def _normalize_rank_configuration(
     :param rank_by: Keyword argument, required. Candidate ranking property.
     :param direction: Keyword argument, required. Candidate ranking direction.
     :return: Normalized ranking property and direction.
-    :raises ArtifactRuleError: If bounded rules omit ranking or unbounded rules supply it.
+    :raises ArtifactRuleError: If bounded rules omit ranking or unbounded rules supply
+        it.
     """
     if count is None:
         if rank_by is not None or direction is not None:
@@ -129,12 +121,14 @@ def _candidate_sequence(
 
     :param candidates: Candidate population supplied to a rule.
     :return: Candidate population as a tuple.
-    :raises ArtifactRuleError: If a value is not a retention candidate or an identity repeats.
+    :raises ArtifactRuleError: If a value is not a retention candidate or an identity
+        repeats.
     """
     try:
         result = tuple(candidates)
     except TypeError as exc:
-        raise ArtifactRuleError("rules require an iterable of RetentionCandidate values") from exc
+        raise ArtifactRuleError(
+            "rules require an iterable of RetentionCandidate values") from exc
     seen: set[str] = set()
     for candidate in result:
         if not isinstance(candidate, RetentionCandidate):
@@ -159,7 +153,8 @@ def _property(candidate: RetentionCandidate, name: str) -> RetentionValue:
         return candidate.property_value(name)
     except KeyError as exc:
         raise MissingRetentionPropertyError(
-            f"candidate {candidate.candidate_id!r} is missing required property {name!r}"
+            f"candidate {candidate.candidate_id!r} is missing required property "
+            f"{name!r}"
         ) from exc
 
 
@@ -242,9 +237,11 @@ def _limit(
     :param candidates: Qualifying candidates.
     :param count: Keyword argument, required. Retention bound or ``None``.
     :param rank_by: Keyword argument, required. Ranking property for bounded membership.
-    :param direction: Keyword argument, required. Ranking direction for bounded membership.
+    :param direction: Keyword argument, required. Ranking direction for bounded
+        membership.
     :return: Retained candidate identities in deterministic order.
-    :raises MissingRetentionPropertyError: If bounded ranking requires a missing property.
+    :raises MissingRetentionPropertyError: If bounded ranking requires a missing
+        property.
     :raises ArtifactRuleError: If bounded ranking values use incompatible type families.
     """
     candidates = tuple(candidates)
@@ -277,10 +274,7 @@ class RetentionRule(ABC):
     @property
     @abstractmethod
     def required_properties(self) -> frozenset[str]:
-        """Return properties whose presence can be validated declaratively.
-
-        :return: Required property names.
-        """
+        """Return properties whose presence can be validated declaratively"""
 
     @abstractmethod
     def select(
@@ -294,10 +288,7 @@ class RetentionRule(ABC):
 
     @abstractmethod
     def to_state(self) -> dict[str, object]:
-        """Return deterministic callback-free declarative rule state.
-
-        :return: JSON-safe declarative rule configuration.
-        """
+        """Return deterministic callback-free declarative rule state."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -336,10 +327,7 @@ class KeepBest(RetentionRule):
 
     @property
     def required_properties(self) -> frozenset[str]:
-        """Return the ranking property required by this rule.
-
-        :return: Required property-name set.
-        """
+        """Return the ranking property required by this rule."""
         return frozenset({self.property})
 
     def select(
@@ -361,10 +349,7 @@ class KeepBest(RetentionRule):
         return tuple(candidate.candidate_id for candidate in ranked)
 
     def to_state(self) -> dict[str, object]:
-        """Return deterministic declarative rule state.
-
-        :return: JSON-safe callback-free rule configuration.
-        """
+        """Return deterministic declarative rule state."""
         return {
             "type": "KeepBest",
             "name": self.name,
@@ -415,7 +400,8 @@ class KeepRange(RetentionRule):
         except ArtifactValueError as exc:
             raise ArtifactRuleError(str(exc)) from exc
         if _value_kind(minimum) != _value_kind(maximum):
-            raise ArtifactRuleError("minimum and maximum must use comparable value types")
+            raise ArtifactRuleError(
+                "minimum and maximum must use comparable value types")
         minimum_key = _ordering_key(minimum)
         maximum_key = _ordering_key(maximum)
         if minimum_key > maximum_key:
@@ -477,10 +463,7 @@ class KeepRange(RetentionRule):
         )
 
     def to_state(self) -> dict[str, object]:
-        """Return deterministic declarative rule state.
-
-        :return: JSON-safe callback-free rule configuration.
-        """
+        """Return deterministic declarative rule state."""
         return {
             "type": "KeepRange",
             "name": self.name,
@@ -534,21 +517,17 @@ class KeepDistinct(RetentionRule):
 
     @property
     def required_properties(self) -> frozenset[str]:
-        """Return grouping and ranking properties.
-
-        :return: Required property-name set.
-        """
+        """Return grouping and ranking properties."""
         return frozenset({self.property, self.rank_by})
 
-    def select(
-        self, candidates: Iterable[RetentionCandidate]
-    ) -> tuple[str, ...]:
+    def select(self, candidates: Iterable[RetentionCandidate]) -> tuple[str, ...]:
         """Return bounded representatives from each discrete value bucket.
 
         :param candidates: Current evaluated candidate population.
         :return: Retained candidate identities grouped in deterministic bucket order.
         :raises ArtifactRuleError: If a grouping value is not discrete.
-        :raises MissingRetentionPropertyError: If grouping or ranking properties are missing.
+        :raises MissingRetentionPropertyError: If grouping or ranking properties are
+            missing.
         """
         candidates = _candidate_sequence(candidates)
         buckets: dict[RetentionValue, list[RetentionCandidate]] = defaultdict(list)
@@ -572,10 +551,7 @@ class KeepDistinct(RetentionRule):
         return tuple(selected)
 
     def to_state(self) -> dict[str, object]:
-        """Return deterministic declarative rule state.
-
-        :return: JSON-safe callback-free rule configuration.
-        """
+        """Return deterministic declarative rule state."""
         return {
             "type": "KeepDistinct",
             "name": self.name,
@@ -597,7 +573,8 @@ class KeepIf(RetentionRule):
     :param rank_by: Ranking property required for bounded membership.
     :param direction: Ranking direction required for bounded membership.
     :param allow_unbounded: Explicit opt-in required when ``count`` is ``None``.
-    :raises ArtifactRuleError: If callback, identity, ranking, or boundedness is invalid.
+    :raises ArtifactRuleError: If callback, identity, ranking, or boundedness is
+        invalid.
     """
 
     name: str
@@ -611,7 +588,8 @@ class KeepIf(RetentionRule):
     def __post_init__(self) -> None:
         """Validate callback identity, ranking, and boundedness.
 
-        :raises ArtifactRuleError: If callback, identity, ranking, or boundedness is invalid.
+        :raises ArtifactRuleError: If callback, identity, ranking, or boundedness is
+            invalid.
         """
         name = _require_name(self.name, "name")
         if not callable(self.predicate):
@@ -648,7 +626,8 @@ class KeepIf(RetentionRule):
         :param candidates: Current evaluated candidate population.
         :return: Retained candidate identities.
         :raises ArtifactRuleError: If the predicate does not return a Boolean value.
-        :raises MissingRetentionPropertyError: If the predicate or ranking needs a missing property.
+        :raises MissingRetentionPropertyError: If the predicate or ranking needs a
+            missing property.
         """
         candidates = _candidate_sequence(candidates)
         qualifying: list[RetentionCandidate] = []
@@ -677,10 +656,7 @@ class KeepIf(RetentionRule):
         )
 
     def to_state(self) -> dict[str, object]:
-        """Return callback-free declarative rule state with explicit version.
-
-        :return: JSON-safe rule configuration excluding the callback object.
-        """
+        """Return callback-free declarative rule state with explicit version."""
         return {
             "type": "KeepIf",
             "name": self.name,
@@ -690,3 +666,13 @@ class KeepIf(RetentionRule):
             "direction": self.direction,
             "allow_unbounded": self.allow_unbounded,
         }
+
+
+__all__ = [
+    "ArtifactRuleError",
+    "KeepBest",
+    "KeepDistinct",
+    "KeepIf",
+    "KeepRange",
+    "MissingRetentionPropertyError",
+]

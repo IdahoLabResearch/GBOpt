@@ -3,10 +3,10 @@
 """Persist artifact lifecycle provenance without becoming restart state.
 
 This module consumes immutable artifact-store snapshots and lifecycle notifications and
-writes two lightweight products beneath a run-owned artifact root: an atomically replaced
-``manifest.json`` describing current artifact state and an append-only ``history.jsonl``
-describing lifecycle events. It does not decide retention membership, perform optimizer
-selection, serialize checkpoints, or remove filesystem artifacts.
+writes two lightweight products beneath a run-owned artifact root: an atomically
+replaced ``manifest.json`` describing current artifact state and an append-only
+``history.jsonl`` describing lifecycle events. It does not decide retention membership,
+perform optimizer selection, serialize checkpoints, or remove filesystem artifacts.
 """
 
 from __future__ import annotations
@@ -15,13 +15,15 @@ import json
 import math
 import os
 from collections.abc import Mapping, Sequence
+from numbers import Integral
 from pathlib import Path
 
 import numpy as np
 
+from GBOpt.artifacts._paths import _normalize_path
 from GBOpt.artifacts.types import ArtifactError, ArtifactRecord, RetentionCandidate
 
-_MANIFEST_VERSION = 1
+_MANIFEST_VERSION = 2
 _HISTORY_VERSION = 1
 
 
@@ -40,29 +42,6 @@ def _require_nonempty_string(value: object, *, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ArtifactProvenanceError(f"{name} must be a non-empty string")
     return value
-
-
-def _normalize_path(value: object, *, name: str) -> Path:
-    """Normalize one non-empty text filesystem path.
-
-    :param value: Path-like value to normalize.
-    :param name: Keyword argument, required. Field name used in diagnostics.
-    :return: Absolute lexical path.
-    :raises ArtifactProvenanceError: If ``value`` is not a non-empty text path-like value.
-    """
-    if not isinstance(value, (str, os.PathLike)):
-        raise ArtifactProvenanceError(f"{name} must be a non-empty path-like value")
-    try:
-        raw = os.fspath(value)
-    except TypeError as exc:
-        raise ArtifactProvenanceError(
-            f"{name} must be a non-empty path-like value"
-        ) from exc
-    if isinstance(raw, bytes):
-        raise ArtifactProvenanceError(f"{name} must use a text filesystem path")
-    if not raw.strip():
-        raise ArtifactProvenanceError(f"{name} must be a non-empty path-like value")
-    return Path(os.path.abspath(raw))
 
 
 def _canonical_json(value: object, *, context: str) -> str:
@@ -131,9 +110,7 @@ def _json_safe_value(value: object, *, context: str) -> object:
             )
         result: dict[str, object] = {}
         for key in sorted(keys):
-            result[key] = _json_safe_value(
-                value[key], context=f"{context}.{key}"
-            )
+            result[key] = _json_safe_value(value[key], context=f"{context}.{key}")
         return result
     raise ArtifactProvenanceError(
         f"{context} contains unsupported type {type(value).__name__}"
@@ -153,6 +130,47 @@ def _json_copy(value: object, *, context: str) -> object:
     return json.loads(encoded)
 
 
+def _normalize_calculation_context(
+    value: object,
+) -> dict[str, object] | None:
+    """Validate and detach optional run-level calculation provenance.
+
+    :param value: Mapping supplied by the evaluator/campaign, or ``None``.
+    :return: Deterministically normalized plain-JSON mapping, or ``None``.
+    :raises ArtifactProvenanceError: If ``value`` is not a mapping or contains
+        unsupported provenance values.
+    """
+    normalized: dict[str, object] | None = None
+    if value is not None:
+        if not isinstance(value, Mapping):
+            raise ArtifactProvenanceError(
+                "calculation_context must be a mapping or None"
+            )
+        copied = _json_copy(value, context="calculation_context")
+        if not isinstance(copied, dict):
+            raise ArtifactProvenanceError(
+                "calculation_context must normalize to a JSON object"
+            )
+        normalized = copied
+    return normalized
+
+
+def _require_nonnegative_int(value: object, *, name: str) -> int:
+    """Validate one non-negative provenance integer.
+
+    :param value: Candidate integer value.
+    :param name: Keyword argument, required. Field name used in diagnostics.
+    :return: Validated Python integer.
+    :raises ArtifactProvenanceError: If ``value`` is Boolean, non-integral, or negative.
+    """
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ArtifactProvenanceError(f"{name} must be a non-negative integer")
+    normalized = int(value)
+    if normalized < 0:
+        raise ArtifactProvenanceError(f"{name} must be a non-negative integer")
+    return normalized
+
+
 class _ArtifactProvenance:
     """Write current artifact manifests and append-only lifecycle history.
 
@@ -162,44 +180,79 @@ class _ArtifactProvenance:
     checkpoints and then regenerate the manifest from that state.
 
     :param root: Run-owned artifact directory containing provenance files.
-    :raises ArtifactProvenanceError: If ``root`` is invalid or an existing history file is
-        malformed.
+    :param calculation_context: Keyword argument, optional, defaults to ``None``.
+        Run-level evaluator/campaign provenance shared by retained/final results.
+    :raises ArtifactProvenanceError: If configuration is invalid or an existing history
+        file is malformed.
     """
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        *,
+        calculation_context: Mapping[str, object] | None = None,
+    ) -> None:
         """Initialize one provenance writer for a run-owned artifact root.
 
         :param root: Run-owned artifact directory containing provenance files.
-        :raises ArtifactProvenanceError: If ``root`` is invalid or an existing history file
-            is malformed.
+        :param calculation_context: Keyword argument, optional, defaults to ``None``.
+            Run-level evaluator/campaign provenance shared by retained/final results.
+        :raises ArtifactProvenanceError: If ``root`` or ``calculation_context`` is
+            invalid, or an existing history file is malformed.
         """
-        self._root = _normalize_path(root, name="root")
+        self._root = _normalize_path(
+            root, name="root", error_type=ArtifactProvenanceError
+        )
         self._manifest_path = self._root / "manifest.json"
         self._history_path = self._root / "history.jsonl"
+        self._calculation_context = _normalize_calculation_context(calculation_context)
+        self._validate_existing_calculation_context()
         self._history_entries = self._load_existing_history()
+
+    def _validate_existing_calculation_context(self) -> None:
+        """Reject silent replacement of run-level calculation provenance.
+
+        Existing provenance is not restart-authoritative, so a mismatch does not
+        invalidate optimizer state. Initialization fails instead, which causes callers
+        to retain source artifacts rather than overwrite the established run context.
+
+        :raises ArtifactProvenanceError: If an existing manifest is malformed or its
+            calculation context differs from the configured context.
+        """
+        if not self._manifest_path.exists():
+            return
+        try:
+            manifest = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ArtifactProvenanceError(
+                f"existing artifact manifest could not be read: {self._manifest_path}"
+            ) from exc
+        if not isinstance(manifest, dict):
+            raise ArtifactProvenanceError(
+                "existing artifact manifest must contain a JSON object"
+            )
+        if manifest.get("calculation_context") != self._calculation_context:
+            raise ArtifactProvenanceError(
+                "existing artifact calculation_context does not match the configured "
+                "run context"
+            )
 
     @property
     def manifest_path(self) -> Path:
-        """Return the current-state manifest path.
-
-        :return: Absolute ``manifest.json`` path.
-        """
+        """Return the current-state manifest path."""
         return self._manifest_path
 
     @property
     def history_path(self) -> Path:
-        """Return the append-only lifecycle history path.
-
-        :return: Absolute ``history.jsonl`` path.
-        """
+        """Return the append-only lifecycle history path."""
         return self._history_path
 
     def _load_existing_history(self) -> set[str]:
         """Load canonical existing history entries for idempotent replay.
 
         :return: Canonical JSON strings already present in the history file.
-        :raises ArtifactProvenanceError: If the history file cannot be read or contains a
-            malformed/non-object JSONL entry.
+        :raises ArtifactProvenanceError: If the history file cannot be read or contains
+            a malformed/non-object JSONL entry.
         """
         if not self._history_path.exists():
             return set()
@@ -239,7 +292,8 @@ class _ArtifactProvenance:
         """Append one deterministic lifecycle event unless it already exists.
 
         :param event: Complete JSON-safe event object.
-        :raises ArtifactProvenanceError: If the event is malformed or cannot be persisted.
+        :raises ArtifactProvenanceError: If the event is malformed or cannot be
+            persisted.
         """
         event = {"version": _HISTORY_VERSION, **event}
         encoded = _canonical_json(event, context="artifact history event")
@@ -257,12 +311,64 @@ class _ArtifactProvenance:
             ) from exc
         self._history_entries.add(encoded)
 
+    def _record_retention_reason_event(
+        self,
+        event: str,
+        candidate_id: str,
+        reason: str,
+    ) -> None:
+        """Record one validated retention-reason lifecycle event.
+
+        :param event: Lifecycle event name.
+        :param candidate_id: Stable logical candidate identity.
+        :param reason: Scientific retention reason.
+        :raises ArtifactProvenanceError: If fields are invalid or history cannot be
+            persisted.
+        """
+        self._append_event(
+            {
+                "event": event,
+                "candidate_id": _require_nonempty_string(
+                    candidate_id, name="candidate_id"
+                ),
+                "reason": _require_nonempty_string(reason, name="reason"),
+            }
+        )
+
+    def _record_path_event(
+        self,
+        event: str,
+        candidate_id: str,
+        path: str | os.PathLike[str],
+    ) -> None:
+        """Record one validated candidate/path lifecycle event.
+
+        :param event: Lifecycle event name.
+        :param candidate_id: Stable logical candidate identity.
+        :param path: Filesystem path associated with the event.
+        :raises ArtifactProvenanceError: If fields are invalid or history cannot be
+            persisted.
+        """
+        self._append_event(
+            {
+                "event": event,
+                "candidate_id": _require_nonempty_string(
+                    candidate_id, name="candidate_id"
+                ),
+                "path": str(
+                    _normalize_path(
+                        path, name="path", error_type=ArtifactProvenanceError
+                    )
+                ),
+            }
+        )
+
     def record_candidate_evaluated(self, candidate: RetentionCandidate) -> None:
         """Record one successful validated candidate evaluation.
 
         :param candidate: Candidate that reached scientific retention classification.
-        :raises ArtifactProvenanceError: If ``candidate`` is invalid or history cannot be
-            persisted.
+        :raises ArtifactProvenanceError: If ``candidate`` is invalid or history cannot
+            be persisted.
         """
         if not isinstance(candidate, RetentionCandidate):
             raise ArtifactProvenanceError("candidate must be a RetentionCandidate")
@@ -277,12 +383,79 @@ class _ArtifactProvenance:
             }
         )
 
+    def record_evaluation_failed(
+        self,
+        candidate_id: str,
+        generation: int,
+        failure_reason: str,
+        *,
+        diagnostic_path: str | os.PathLike[str] | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> None:
+        """Record one failed evaluation without promoting it to retention state.
+
+        :param candidate_id: Stable logical candidate identity.
+        :param generation: Optimizer generation/step where evaluation occurred.
+        :param failure_reason: Human-readable durable failure context.
+        :param diagnostic_path: Keyword argument, optional, defaults to ``None``.
+            Evaluator artifact path available for bounded diagnostic retention.
+        :param metadata: Keyword argument, optional, defaults to ``None``. Additional
+            JSON-safe evaluator/campaign diagnostic identifiers.
+        :raises ArtifactProvenanceError: If fields are invalid or history cannot be
+            persisted.
+        """
+        normalized_path = None
+        if diagnostic_path is not None:
+            normalized_path = str(
+                _normalize_path(
+                    diagnostic_path,
+                    name="diagnostic_path",
+                    error_type=ArtifactProvenanceError,
+                )
+            )
+        normalized_metadata = None
+        if metadata is not None:
+            if not isinstance(metadata, Mapping):
+                raise ArtifactProvenanceError("metadata must be a mapping or None")
+            normalized_metadata = _json_copy(
+                metadata, context="failed evaluation metadata"
+            )
+        self._append_event(
+            {
+                "event": "evaluation_failed",
+                "candidate_id": _require_nonempty_string(
+                    candidate_id, name="candidate_id"
+                ),
+                "generation": _require_nonnegative_int(generation, name="generation"),
+                "evaluation_status": "failure",
+                "failure_reason": _require_nonempty_string(
+                    failure_reason, name="failure_reason"
+                ),
+                "diagnostic_path": normalized_path,
+                "metadata": normalized_metadata,
+            }
+        )
+
+    def record_failure_diagnostic_pruned(
+        self,
+        candidate_id: str,
+        path: str | os.PathLike[str],
+    ) -> None:
+        """Record removal of one bounded failed-evaluation diagnostic source.
+
+        :param candidate_id: Stable logical candidate identity.
+        :param path: Evaluator diagnostic source removed after a durable checkpoint.
+        :raises ArtifactProvenanceError: If fields are invalid or history cannot be
+            persisted.
+        """
+        self._record_path_event("failure_diagnostic_pruned", candidate_id, path)
+
     def record_properties_calculated(self, candidate: RetentionCandidate) -> None:
         """Record the normalized property mapping calculated for one candidate.
 
         :param candidate: Candidate whose retention properties were validated.
-        :raises ArtifactProvenanceError: If ``candidate`` is invalid or history cannot be
-            persisted.
+        :raises ArtifactProvenanceError: If ``candidate`` is invalid or history cannot
+            be persisted.
         """
         if not isinstance(candidate, RetentionCandidate):
             raise ArtifactProvenanceError("candidate must be a RetentionCandidate")
@@ -304,14 +477,8 @@ class _ArtifactProvenance:
         :raises ArtifactProvenanceError: If fields are invalid or history cannot be
             persisted.
         """
-        self._append_event(
-            {
-                "event": "retention_reason_added",
-                "candidate_id": _require_nonempty_string(
-                    candidate_id, name="candidate_id"
-                ),
-                "reason": _require_nonempty_string(reason, name="reason"),
-            }
+        self._record_retention_reason_event(
+            "retention_reason_added", candidate_id, reason
         )
 
     def record_retention_reason_removed(self, candidate_id: str, reason: str) -> None:
@@ -322,17 +489,13 @@ class _ArtifactProvenance:
         :raises ArtifactProvenanceError: If fields are invalid or history cannot be
             persisted.
         """
-        self._append_event(
-            {
-                "event": "retention_reason_removed",
-                "candidate_id": _require_nonempty_string(
-                    candidate_id, name="candidate_id"
-                ),
-                "reason": _require_nonempty_string(reason, name="reason"),
-            }
+        self._record_retention_reason_event(
+            "retention_reason_removed", candidate_id, reason
         )
 
-    def record_archive_created(self, candidate_id: str, path: str | os.PathLike[str]) -> None:
+    def record_archive_created(
+        self, candidate_id: str, path: str | os.PathLike[str]
+    ) -> None:
         """Record creation or refresh of one canonical retained structure.
 
         :param candidate_id: Stable logical candidate identity.
@@ -340,17 +503,11 @@ class _ArtifactProvenance:
         :raises ArtifactProvenanceError: If fields are invalid or history cannot be
             persisted.
         """
-        self._append_event(
-            {
-                "event": "archive_created",
-                "candidate_id": _require_nonempty_string(
-                    candidate_id, name="candidate_id"
-                ),
-                "path": str(_normalize_path(path, name="path")),
-            }
-        )
+        self._record_path_event("archive_created", candidate_id, path)
 
-    def record_source_pruned(self, candidate_id: str, path: str | os.PathLike[str]) -> None:
+    def record_source_pruned(
+        self, candidate_id: str, path: str | os.PathLike[str]
+    ) -> None:
         """Record successful cleanup of one evaluator-owned source artifact.
 
         :param candidate_id: Stable logical candidate identity.
@@ -358,17 +515,11 @@ class _ArtifactProvenance:
         :raises ArtifactProvenanceError: If fields are invalid or history cannot be
             persisted.
         """
-        self._append_event(
-            {
-                "event": "source_pruned",
-                "candidate_id": _require_nonempty_string(
-                    candidate_id, name="candidate_id"
-                ),
-                "path": str(_normalize_path(path, name="path")),
-            }
-        )
+        self._record_path_event("source_pruned", candidate_id, path)
 
-    def record_archive_evicted(self, candidate_id: str, path: str | os.PathLike[str]) -> None:
+    def record_archive_evicted(
+        self, candidate_id: str, path: str | os.PathLike[str]
+    ) -> None:
         """Record successful deletion of one no-longer-retained canonical structure.
 
         :param candidate_id: Stable logical candidate identity.
@@ -376,15 +527,7 @@ class _ArtifactProvenance:
         :raises ArtifactProvenanceError: If fields are invalid or history cannot be
             persisted.
         """
-        self._append_event(
-            {
-                "event": "archive_evicted",
-                "candidate_id": _require_nonempty_string(
-                    candidate_id, name="candidate_id"
-                ),
-                "path": str(_normalize_path(path, name="path")),
-            }
-        )
+        self._record_path_event("archive_evicted", candidate_id, path)
 
     def record_cleanup_failed(
         self,
@@ -398,7 +541,8 @@ class _ArtifactProvenance:
 
         :param operation: Lifecycle operation that failed, for example ``source_prune``
             or ``archive_evict``.
-        :param path: Cleanup target or evaluator source path associated with the failure.
+        :param path: Cleanup target or evaluator source path associated with the
+            failure.
         :param message: Failure diagnostic text.
         :param candidate_id: Keyword argument, optional, defaults to ``None``. Candidate
             identity when the cleanup target is candidate-specific.
@@ -415,7 +559,11 @@ class _ArtifactProvenance:
                 "event": "cleanup_failed",
                 "operation": _require_nonempty_string(operation, name="operation"),
                 "candidate_id": normalized_candidate_id,
-                "path": str(_normalize_path(path, name="path")),
+                "path": str(
+                    _normalize_path(
+                        path, name="path", error_type=ArtifactProvenanceError
+                    )
+                ),
                 "message": _require_nonempty_string(message, name="message"),
             }
         )
@@ -425,33 +573,49 @@ class _ArtifactProvenance:
         records: Sequence[ArtifactRecord],
         *,
         ownership_metadata: Mapping[str, object] | None = None,
+        failure_diagnostics: Sequence[Mapping[str, object]] = (),
     ) -> None:
-        """Atomically replace the current artifact manifest from authoritative snapshots.
+        """Atomically replace the current artifact manifest from authoritative
+        snapshots.
 
         Candidate records are sorted lexically by stable identity. Optional ownership
-        metadata is copied into the corresponding manifest record but is never interpreted
-        here; reconstruction semantics remain owned by the explicit-ownership layer.
+        metadata is copied into the corresponding manifest record but is never
+        interpreted here; reconstruction semantics remain owned by the
+        explicit-ownership layer.
 
         :param records: Current immutable artifact-store snapshots.
         :param ownership_metadata: Keyword argument, optional, defaults to ``None``.
             Candidate-ID to JSON-safe explicit-reconstruction metadata.
+        :param failure_diagnostics: Keyword argument, optional, defaults to ``()``.
+            Current bounded failed-evaluation diagnostic records retained outside
+            ``ArtifactStore``.
         :raises ArtifactProvenanceError: If records/metadata are malformed or the atomic
             manifest write fails.
         """
         if not isinstance(records, Sequence) or isinstance(records, (str, bytes)):
-            raise ArtifactProvenanceError("records must be a sequence of ArtifactRecord values")
+            raise ArtifactProvenanceError(
+                "records must be a sequence of ArtifactRecord values"
+            )
         normalized_records = tuple(records)
         if any(not isinstance(record, ArtifactRecord) for record in normalized_records):
-            raise ArtifactProvenanceError("records must contain only ArtifactRecord values")
+            raise ArtifactProvenanceError(
+                "records must contain only ArtifactRecord values"
+            )
         candidate_ids = [record.candidate_id for record in normalized_records]
         if len(candidate_ids) != len(set(candidate_ids)):
-            raise ArtifactProvenanceError("manifest records contain duplicate candidate identities")
+            raise ArtifactProvenanceError(
+                "manifest records contain duplicate candidate identities"
+            )
 
         raw_ownership = {} if ownership_metadata is None else ownership_metadata
         if not isinstance(raw_ownership, Mapping):
-            raise ArtifactProvenanceError("ownership_metadata must be a mapping or None")
+            raise ArtifactProvenanceError(
+                "ownership_metadata must be a mapping or None"
+            )
         if any(not isinstance(candidate_id, str) for candidate_id in raw_ownership):
-            raise ArtifactProvenanceError("ownership_metadata keys must be candidate IDs")
+            raise ArtifactProvenanceError(
+                "ownership_metadata keys must be candidate IDs"
+            )
         unknown = sorted(set(raw_ownership).difference(candidate_ids))
         if unknown:
             raise ArtifactProvenanceError(
@@ -465,6 +629,30 @@ class _ArtifactProvenance:
             )
             for candidate_id in sorted(raw_ownership)
         }
+
+        if not isinstance(failure_diagnostics, Sequence) or isinstance(
+            failure_diagnostics, (str, bytes)
+        ):
+            raise ArtifactProvenanceError(
+                "failure_diagnostics must be a sequence of mappings"
+            )
+        normalized_failures: list[dict[str, object]] = []
+        for index, failure in enumerate(failure_diagnostics):
+            if not isinstance(failure, Mapping):
+                raise ArtifactProvenanceError(
+                    "failure_diagnostics must contain only mappings"
+                )
+            normalized = _json_copy(failure, context=f"failure_diagnostics[{index}]")
+            if not isinstance(normalized, dict):
+                raise ArtifactProvenanceError(
+                    "failure_diagnostics entries must normalize to JSON objects"
+                )
+            normalized_failures.append(normalized)
+        normalized_failures.sort(
+            key=lambda item: _canonical_json(
+                item, context="failure diagnostic manifest record"
+            )
+        )
 
         manifest_records: list[dict[str, object]] = []
         for record in sorted(normalized_records, key=lambda item: item.candidate_id):
@@ -486,16 +674,21 @@ class _ArtifactProvenance:
             )
         manifest = {
             "version": _MANIFEST_VERSION,
+            "calculation_context": self._calculation_context,
+            "failure_diagnostics": normalized_failures,
             "records": manifest_records,
         }
         try:
-            encoded = json.dumps(
-                manifest,
-                sort_keys=True,
-                indent=2,
-                ensure_ascii=True,
-                allow_nan=False,
-            ) + "\n"
+            encoded = (
+                json.dumps(
+                    manifest,
+                    sort_keys=True,
+                    indent=2,
+                    ensure_ascii=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            )
         except (TypeError, ValueError) as exc:
             raise ArtifactProvenanceError(
                 "artifact manifest contains non-serializable state"

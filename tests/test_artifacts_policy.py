@@ -9,7 +9,6 @@ from GBOpt.artifacts.policy import ArtifactPolicyError, ArtifactRetentionPolicy
 from GBOpt.artifacts.rules import KeepBest, KeepIf, KeepRange
 from GBOpt.artifacts.types import CandidatePropertyContext
 
-
 _ATOM_DTYPE = np.dtype([("name", "U2"), ("x", float), ("y", float), ("z", float)])
 
 
@@ -62,7 +61,6 @@ def test_policy_sorts_rules_by_explicit_name_for_deterministic_identity():
 def test_property_provider_requires_explicit_version_contract():
     with pytest.raises(ArtifactPolicyError, match="property_provider_version"):
         ArtifactRetentionPolicy(property_provider=_provider)
-
 
 
 def test_lambda_property_provider_requires_explicit_persistent_name():
@@ -204,12 +202,11 @@ def test_successful_candidate_missing_active_rule_property_fails_during_acquisit
         policy.candidate_from_context(_context())
 
 
-
 def test_candidate_from_context_translates_invalid_lineage_to_policy_error():
     policy = ArtifactRetentionPolicy.keep_all()
 
     with pytest.raises(ArtifactPolicyError, match="retention candidate state"):
-        policy.candidate_from_context(_context(), lineage=("",))
+        policy.candidate_from_context(_context(), lineage=(,))
 
 
 def test_policy_evaluates_multiple_rules_independently():

@@ -25,8 +25,6 @@ from GBOpt.artifacts.types import (
 _STORE_VERSION = 1
 _RULE_REASON_PREFIX = "rule:"
 
-__all__ = ["ArtifactStore", "ArtifactStoreError"]
-
 
 class ArtifactStoreError(ArtifactError):
     """Raised when runtime artifact-store state or operations are invalid."""
@@ -58,6 +56,36 @@ def _normalize_source_path(path: object) -> str | None:
     return path
 
 
+def _record_from_state(raw_record: object) -> ArtifactRecord:
+    """Restore one immutable artifact record from serialized state.
+
+    :param raw_record: JSON-decoded record state.
+    :return: Validated immutable artifact record.
+    :raises ArtifactStoreError: If record or reference state is malformed.
+    """
+    if not isinstance(raw_record, dict):
+        raise ArtifactStoreError("artifact store record state is invalid")
+    try:
+        candidate = RetentionCandidate.from_state(raw_record["candidate"])
+        source_path = _normalize_source_path(raw_record.get("source_path"))
+        archive_path = _normalize_source_path(raw_record.get("archive_path"))
+        raw_pins = raw_record["pins"]
+        raw_reasons = raw_record["retention_reasons"]
+        if not isinstance(raw_pins, list) or not isinstance(raw_reasons, list):
+            raise ArtifactStoreError("artifact store references state is invalid")
+        pins = tuple(ArtifactPin(value) for value in raw_pins)
+        reasons = tuple(_normalize_reason(reason) for reason in raw_reasons)
+        return ArtifactRecord(
+            candidate=candidate,
+            source_path=source_path,
+            archive_path=archive_path,
+            pins=pins,
+            retention_reasons=reasons,
+        )
+    except (KeyError, TypeError, ValueError, ArtifactValueError) as exc:
+        raise ArtifactStoreError("artifact store state is malformed") from exc
+
+
 class ArtifactStore:
     """Track candidate artifacts, operational pins, and scientific retention reasons.
 
@@ -71,12 +99,14 @@ class ArtifactStore:
     def __init__(self, policy: ArtifactRetentionPolicy | None = None) -> None:
         """Initialize an empty runtime store.
 
-        :param policy: Optional retention policy, defaults to ``None``; preserves keep-all
-            behavior when omitted.
+        :param policy: Optional retention policy, defaults to ``None``; preserves
+            keep-all behavior when omitted.
         :raises ArtifactStoreError: If policy has the wrong type.
         """
         if policy is not None and not isinstance(policy, ArtifactRetentionPolicy):
-            raise ArtifactStoreError("policy must be an ArtifactRetentionPolicy or None")
+            raise ArtifactStoreError(
+                "policy must be an ArtifactRetentionPolicy or None"
+            )
         self.policy = policy
         self._candidates: dict[str, RetentionCandidate] = {}
         self._source_paths: dict[str, str | None] = {}
@@ -86,17 +116,11 @@ class ArtifactStore:
 
     @property
     def pruning_enabled(self) -> bool:
-        """Return whether unreferenced candidates may be reported as prunable.
-
-        :return: Whether a configured policy explicitly enables pruning.
-        """
+        """Return whether unreferenced candidates may be reported as prunable."""
         return self.policy is not None and self.policy.prune
 
     def __len__(self) -> int:
-        """Return the number of registered logical candidates.
-
-        :return: Registered candidate count.
-        """
+        """Return the number of registered logical candidates."""
         return len(self._candidates)
 
     def __contains__(self, candidate_id: object) -> bool:
@@ -128,15 +152,16 @@ class ArtifactStore:
     ) -> ArtifactRecord:
         """Register one evaluated candidate and refresh scientific membership.
 
-        Registration is idempotent only when both logical candidate state and source path
-        agree. A conflicting reuse of a stable candidate identity is rejected.
+        Registration is idempotent only when both logical candidate state and source
+        path agree. A conflicting reuse of a stable candidate identity is rejected.
 
         :param candidate: Evaluated scientific candidate metadata.
-        :param source_path: Keyword argument, optional, defaults to ``None``. Evaluator artifact
-            path.
+        :param source_path: Keyword argument, optional, defaults to ``None``. Evaluator
+            artifact path.
         :return: Current immutable record snapshot.
-        :raises ArtifactStoreError: If candidate state conflicts with an existing identity or
-            the configured policy cannot evaluate the prospective population.
+        :raises ArtifactStoreError: If candidate state conflicts with an existing
+            identity or the configured policy cannot evaluate the prospective
+            population.
         """
         if not isinstance(candidate, RetentionCandidate):
             raise ArtifactStoreError("candidate must be a RetentionCandidate")
@@ -145,7 +170,8 @@ class ArtifactStore:
         if candidate_id in self._candidates:
             if self._candidates[candidate_id] != candidate:
                 raise ArtifactStoreError(
-                    f"candidate identity {candidate_id!r} was reused for different state"
+                    f"candidate identity {candidate_id!r} was reused for different "
+                    "state"
                 )
             if self._source_paths[candidate_id] != normalized_path:
                 raise ArtifactStoreError(
@@ -247,8 +273,8 @@ class ArtifactStore:
         Rule evaluation completes before any reason is mutated, so a failing property or
         callback cannot partially update archive membership.
 
-        :raises ArtifactStoreError: If the policy cannot evaluate candidates or evaluated
-            membership violates store invariants.
+        :raises ArtifactStoreError: If the policy cannot evaluate candidates or
+            evaluated membership violates store invariants.
         """
         if self.policy is None:
             return
@@ -291,7 +317,8 @@ class ArtifactStore:
                 )
             if len(set(members)) != len(members):
                 raise ArtifactStoreError(
-                    f"retention rule {rule_name!r} returned duplicate candidate identities"
+                    f"retention rule {rule_name!r} returned duplicate candidate "
+                    "identities"
                 )
             unknown = sorted(set(members).difference(known))
             if unknown:
@@ -349,8 +376,8 @@ class ArtifactStore:
         """Return whether the evaluator source file may be removed after commit.
 
         Scientific reasons may be satisfied by a canonical archive copy. Restart pins
-        other than ``BEST_RESULT`` block source pruning until they are released or rebased;
-        ``BEST_RESULT`` may be satisfied by a validated canonical archive copy.
+        other than ``BEST_RESULT`` block source pruning until they are released or
+        rebased; ``BEST_RESULT`` may be satisfied by a validated canonical archive copy.
 
         :param candidate_id: Registered logical candidate identity.
         :return: Whether the source artifact is eligible for exact-file cleanup.
@@ -376,9 +403,9 @@ class ArtifactStore:
         :raises ArtifactStoreError: If candidate identity is malformed or unknown.
         """
         candidate_id = self._require_candidate(candidate_id)
-        # pyraisecontract: ignore=DOC115[ArtifactValueError]
-        #   Candidate, path, pin, and reason state is normalized on every store mutation,
-        #   so snapshot construction only revalidates already-enforced invariants.
+        # pyrc: ignore=DOC115[ArtifactValueError] Candidate, path, pin, and reason state
+        #   is normalized on every store mutation, so snapshot construction only
+        #   revalidates already-enforced invariants.
         return ArtifactRecord(
             candidate=self._candidates[candidate_id],
             source_path=self._source_paths[candidate_id],
@@ -391,9 +418,12 @@ class ArtifactStore:
         """Return all records in stable candidate-ID lexical order.
 
         :return: Immutable artifact records ordered by candidate identity.
-        :raises ArtifactStoreError: If internal candidate reference state is inconsistent.
+        :raises ArtifactStoreError: If internal candidate reference state is
+            inconsistent.
         """
-        return tuple(self.record(candidate_id) for candidate_id in sorted(self._candidates))
+        return tuple(
+            self.record(candidate_id) for candidate_id in sorted(self._candidates)
+        )
 
     def pins(self, candidate_id: str) -> tuple[ArtifactPin, ...]:
         """Return active operational pins in deterministic order.
@@ -427,7 +457,8 @@ class ArtifactStore:
         """Return all currently prunable candidate IDs in lexical order.
 
         :return: Logical identities currently eligible for later cleanup.
-        :raises ArtifactStoreError: If internal candidate reference state is inconsistent.
+        :raises ArtifactStoreError: If internal candidate reference state is
+            inconsistent.
         """
         return tuple(
             candidate_id
@@ -439,7 +470,8 @@ class ArtifactStore:
         """Return deterministic JSON-safe runtime store state.
 
         :return: Callback-free store state for checkpoint integration.
-        :raises ArtifactStoreError: If internal candidate reference state is inconsistent.
+        :raises ArtifactStoreError: If internal candidate reference state is
+            inconsistent.
         """
         return {
             "version": _STORE_VERSION,
@@ -456,6 +488,62 @@ class ArtifactStore:
             ],
         }
 
+    def _restore_record(self, record: ArtifactRecord) -> None:
+        """Install one validated record into restored runtime state.
+
+        :param record: Validated immutable artifact record.
+        :raises ArtifactStoreError: If the candidate identity is duplicated.
+        """
+        candidate_id = record.candidate_id
+        if candidate_id in self._candidates:
+            raise ArtifactStoreError(
+                f"duplicate candidate identity {candidate_id!r} in store state"
+            )
+        self._candidates[candidate_id] = record.candidate
+        self._source_paths[candidate_id] = record.source_path
+        self._archive_paths[candidate_id] = record.archive_path
+        self._pins[candidate_id] = set(record.pins)
+        self._reasons[candidate_id] = set(record.retention_reasons)
+
+    def _validate_restored_policy_membership(self) -> None:
+        """Verify persisted rule reasons against the configured runtime policy.
+
+        :raises ArtifactStoreError: If policy evaluation fails or persisted rule
+            membership does not match the configured policy.
+        """
+        if self.policy is None:
+            return
+        try:
+            expected_memberships = self.policy.evaluate(
+                tuple(self._candidates.values())
+            )
+        except ArtifactPolicyError as exc:
+            raise ArtifactStoreError(
+                "artifact store state cannot be evaluated by the configured policy"
+            ) from exc
+        self._validate_policy_memberships(
+            expected_memberships, candidate_ids=tuple(self._candidates)
+        )
+
+        expected_rule_reasons = {
+            candidate_id: set() for candidate_id in self._candidates
+        }
+        for rule_name, candidate_ids in expected_memberships.items():
+            reason = f"{_RULE_REASON_PREFIX}{rule_name}"
+            for candidate_id in candidate_ids:
+                expected_rule_reasons[candidate_id].add(reason)
+
+        configured_reasons = {
+            f"{_RULE_REASON_PREFIX}{name}" for name in self.policy.rule_names
+        }
+        for candidate_id, reasons in self._reasons.items():
+            actual = reasons.intersection(configured_reasons)
+            if actual != expected_rule_reasons[candidate_id]:
+                raise ArtifactStoreError(
+                    "artifact store rule membership does not match the configured "
+                    "policy"
+                )
+
     @classmethod
     def from_state(
         cls,
@@ -466,8 +554,8 @@ class ArtifactStore:
         """Restore deterministic runtime state and verify policy compatibility.
 
         :param state: JSON-decoded store state.
-        :param policy: Keyword argument, optional, defaults to ``None``. Runtime policy/callback
-            configuration.
+        :param policy: Keyword argument, optional, defaults to ``None``. Runtime
+            policy/callback configuration.
         :return: Restored in-memory store.
         :raises ArtifactStoreError: If state is malformed, policy identity differs, or
             persisted rule membership is inconsistent.
@@ -484,53 +572,10 @@ class ArtifactStore:
             raise ArtifactStoreError("artifact store records state must be a list")
 
         store = cls(policy=policy)
-        try:
-            for raw_record in raw_records:
-                if not isinstance(raw_record, dict):
-                    raise ArtifactStoreError("artifact store record state is invalid")
-                candidate = RetentionCandidate.from_state(raw_record["candidate"])
-                candidate_id = candidate.candidate_id
-                if candidate_id in store._candidates:
-                    raise ArtifactStoreError(
-                        f"duplicate candidate identity {candidate_id!r} in store state"
-                    )
-                source_path = _normalize_source_path(raw_record.get("source_path"))
-                archive_path = _normalize_source_path(raw_record.get("archive_path"))
-                raw_pins = raw_record["pins"]
-                raw_reasons = raw_record["retention_reasons"]
-                if not isinstance(raw_pins, list) or not isinstance(raw_reasons, list):
-                    raise ArtifactStoreError("artifact store references state is invalid")
-                pins = {ArtifactPin(value) for value in raw_pins}
-                reasons = {_normalize_reason(reason) for reason in raw_reasons}
-                store._candidates[candidate_id] = candidate
-                store._source_paths[candidate_id] = source_path
-                store._archive_paths[candidate_id] = archive_path
-                store._pins[candidate_id] = pins
-                store._reasons[candidate_id] = reasons
-        except (KeyError, TypeError, ValueError, ArtifactValueError) as exc:
-            raise ArtifactStoreError("artifact store state is malformed") from exc
-
-        if policy is not None:
-            try:
-                expected_memberships = policy.evaluate(tuple(store._candidates.values()))
-            except ArtifactPolicyError as exc:
-                raise ArtifactStoreError(
-                    "artifact store state cannot be evaluated by the configured policy"
-                ) from exc
-            expected_rule_reasons = {
-                candidate_id: set() for candidate_id in store._candidates
-            }
-            for rule_name, candidate_ids in expected_memberships.items():
-                reason = f"{_RULE_REASON_PREFIX}{rule_name}"
-                for candidate_id in candidate_ids:
-                    expected_rule_reasons[candidate_id].add(reason)
-            configured_reasons = {
-                f"{_RULE_REASON_PREFIX}{name}" for name in policy.rule_names
-            }
-            for candidate_id in store._candidates:
-                actual = store._reasons[candidate_id].intersection(configured_reasons)
-                if actual != expected_rule_reasons[candidate_id]:
-                    raise ArtifactStoreError(
-                        "artifact store rule membership does not match the configured policy"
-                    )
+        for raw_record in raw_records:
+            store._restore_record(_record_from_state(raw_record))
+        store._validate_restored_policy_membership()
         return store
+
+
+__all__ = ["ArtifactStore", "ArtifactStoreError"]

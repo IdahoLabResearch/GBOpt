@@ -39,9 +39,7 @@ def test_keep_best_selects_best_n_minimum():
 
 
 def test_keep_best_selects_best_n_maximum():
-    rule = KeepBest(
-        name="high_density", property="density", direction="max", count=2
-    )
+    rule = KeepBest(name="high_density", property="density", direction="max", count=2)
     candidates = [
         _candidate("a", 1.0, density=10.0),
         _candidate("b", 2.0, density=12.0),
@@ -61,7 +59,6 @@ def test_ranking_ties_use_candidate_id_lexical_order_in_both_directions():
     assert maximum.select(candidates) == ("a", "b", "c")
 
 
-
 def test_numeric_ranking_preserves_arbitrary_size_python_integers():
     rule = KeepBest(name="largest", property="rank", direction="max", count=2)
     candidates = [
@@ -71,7 +68,6 @@ def test_numeric_ranking_preserves_arbitrary_size_python_integers():
     ]
 
     assert rule.select(candidates) == ("huge", "larger")
-
 
 
 def test_ranking_rejects_mixed_property_value_families():
@@ -203,7 +199,6 @@ def test_keep_if_state_excludes_callback_object_and_includes_version():
     json.dumps(state, sort_keys=True)
 
 
-
 def test_rule_count_rejects_boolean_values():
     with pytest.raises(ArtifactRuleError, match="positive integer"):
         KeepBest(
@@ -229,7 +224,6 @@ def test_explicit_unbounded_opt_in_is_supported():
 
     assert rule.select([_candidate("b", 2.0), _candidate("a", 1.0)]) == ("a", "b")
     assert rule.to_state()["allow_unbounded"] is True
-
 
 
 def test_unbounded_qualification_rules_reject_unused_ranking_configuration():

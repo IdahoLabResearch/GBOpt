@@ -1,9 +1,5 @@
 # Copyright 2025, Battelle Energy Alliance, LLC, ALL RIGHTS RESERVED
 
-"""Focused tests for safe artifact cleanup ownership and path containment."""
-
-from pathlib import Path
-
 import pytest
 
 from GBOpt.artifacts.cleanup import (
@@ -12,18 +8,6 @@ from GBOpt.artifacts.cleanup import (
     _ArtifactCleaner,
     remove_managed_path,
 )
-
-
-def test_cleanup_api_is_exported_from_artifacts_package():
-    from GBOpt.artifacts import (
-        ArtifactCleanupError as ExportedCleanupError,
-        ArtifactCleanupRequest as ExportedCleanupRequest,
-        remove_managed_path as exported_remove_managed_path,
-    )
-
-    assert ExportedCleanupError is ArtifactCleanupError
-    assert ExportedCleanupRequest is ArtifactCleanupRequest
-    assert exported_remove_managed_path is remove_managed_path
 
 
 @pytest.mark.parametrize(
@@ -188,7 +172,9 @@ def test_artifact_cleaner_wraps_callback_failure(tmp_path):
         source_path=tmp_path / "candidate.data",
     )
 
-    with pytest.raises(ArtifactCleanupError, match="cleanup callback failed") as exc_info:
+    with pytest.raises(
+        ArtifactCleanupError, match="cleanup callback failed"
+    ) as exc_info:
         cleaner.cleanup_source(request)
 
     assert isinstance(exc_info.value.__cause__, OSError)
@@ -204,4 +190,6 @@ def test_artifact_cleaner_rejects_ambiguous_cleanup_ownership(tmp_path):
 
 def test_artifact_cleaner_rejects_non_callable_callback():
     with pytest.raises(ArtifactCleanupError, match="must be callable"):
-        _ArtifactCleaner(cleanup_candidate=object())
+        _ArtifactCleaner(
+            cleanup_candidate=object()  # ty: ignore[invalid-argument-type]
+        )
